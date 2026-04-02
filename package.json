@@ -1,0 +1,19 @@
+{
+  "name": "vpauto-extensions",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "db:push": "npm run db:push -w @vpauto/backend",
+    "db:studio": "npm run db:studio -w @vpauto/backend",
+    "db:seed": "npm run db:seed -w @vpauto/backend"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsx": "^4.19.0"
+  }
+}

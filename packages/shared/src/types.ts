@@ -1,0 +1,180 @@
+// ── Vehicle core types ──
+
+export interface VehicleIdentity {
+  reference: string;       // Internal VPauto reference (e.g., "11401745")
+  hashId: string;          // URL hash (e.g., "cc8d8fe05a")
+  brand: string;
+  model: string;
+  version: string;         // Full trim/version string
+  year: number;
+  color: string;
+  fuel: string;            // "Essence", "Diesel", "Electrique", etc.
+  transmission: string;    // "Manuelle", "Automatique"
+  engineSize?: number;     // cc
+  power?: number;          // ch
+  fiscalPower?: number;    // CV
+}
+
+export interface VehicleSnapshot {
+  id?: number;
+  vehicleId?: number;
+  reference: string;
+  hashId: string;
+  brand: string;
+  model: string;
+  version: string;
+  year: number;
+  mileage: number;
+  color: string;
+  fuel: string;
+  transmission: string;
+  engineSize?: number;
+  power?: number;
+  fiscalPower?: number;
+  doors?: number;
+  seats?: number;
+  co2?: number;
+  critair?: string;
+  euroStandard?: string;
+  bodyType?: string;
+
+  // Pricing
+  startingPrice?: number;
+  startingPriceHT?: number;
+  marketValue?: number;
+  newPrice?: number;
+  vatRecoverable: boolean;
+
+  // Sale info
+  city: string;
+  center?: string;
+  department?: string;
+  saleDate?: string;       // ISO date
+  saleTime?: string;
+  lotNumber?: number;
+
+  // Condition
+  technicalCheckUrl?: string;
+  conditionImageUrl?: string;
+  observations?: string;
+  maintenanceStatus?: string;
+  serviceHistory?: boolean;
+  firstOwner?: boolean;
+  warranty?: string;
+
+  // Equipment & options
+  equipment?: string[];
+
+  // Photos
+  photoUrls: string[];
+  cdnHash?: string;
+
+  // Source
+  sourceUrl: string;
+  scrapedAt: string;       // ISO datetime
+
+  // Status tracking
+  status: VehicleStatus;
+  soldPrice?: number;
+}
+
+export type VehicleStatus = 'available' | 'auction_live' | 'sold' | 'unsold' | 'removed';
+
+export type MatchLevel = 'exact' | 'same_model' | 'similar';
+
+export interface MatchResult {
+  level: MatchLevel;
+  score: number;           // 0-100
+  vehicleId: number;
+  snapshot: VehicleSnapshot;
+  reasons: string[];       // Why this matched
+}
+
+// ── Comparison ──
+
+export interface ComparisonField {
+  label: string;
+  current: string | number | undefined;
+  compared: string | number | undefined;
+  diff?: string;           // Human-readable difference
+  highlight: 'better' | 'worse' | 'neutral' | 'same';
+}
+
+export interface VehicleComparison {
+  current: VehicleSnapshot;
+  compared: VehicleSnapshot;
+  matchLevel: MatchLevel;
+  matchScore: number;
+  fields: ComparisonField[];
+}
+
+// ── History ──
+
+export interface VehiclePassage {
+  snapshotId: number;
+  date: string;
+  city: string;
+  center?: string;
+  status: VehicleStatus;
+  startingPrice?: number;
+  soldPrice?: number;
+  mileage: number;
+  observations?: string;
+  technicalCheckUrl?: string;
+  sourceUrl: string;
+  photoUrl?: string;
+}
+
+export interface VehicleHistory {
+  vehicleId: number;
+  identity: VehicleIdentity;
+  passages: VehiclePassage[];
+  totalPassages: number;
+  firstSeen: string;
+  lastSeen: string;
+  priceHistory: { date: string; price: number }[];
+  mileageHistory: { date: string; mileage: number }[];
+}
+
+// ── Badge types ──
+
+export type BadgeType = 'new' | 'seen' | 'price_drop' | 'price_up' | 'reappeared';
+
+export interface VehicleBadge {
+  type: BadgeType;
+  label: string;
+  detail?: string;         // e.g., "Vu 3 fois" or "-500€"
+}
+
+// ── API types ──
+
+export interface ApiResponse<T> {
+  success: boolean;
+  data?: T;
+  error?: string;
+}
+
+export interface SearchSimilarParams {
+  brand: string;
+  model: string;
+  year?: number;
+  fuel?: string;
+  transmission?: string;
+  maxResults?: number;
+}
+
+// ── Messages between extension components ──
+
+export type MessageType =
+  | 'VEHICLE_DETECTED'
+  | 'VEHICLE_LIST_DETECTED'
+  | 'GET_VEHICLE_HISTORY'
+  | 'GET_SIMILAR_VEHICLES'
+  | 'GET_VEHICLE_BADGES'
+  | 'SNAPSHOT_SAVED'
+  | 'OPEN_SIDE_PANEL';
+
+export interface ExtensionMessage {
+  type: MessageType;
+  payload?: unknown;
+}

@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "baseUrl": ".",
+    "paths": {
+      "@vpauto/shared": ["../shared/src/index.ts"],
+      "@vpauto/shared/*": ["../shared/src/*"]
+    }
+  },
+  "include": ["src", "wxt.config.ts"]
+}

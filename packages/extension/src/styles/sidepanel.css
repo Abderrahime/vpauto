@@ -1,0 +1,454 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  color: #1a1a2e;
+  background: #f8f9fc;
+  overflow-x: hidden;
+}
+
+/* ── Layout ── */
+.vpa-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100%;
+  min-width: 320px;
+}
+
+.vpa-header {
+  background: linear-gradient(135deg, #003366 0%, #005299 100%);
+  color: white;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.vpa-header-logo {
+  font-size: 20px;
+}
+
+.vpa-header-title {
+  flex: 1;
+}
+
+.vpa-header-title h1 {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.vpa-header-title p {
+  font-size: 11px;
+  opacity: 0.75;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Tabs ── */
+.vpa-tabs {
+  display: flex;
+  background: white;
+  border-bottom: 2px solid #e8ecf0;
+  flex-shrink: 0;
+}
+
+.vpa-tab {
+  flex: 1;
+  padding: 9px 4px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 500;
+  color: #666;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: all 0.15s;
+  text-align: center;
+}
+
+.vpa-tab:hover {
+  color: #003366;
+  background: #f0f4ff;
+}
+
+.vpa-tab.active {
+  color: #003366;
+  border-bottom-color: #f47920;
+  font-weight: 700;
+}
+
+/* ── Content ── */
+.vpa-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+/* ── Status screens ── */
+.vpa-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 10px;
+  color: #888;
+  text-align: center;
+  padding: 20px;
+}
+
+.vpa-status-icon { font-size: 32px; }
+.vpa-status-title { font-size: 14px; font-weight: 600; color: #444; }
+.vpa-status-sub { font-size: 12px; line-height: 1.5; }
+
+/* ── Vehicle identity card ── */
+.vpa-identity {
+  background: white;
+  border-radius: 10px;
+  border: 1px solid #e8ecf0;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.vpa-identity-photo {
+  width: 100%;
+  height: 130px;
+  object-fit: cover;
+  display: block;
+  background: #f0f4ff;
+}
+
+.vpa-identity-body {
+  padding: 10px 12px;
+}
+
+.vpa-identity-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #003366;
+  line-height: 1.3;
+}
+
+.vpa-identity-sub {
+  font-size: 11px;
+  color: #666;
+  margin-top: 3px;
+}
+
+.vpa-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.vpa-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.vpa-badge-new    { background: #dcfce7; color: #166534; }
+.vpa-badge-seen   { background: #dbeafe; color: #1e40af; }
+.vpa-badge-drop   { background: #dcfce7; color: #166534; }
+.vpa-badge-up     { background: #fee2e2; color: #991b1b; }
+.vpa-badge-again  { background: #fef3c7; color: #92400e; }
+
+/* ── Stats strip ── */
+.vpa-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.vpa-stat {
+  background: white;
+  border-radius: 8px;
+  border: 1px solid #e8ecf0;
+  padding: 8px 6px;
+  text-align: center;
+}
+
+.vpa-stat-value {
+  font-size: 16px;
+  font-weight: 700;
+  color: #003366;
+}
+
+.vpa-stat-label {
+  font-size: 10px;
+  color: #888;
+  margin-top: 1px;
+}
+
+/* ── Section ── */
+.vpa-section {
+  margin-bottom: 10px;
+}
+
+.vpa-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #888;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* ── Passage card ── */
+.vpa-passage {
+  background: white;
+  border-radius: 8px;
+  border: 1px solid #e8ecf0;
+  padding: 9px 11px;
+  margin-bottom: 6px;
+  position: relative;
+}
+
+.vpa-passage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 5px;
+}
+
+.vpa-passage-date {
+  font-weight: 600;
+  font-size: 12px;
+  color: #003366;
+}
+
+.vpa-passage-city {
+  font-size: 11px;
+  color: #666;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.vpa-passage-status {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 10px;
+}
+
+.status-available  { background: #dbeafe; color: #1e40af; }
+.status-sold       { background: #dcfce7; color: #166534; }
+.status-unsold     { background: #fee2e2; color: #991b1b; }
+.status-removed    { background: #f3f4f6; color: #6b7280; }
+.status-auction_live { background: #fef3c7; color: #92400e; }
+
+.vpa-passage-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 11px;
+  color: #555;
+}
+
+.vpa-passage-obs {
+  margin-top: 5px;
+  font-size: 11px;
+  color: #666;
+  background: #fafafa;
+  border-radius: 5px;
+  padding: 5px 7px;
+  line-height: 1.4;
+}
+
+/* ── Price chart ── */
+.vpa-chart {
+  background: white;
+  border-radius: 8px;
+  border: 1px solid #e8ecf0;
+  padding: 10px;
+  margin-bottom: 10px;
+}
+
+/* ── Comparison table ── */
+.vpa-compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  background: white;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #e8ecf0;
+  margin-bottom: 10px;
+}
+
+.vpa-compare-table th {
+  background: #f0f4ff;
+  color: #003366;
+  font-weight: 600;
+  padding: 7px 8px;
+  text-align: left;
+  border-bottom: 1px solid #e8ecf0;
+}
+
+.vpa-compare-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #f3f4f6;
+  vertical-align: top;
+}
+
+.vpa-compare-table tr:last-child td { border-bottom: none; }
+.compare-better { color: #166534; font-weight: 600; }
+.compare-worse  { color: #991b1b; font-weight: 600; }
+.compare-neutral { color: #555; }
+
+/* ── Similar vehicle card ── */
+.vpa-similar-card {
+  background: white;
+  border-radius: 8px;
+  border: 1px solid #e8ecf0;
+  padding: 9px 11px;
+  margin-bottom: 6px;
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+}
+
+.vpa-similar-photo {
+  width: 58px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 5px;
+  background: #f0f4ff;
+  flex-shrink: 0;
+}
+
+.vpa-similar-body { flex: 1; min-width: 0; }
+
+.vpa-similar-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #003366;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vpa-similar-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 10px;
+  color: #666;
+  margin-top: 3px;
+}
+
+.vpa-score {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+
+.score-high   { background: #dcfce7; color: #166534; }
+.score-medium { background: #fef3c7; color: #92400e; }
+.score-low    { background: #f3f4f6; color: #6b7280; }
+
+/* ── Actions ── */
+.vpa-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 9px;
+  border-radius: 8px;
+  border: 1px solid #e8ecf0;
+  background: white;
+  color: #003366;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: 6px;
+  transition: all 0.15s;
+}
+
+.vpa-action-btn:hover { background: #f0f4ff; border-color: #003366; }
+.vpa-action-btn.primary { background: #003366; color: white; border-color: #003366; }
+.vpa-action-btn.primary:hover { background: #005299; }
+.vpa-action-btn.orange  { background: #f47920; color: white; border-color: #f47920; }
+.vpa-action-btn.orange:hover  { background: #d4661a; }
+
+/* ── Offline banner ── */
+.vpa-offline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  border-radius: 7px;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: #92400e;
+  margin-bottom: 10px;
+}
+
+/* ── Loading ── */
+.vpa-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: #888;
+  gap: 8px;
+  font-size: 12px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.vpa-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #e0e7ff;
+  border-top-color: #003366;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+/* ── CT link ── */
+.vpa-ct-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #1e40af;
+  text-decoration: none;
+  padding: 3px 8px;
+  background: #dbeafe;
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+.vpa-ct-link:hover { background: #bfdbfe; }
+
+/* ── Diff indicators ── */
+.diff-positive { color: #166534; }
+.diff-negative { color: #991b1b; }
+.diff-neutral  { color: #6b7280; }

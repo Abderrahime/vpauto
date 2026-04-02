@@ -1,0 +1,121 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// A unique vehicle identity, deduplicated across snapshots
+model Vehicle {
+  id          Int       @id @default(autoincrement())
+  reference   String?   // VPauto internal reference (e.g., "11401745")
+  hashId      String?   // URL hash ID (e.g., "cc8d8fe05a")
+  brand       String
+  model       String
+  version     String    @default("")
+  year        Int
+  color       String    @default("")
+  fuel        String    @default("")
+  transmission String   @default("")
+  engineSize  Int?      // cc
+  power       Int?      // ch
+  fiscalPower Int?      // CV
+
+  firstSeenAt DateTime  @default(now())
+  lastSeenAt  DateTime  @default(now())
+
+  snapshots   Snapshot[]
+  watchlist   Watchlist?
+
+  @@unique([reference])
+  @@index([brand, model])
+  @@index([hashId])
+  @@index([brand, model, year])
+}
+
+/// A point-in-time snapshot of a vehicle on VPauto
+model Snapshot {
+  id              Int       @id @default(autoincrement())
+  vehicleId       Int
+  vehicle         Vehicle   @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  // Identity (denormalized for historical record)
+  reference       String?
+  hashId          String?
+  brand           String
+  model           String
+  version         String    @default("")
+  year            Int
+  mileage         Int
+  color           String    @default("")
+  fuel            String    @default("")
+  transmission    String    @default("")
+  engineSize      Int?
+  power           Int?
+  fiscalPower     Int?
+  doors           Int?
+  seats           Int?
+  co2             Int?
+  critair         String?
+  euroStandard    String?
+  bodyType        String?
+
+  // Pricing
+  startingPrice     Float?
+  startingPriceHT   Float?
+  marketValue       Float?
+  newPrice          Float?
+  vatRecoverable    Boolean @default(false)
+
+  // Sale info
+  city            String
+  center          String?
+  department      String?
+  saleDate        String?     // ISO date string
+  saleTime        String?
+  lotNumber       Int?
+
+  // Condition
+  technicalCheckUrl   String?
+  conditionImageUrl   String?
+  observations        String?   // JSON or text
+  maintenanceStatus   String?
+  serviceHistory      Boolean?
+  firstOwner          Boolean?
+  warranty            String?
+
+  // Equipment stored as JSON string
+  equipment       String?     // JSON array
+
+  // Photos stored as JSON string
+  photoUrls       String      @default("[]")  // JSON array
+  cdnHash         String?
+
+  // Source
+  sourceUrl       String
+  scrapedAt       DateTime    @default(now())
+
+  // Status
+  status          String      @default("available") // available, auction_live, sold, unsold, removed
+  soldPrice       Float?
+
+  @@index([vehicleId])
+  @@index([brand, model])
+  @@index([city])
+  @@index([scrapedAt])
+  @@index([status])
+  @@index([reference])
+}
+
+/// User watchlist
+model Watchlist {
+  id          Int       @id @default(autoincrement())
+  vehicleId   Int       @unique
+  vehicle     Vehicle   @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  notes       String?
+  alertOnPrice  Boolean @default(true)
+  alertOnReappear Boolean @default(true)
+  createdAt   DateTime  @default(now())
+}

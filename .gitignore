@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.output/
+*.db
+*.db-journal
+.env
+.env.local
+.turbo/
+.wxt/
+web-ext-artifacts/
+.DS_Store
+.claude/

@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "baseUrl": ".",
+    "paths": {
+      "@vpauto/shared": ["../shared/src/index.ts"],
+      "@vpauto/shared/*": ["../shared/src/*"]
+    }
+  },
+  "include": ["src"]
+}
