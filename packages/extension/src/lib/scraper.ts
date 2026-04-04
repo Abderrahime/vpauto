@@ -1,6 +1,8 @@
 import type { VehicleSnapshot, VehicleStatus } from '@vpauto/shared';
 import { VPAUTO_BASE_URL, VPAUTO_VEHICLE_URL_PATTERN } from '@vpauto/shared';
 
+const UNSOLD_TEXT_RE = /n[''\u2019]a\s*pas\s*[eé]t[eé]\s*adjug[eé]|pas\s*[eé]t[eé]\s*adjug[eé]|pas\s*adjug[eé]|non\s*adjug[eé]|invendu|apr[eè]s[\s-]*vente|ordre\s+d[''\u2019]achat\s+d[''\u2019]apr[eè]s[\s-]*vente/i;
+
 // ── List page scraper ──────────────────────────────────────────────────────
 
 /**
@@ -47,11 +49,65 @@ export function waitForVehicleCards(timeout = 8000): Promise<NodeListOf<Element>
  *   </li>
  */
 export function scrapeVehicleList(): Partial<VehicleSnapshot>[] {
-  const links = document.querySelectorAll<HTMLAnchorElement>('a[href*="/vehicule/"]');
+  return scrapeVehicleListFromDocument(document);
+}
+
+/**
+ * Detect pagination info from the current list page.
+ * Returns { currentPage, totalPages, baseUrl }
+ */
+export function detectPagination(): { currentPage: number; totalPages: number; baseUrl: string } {
+  const url = new URL(window.location.href);
+  const currentPage = parseInt(url.searchParams.get('page') || '1');
+
+  // Find the last page number from pagination links
+  let totalPages = 1;
+  const paginationLinks = document.querySelectorAll('a[href*="page="]');
+  for (const link of paginationLinks) {
+    const href = link.getAttribute('href') || '';
+    const pageMatch = href.match(/page=(\d+)/);
+    if (pageMatch) {
+      const p = parseInt(pageMatch[1]);
+      if (p > totalPages) totalPages = p;
+    }
+  }
+
+  // Base URL without page param
+  url.searchParams.delete('page');
+  const baseUrl = url.toString();
+
+  console.log(`[VPauto] Pagination: page ${currentPage}/${totalPages}`);
+  return { currentPage, totalPages, baseUrl };
+}
+
+/**
+ * Scrape vehicles from a remote page by fetching its HTML.
+ * Uses fetch() + DOMParser to extract vehicle data without navigating.
+ */
+export async function scrapeRemotePage(pageUrl: string): Promise<Partial<VehicleSnapshot>[]> {
+  try {
+    const res = await fetch(pageUrl, { credentials: 'include' });
+    if (!res.ok) {
+      console.warn(`[VPauto] Failed to fetch page: ${res.status} ${pageUrl}`);
+      return [];
+    }
+    const html = await res.text();
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    return scrapeVehicleListFromDocument(doc);
+  } catch (err) {
+    console.warn(`[VPauto] Error fetching page ${pageUrl}:`, err);
+    return [];
+  }
+}
+
+/**
+ * Scrape vehicle list from a given Document (current page or parsed remote page).
+ */
+export function scrapeVehicleListFromDocument(doc: Document): Partial<VehicleSnapshot>[] {
+  const links = doc.querySelectorAll<HTMLAnchorElement>('a[href*="/vehicule/"]');
   const vehicles: Partial<VehicleSnapshot>[] = [];
   const seen = new Set<string>();
-
-  console.log(`[VPauto] scrapeVehicleList: found ${links.length} links with /vehicule/`);
 
   for (const a of links) {
     try {
@@ -62,13 +118,9 @@ export function scrapeVehicleList(): Partial<VehicleSnapshot>[] {
       if (seen.has(hashId)) continue;
       seen.add(hashId);
 
-      // Model: <h3> element (this is reliable)
       const model = a.querySelector('h3')?.textContent?.trim() || '';
-
-      // Image
       const img = a.querySelector('img')?.getAttribute('src') || '';
 
-      // Collect ALL direct child divs' text content for pattern matching
       const childTexts: string[] = [];
       for (const child of a.children) {
         const text = child.textContent?.trim() || '';
@@ -77,10 +129,8 @@ export function scrapeVehicleList(): Partial<VehicleSnapshot>[] {
         }
       }
 
-      // Full text of the card
       const fullText = a.textContent || '';
 
-      // Brand: first all-caps word/line (e.g. "RENAULT", "BMW", "TESLA")
       let brand = '';
       for (const text of childTexts) {
         if (text === text.toUpperCase() && /^[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜÇ\s-]+$/.test(text) && text.length >= 2 && text.length <= 30) {
@@ -89,7 +139,6 @@ export function scrapeVehicleList(): Partial<VehicleSnapshot>[] {
         }
       }
 
-      // Year + km: pattern "2022 - 21440 Km" from child divs
       let year = 0;
       let mileage = 0;
       for (const text of childTexts) {
@@ -101,7 +150,6 @@ export function scrapeVehicleList(): Partial<VehicleSnapshot>[] {
           break;
         }
       }
-      // Fallback from full text
       if (!year) {
         const ym = fullText.match(/(\d{4})\s*[-–]/);
         if (ym) year = parseInt(ym[1]);
@@ -111,58 +159,97 @@ export function scrapeVehicleList(): Partial<VehicleSnapshot>[] {
         if (km) mileage = parseInt(km[1]);
       }
 
-      // Price: "Mise à prix 14900€" or any "XXXXX€" pattern from child divs
+      // ── Starting price: specifically from "Mise à prix" text ──
+      // IMPORTANT: Don't just take the first price — that could be the ADJUGÉ sold price
       let startingPrice: number | undefined;
       for (const text of childTexts) {
-        const priceMatch = text.replace(/\s/g, '').match(/([\d]+)\s*€/);
-        if (priceMatch) {
-          startingPrice = parseInt(priceMatch[1]);
+        const miseAPrix = text.replace(/\s/g, '').match(/[Mm]ise\s*(?:à|a)\s*prix\s*([\d]+)\s*€?/i)
+          || text.replace(/\s/g, '').match(/Miseàprix([\d]+)€/i);
+        if (miseAPrix) {
+          startingPrice = parseInt(miseAPrix[1]);
           break;
         }
       }
-      // Fallback
+      // Fallback: search fullText for "Mise à prix" line
       if (startingPrice === undefined) {
-        const pm = fullText.replace(/\s/g, '').match(/([\d]+)€/);
-        if (pm) startingPrice = parseInt(pm[1]);
+        const miseMatch = fullText.replace(/\s/g, '').match(/[Mm]ise(?:à|a)prix([\d]+)€/i);
+        if (miseMatch) {
+          startingPrice = parseInt(miseMatch[1]);
+        }
+      }
+      // Last resort: take a price that is NOT from ADJUGÉ section
+      if (startingPrice === undefined) {
+        for (const text of childTexts) {
+          if (/adjug[eé]/i.test(text)) continue; // Skip ADJUGÉ line
+          const priceMatch = text.replace(/\s/g, '').match(/([\d]+)\s*€/);
+          if (priceMatch) {
+            startingPrice = parseInt(priceMatch[1]);
+            break;
+          }
+        }
       }
 
-      // Lot + city: "N° 1 Bordeaux" or "N° 1 DEPT : 69"
       const lotMatch = fullText.match(/N°?\s*(\d+)\s+([\wéèêëàâäôöùûüïîç\s:.-]+)/i);
       const lotNumber = lotMatch ? parseInt(lotMatch[1]) : undefined;
       let city = lotMatch ? lotMatch[2].replace(/DEPT\s*:\s*/i, 'Dept ').trim() : '';
-      // Clean city: stop at first non-city character pattern
-      city = city.split(/\d{4}/)[0].trim(); // Stop before year if merged
+      city = city.split(/\d{4}/)[0].trim();
 
-      // CDN hash from thumbnail URL
       const cdnHashMatch = img.match(/cdn\.vpauto\.fr\/([^_/]+)/);
       const cdnHash = cdnHashMatch?.[1];
 
-      vehicles.push({
-        hashId,
-        brand,
-        model,
-        version: model,
-        year,
-        mileage,
-        city,
-        lotNumber,
-        startingPrice,
-        photoUrls: img ? [img] : [],
-        cdnHash,
+      // ── Detect auction status ──
+      let status: VehicleStatus = 'available';
+      let soldPrice: number | undefined;
+      const cardText = fullText;
+
+      // Check "pas adjugé" / "non adjugé" FIRST (before "adjugé")
+      if (UNSOLD_TEXT_RE.test(cardText)) {
+        status = 'unsold';
+      } else if (/adjug[eé]/i.test(cardText)) {
+        status = 'sold';
+        // Price near "adjugé" — check up to 100 chars after (DOM text may have extra content between)
+        const adjMatch = cardText.match(/adjug[eé][\s\S]{0,100}?([\d][\d\s]*)\s*€/i);
+        if (adjMatch) {
+          soldPrice = parseInt(adjMatch[1].replace(/\s/g, ''));
+        }
+        // Fallback: look for a child div/span with a price that is NOT the "Mise à prix"
+        if (!soldPrice) {
+          for (const child of a.children) {
+            const text = child.textContent?.trim() || '';
+            if (/adjug[eé]/i.test(text)) {
+              const priceMatch = text.replace(/\s/g, '').match(/([\d]+)\s*€/);
+              if (priceMatch) {
+                soldPrice = parseInt(priceMatch[1]);
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // ── Detect "véhicule non roulant" ──
+      const isNonRoulant = /non\s*roulant|hors\s*d[''\u2019]usage|[eé]pave|accident[eé]/i.test(fullText);
+      const observations = isNonRoulant ? 'Véhicule non roulant' : '';
+
+      const vehicle: Partial<VehicleSnapshot> = {
+        hashId, brand, model, version: model,
+        year, mileage, city, lotNumber, startingPrice,
+        photoUrls: img ? [img] : [], cdnHash,
         sourceUrl: `${VPAUTO_BASE_URL}${href}`,
-        fuel: '',
-        transmission: '',
-        color: '',
+        fuel: '', transmission: '', color: '',
         vatRecoverable: false,
         scrapedAt: new Date().toISOString(),
-        status: 'available',
-      });
+        status,
+      };
+      if (soldPrice) vehicle.soldPrice = soldPrice;
+      if (observations) vehicle.observations = observations;
+
+      vehicles.push(vehicle);
     } catch {
       continue;
     }
   }
 
-  console.log(`[VPauto] scrapeVehicleList: extracted ${vehicles.length} vehicles`);
   return vehicles;
 }
 
@@ -182,22 +269,44 @@ export function scrapeVehicleDetail(): VehicleSnapshot | null {
     const kv = extractKeyValues(document.body);
 
     // ── Title / brand / model ──
-    const h1 = document.querySelector('h1')?.textContent?.trim() || '';
-    // Brand is usually in a dedicated span or the first all-caps word
-    const brandEl = document.querySelector('span.marque, .brand, [class*="marque"]');
-    const brand = (brandEl?.textContent?.trim() || extractBrand(h1)).toUpperCase();
-    const version = h1.replace(new RegExp(brand, 'i'), '').trim() || h1;
+    // Most reliable source: document.title = "TESLA MODEL 3 Standard Range Plus RWD Bleu foncé métal | VPauto.fr"
+    // Extract vehicle name by removing " | VPauto.fr" suffix and optional color suffix
+    let titleText = '';
+    const pageTitle = document.title || '';
+    const titleClean = pageTitle.replace(/\s*\|\s*VPauto\.fr$/i, '').trim();
+    if (titleClean && titleClean.length > 3) {
+      titleText = titleClean;
+    }
+    // Fallback: try URL slug
+    if (!titleText) {
+      const slugMatch = url.match(/\/vehicule\/[a-f0-9]+\/(.+?)(?:\?|$)/);
+      if (slugMatch) {
+        titleText = slugMatch[1].replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      }
+    }
+    const brand = extractBrand(titleText).toUpperCase();
+    // Remove brand prefix from title to get version
+    let version = titleText.replace(new RegExp('^' + brand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'), '').trim() || titleText;
+    // Remove color suffix if present (colors from KV will be extracted later)
+    // Common patterns: "Bleu foncé métal", "Gris médium métal", "Noir", "Blanc nacré"
+    const colorSuffixPattern = /\s+(Noir|Blanc|Bleu|Rouge|Gris|Vert|Jaune|Orange|Marron|Beige|Argent|Bronze|Bordeaux|Violet)[\wéèêëàâäôöùûüïîç\s]*$/i;
+    version = version.replace(colorSuffixPattern, '').trim();
     const model = extractModel(version);
 
-    // ── Reference (7+ digit number) ──
+    // ── Reference (from subtitle line "2021 - 72429 km ... Ref. : 11396385") ──
     const bodyText = document.body.innerText;
-    const refMatch = bodyText.match(/(?:Ref\.?\s*:?\s*|Référence\s*:?\s*|N°\s*lot\s*:?\s*)(\d{7,})/i)
-      || bodyText.match(/\b(\d{8,})\b/);
+    const refMatch = bodyText.match(/Ref\.?\s*:?\s*(\d{7,})/i);
     const reference = refMatch?.[1] || '';
 
+    // ── Year / mileage from subtitle line or kv ──
+    // Subtitle: "2021 - 72429 km  Vente à partir de 11:00  Ref. : 11396385"
+    const subtitleMatch = bodyText.match(/(\d{4})\s*[-–]\s*([\d\s]+)\s*km/i);
+    const yearFromSubtitle = subtitleMatch ? parseInt(subtitleMatch[1]) : 0;
+    const mileageFromSubtitle = subtitleMatch ? parseInt(subtitleMatch[2].replace(/\s/g, '')) : 0;
+
     // ── Specs from key/value pairs ──
-    const year         = parseYear(kv['année'] || kv['annee'] || kv['mise en circulation'] || '');
-    const mileage      = parseKm(kv['kilométrage'] || kv['kilometrage'] || '');
+    const year         = parseYear(kv['année'] || kv['annee'] || kv['mise en circulation'] || '') || yearFromSubtitle;
+    const mileage      = parseKm(kv['kilométrage'] || kv['kilometrage'] || '') || mileageFromSubtitle;
     const color        = kv['couleur'] || '';
     const fuel         = kv['énergie'] || kv['energie'] || kv['carburant'] || '';
     const transmission = kv['boîte'] || kv['boite'] || kv['transmission'] || '';
@@ -214,11 +323,14 @@ export function scrapeVehicleDetail(): VehicleSnapshot | null {
     const bodyType     = kv['carrosserie'] || undefined;
 
     // ── Pricing ──
-    const startingPrice  = parsePrice(bodyText, /mise\s*(?:à|a)\s*prix[^€\d]*([\d\s]+)\s*€/i);
-    const startingPriceHT = parsePrice(bodyText, /prix\s+ht[^€\d]*([\d\s]+)\s*€/i);
-    const marketValue    = parsePrice(bodyText, /cote[^€\d]*([\d\s]+)\s*€/i);
-    const newPrice       = parsePrice(bodyText, /prix\s+neuf[^€\d]*([\d\s]+)\s*€/i);
-    const vatRecoverable = /tva\s+récupérable|tva\s+recuperable/i.test(bodyText);
+    // VPauto shows "Mise à prix¹" with a footnote superscript, then "19400 €" on next line
+    // Use a targeted approach: find the price amount near "Mise à prix"
+    const startingPrice  = parsePriceFromPage(bodyText);
+    const startingPriceHT = parsePrice(bodyText, /(?:[\d\s]+),?\d*\s*€\s*HT|(\d[\d\s]*)\s*€\s*HT/i)
+      || parsePrice(bodyText, /([\d\s]+),?\d*\s*€\s*HT/i);
+    const marketValue    = parseLabelledPrice(bodyText, 'cote');
+    const newPrice       = parseLabelledPrice(bodyText, 'prix neuf');
+    const vatRecoverable = /tva\s*:\s*oui|tva\s+récupérable|tva\s+recuperable/i.test(bodyText);
 
     // ── Sale info ──
     const city       = extractCity(kv, bodyText);
@@ -230,7 +342,11 @@ export function scrapeVehicleDetail(): VehicleSnapshot | null {
     // ── Condition ──
     const technicalCheckUrl = (document.querySelector('a[href*="_CT.pdf"]') as HTMLAnchorElement)?.href;
     const conditionImageUrl = (document.querySelector('img[src*="_ET."]') as HTMLImageElement)?.src;
-    const observations      = extractObservations(document.body);
+    const isNonRoulant      = /non\s*roulant|hors\s*d[''\u2019]usage|[eé]pave|accident[eé]/i.test(bodyText);
+    const baseObservations  = extractObservations(document.body);
+    const observations      = isNonRoulant
+      ? (baseObservations ? `Véhicule non roulant | ${baseObservations}` : 'Véhicule non roulant')
+      : baseObservations;
     const maintenanceStatus = kv['entretien'] || undefined;
     const serviceHistory    = /carnet.*oui|oui.*carnet/i.test(bodyText) || undefined;
     const firstOwner        = /1[eè]re?\s*main|premi[eè]re?\s*main/i.test(bodyText) || undefined;
@@ -250,25 +366,65 @@ export function scrapeVehicleDetail(): VehicleSnapshot | null {
     }
     const cdnHash = [...cdnHashes][0];
 
-    // ── Status ──
+    // ── Status & sold price ──
+    // IMPORTANT: Check NEGATIVE ("n'a pas été adjugé") BEFORE positive ("adjugé")
+    // because the word "adjugé" appears in both cases
     let status: VehicleStatus = 'available';
-    if (/enchère\s+en\s+cours/i.test(bodyText)) status = 'auction_live';
+    let soldPrice: number | undefined;
 
-    return {
+    if (UNSOLD_TEXT_RE.test(bodyText)) {
+      // "Ce véhicule n'a pas été adjugé." → unsold
+      status = 'unsold';
+    } else if (/adjug[eé]/i.test(bodyText)) {
+      // "ADJUGÉ 24300 €" or "Véhicule adjugé\n24300 €" → sold
+      status = 'sold';
+      const adjugeMatch = bodyText.match(/adjug[eé][\s\S]{0,30}?([\d][\d\s]*)\s*€/i);
+      if (adjugeMatch) {
+        soldPrice = parseInt(adjugeMatch[1].replace(/\s/g, ''));
+      }
+    } else if (/vente\s+en\s+cours|ench[eè]re\s+en\s+cours/i.test(bodyText)) {
+      status = 'auction_live';
+    }
+
+    // Build snapshot, stripping undefined/null optional fields to avoid Zod issues
+    const snapshot: VehicleSnapshot = {
       reference, hashId, brand, model, version,
       year, mileage, color, fuel, transmission,
-      engineSize, power, fiscalPower, doors, seats, co2,
-      critair, euroStandard, bodyType,
-      startingPrice, startingPriceHT, marketValue, newPrice, vatRecoverable,
-      city, center: city, department,
-      saleDate, saleTime, lotNumber,
-      technicalCheckUrl, conditionImageUrl,
-      observations, maintenanceStatus, serviceHistory, firstOwner, warranty,
-      equipment, photoUrls, cdnHash,
-      sourceUrl: url,
+      city: city || '', center: city || '',
+      photoUrls, sourceUrl: url,
       scrapedAt: new Date().toISOString(),
-      status,
+      status, vatRecoverable,
     };
+    // Only add optional fields if they have actual values
+    if (engineSize) snapshot.engineSize = engineSize;
+    if (power) snapshot.power = power;
+    if (fiscalPower) snapshot.fiscalPower = fiscalPower;
+    if (doors) snapshot.doors = doors;
+    if (seats) snapshot.seats = seats;
+    if (co2) snapshot.co2 = co2;
+    if (critair) snapshot.critair = critair;
+    if (euroStandard) snapshot.euroStandard = euroStandard;
+    if (bodyType) snapshot.bodyType = bodyType;
+    if (startingPrice) snapshot.startingPrice = startingPrice;
+    if (startingPriceHT) snapshot.startingPriceHT = startingPriceHT;
+    if (marketValue) snapshot.marketValue = marketValue;
+    if (newPrice) snapshot.newPrice = newPrice;
+    if (department) snapshot.department = department;
+    if (saleDate) snapshot.saleDate = saleDate;
+    if (saleTime) snapshot.saleTime = saleTime;
+    if (lotNumber) snapshot.lotNumber = lotNumber;
+    if (technicalCheckUrl) snapshot.technicalCheckUrl = technicalCheckUrl;
+    if (conditionImageUrl) snapshot.conditionImageUrl = conditionImageUrl;
+    if (observations) snapshot.observations = observations;
+    if (maintenanceStatus) snapshot.maintenanceStatus = maintenanceStatus;
+    if (serviceHistory !== undefined) snapshot.serviceHistory = serviceHistory;
+    if (firstOwner !== undefined) snapshot.firstOwner = firstOwner;
+    if (warranty) snapshot.warranty = warranty;
+    if (equipment?.length) snapshot.equipment = equipment;
+    if (cdnHash) snapshot.cdnHash = cdnHash;
+    if (soldPrice) snapshot.soldPrice = soldPrice;
+
+    return snapshot;
   } catch (err) {
     console.error('[VPauto] scrapeVehicleDetail error:', err);
     return null;
@@ -312,7 +468,17 @@ function extractKeyValues(root: Element): Record<string, string> {
 }
 
 function extractBrand(title: string): string {
-  return title.split(/\s+/).find(w => w === w.toUpperCase() && w.length > 1) || title.split(' ')[0];
+  // The first all-caps word (2+ chars) in the title is the brand
+  // e.g. "TESLA MODEL 3 Standard Range Plus RWD Bleu foncé métal" → "TESLA"
+  // e.g. "MV AGUSTA DRAGSTER 800 RR" → "MV" (we'll catch multi-word brands below)
+  const words = title.split(/\s+/);
+  // Check for multi-word brands first
+  const twoWord = (words[0] + ' ' + words[1]).toUpperCase();
+  const multiWordBrands = ['MV AGUSTA', 'LAND ROVER', 'ALFA ROMEO', 'ASTON MARTIN', 'CAN-AM'];
+  for (const mb of multiWordBrands) {
+    if (title.toUpperCase().startsWith(mb)) return mb;
+  }
+  return words.find(w => w === w.toUpperCase() && w.length > 1 && /^[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜÇ0-9-]+$/.test(w)) || words[0];
 }
 
 function extractModel(version: string): string {
@@ -333,9 +499,85 @@ function parsePrice(text: string, re: RegExp): number | undefined {
   return m ? parseInt(m[1]) : undefined;
 }
 
+/**
+ * Extract a price that follows a label like "Cote² : 27600 €" or "Prix neuf³ : 41350 €"
+ * Uses line-by-line approach to handle footnote superscripts correctly.
+ * Also handles "NC" (non communiqué) → returns undefined.
+ */
+function parseLabelledPrice(bodyText: string, label: string): number | undefined {
+  const lines = bodyText.split('\n');
+  const labelRe = new RegExp(label, 'i');
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!labelRe.test(lines[i])) continue;
+
+    // Try same line: "Cote² : 27600 €" or "Prix neuf³ : 41350 €"
+    const sameLine = lines[i].match(new RegExp(label + '[^:]*:\\s*([\\d][\\d\\s]*)\\s*€', 'i'));
+    if (sameLine) {
+      const val = parseInt(sameLine[1].replace(/\s/g, ''));
+      if (val > 0) return val;
+    }
+
+    // Also try: label on one line, price on next
+    for (let j = i; j <= i + 2 && j < lines.length; j++) {
+      const line = lines[j].trim();
+      const m = line.match(/^([\d][\d\s]*)\s*€/);
+      if (m) {
+        const val = parseInt(m[1].replace(/\s/g, ''));
+        if (val > 0) return val;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Extract the "Mise à prix" amount from VPauto detail page.
+ *
+ * The page shows "Mise à prix¹" with a footnote superscript <sup>1</sup>,
+ * and the actual price "6500 €" is on the NEXT line in innerText.
+ *
+ * Using a line-by-line approach to avoid the footnote "1" being
+ * concatenated with the price digits (e.g. "16500" instead of "6500").
+ */
+function parsePriceFromPage(bodyText: string): number | undefined {
+  const lines = bodyText.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    if (/mise\s*(?:à|a)\s*prix/i.test(lines[i])) {
+      // Found "Mise à prix" line. The actual price is on a SUBSEQUENT line.
+      // The current line may end with a footnote digit like "Mise à prix1"
+      for (let j = i + 1; j <= i + 4 && j < lines.length; j++) {
+        const line = lines[j].trim();
+        if (!line) continue;
+        // Match "6500 €" or "6 500 €" or "19400€"
+        const m = line.match(/^([\d][\d\s]*)\s*€/);
+        if (m) {
+          return parseInt(m[1].replace(/\s/g, ''));
+        }
+      }
+
+      // Fallback: price on the SAME line as "Mise à prix", e.g. "Mise à prix 6500€"
+      const sameLine = lines[i].match(/mise\s*(?:à|a)\s*prix\s+([\d][\d\s]*)\s*€/i);
+      if (sameLine) {
+        return parseInt(sameLine[1].replace(/\s/g, ''));
+      }
+    }
+  }
+
+  return undefined;
+}
+
 function extractCity(kv: Record<string, string>, bodyText: string): string {
   const from_kv = kv['lieu de vente'] || kv['centre'] || kv['localisation'] || '';
   if (from_kv) return from_kv.replace(/^\d+\s*[-–]\s*/, '').trim();
+  // VPauto shows "59 - LILLE" or "33 - BORDEAUX" near "Localisation"
+  const locMatch = bodyText.match(/Localisation\s*(\d{2,3})\s*[-–]\s*([A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜÇ]+)/i);
+  if (locMatch) return locMatch[2].charAt(0) + locMatch[2].slice(1).toLowerCase();
+  // Fallback: look for "DEPT - CITY" pattern anywhere
+  const deptCity = bodyText.match(/\b(\d{2})\s*[-–]\s*([A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜÇ]{3,})\b/);
+  if (deptCity) return deptCity[2].charAt(0) + deptCity[2].slice(1).toLowerCase();
+  // Last resort: known city names
   const cities = ['Bordeaux','Lyon','Paris','Marseille','Lille','Rennes','Strasbourg','Toulouse','Nantes','Rouen','Montpellier','Grenoble','Caen'];
   return cities.find(c => new RegExp(c, 'i').test(bodyText)) || '';
 }

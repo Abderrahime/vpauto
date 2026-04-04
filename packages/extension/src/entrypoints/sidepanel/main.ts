@@ -10,10 +10,78 @@ interface CurrentVehicleState {
   isNew?: boolean;
 }
 
+interface BatchTrackingResult {
+  saved: number;
+  newVehicles: number;
+  priceChanges: { hashId: string; vehicleId: number; diff: number }[];
+  disappeared: { vehicleId: number; hashId: string; brand: string; model: string; lastCity: string; lastPrice: number }[];
+  timestamp: string;
+}
+
 interface StoredPanelState {
   currentVehicle?: CurrentVehicleState;
   currentVehicleList?: Partial<VehicleSnapshot>[];
+  batchTrackingResult?: BatchTrackingResult;
   scrapeDebug?: ScrapeDebugState;
+  vehicleVisits?: Record<string, {
+    count: number;
+    lastVisitedAt: string;
+    lastSourceUrl?: string;
+    label?: string;
+  }>;
+  backgroundDebug?: {
+    startedAt?: string;
+    status?: string;
+    updatedAt?: string;
+    lastStage?: string;
+    lastMethod?: string;
+    lastPath?: string;
+    lastError?: string | null;
+    lastRequestId?: string;
+  };
+}
+
+interface CrossAuctionData {
+  vehicleId: number;
+  brand: string;
+  model: string;
+  year: number;
+  passages: {
+    city: string;
+    saleDate: string;
+    status: string;
+    startingPrice: number | null;
+    soldPrice: number | null;
+    lotNumber: number | null;
+    mileage: number;
+    scrapedAt: string;
+    sourceUrl: string;
+  }[];
+  firstStartingPrice: number | null;
+}
+
+interface SimilarSoldData {
+  results: {
+    hashId: string;
+    brand: string;
+    model: string;
+    version: string;
+    year: number;
+    mileage: number;
+    city: string;
+    startingPrice: number | null;
+    soldPrice: number;
+    saleDate: string | null;
+    sourceUrl: string;
+    yearMatch: boolean;
+    modelMatch: boolean;
+  }[];
+  stats: {
+    count: number;
+    avgSoldPrice: number | null;
+    minSoldPrice: number | null;
+    maxSoldPrice: number | null;
+  };
 }
 
 interface ScrapeDebugState {
@@ -47,213 +115,1151 @@ const numberFormatter = new Intl.NumberFormat('fr-FR');
 const dateFormatter = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium' });
 
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let showDebug = false;
 
 void refreshPanel();
 
 browser.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== 'local') {
-    return;
-  }
+  if (areaName !== 'local') return;
+  if (!changes.currentVehicle && !changes.currentVehicleList && !changes.scrapeDebug && !changes.batchTrackingResult && !changes.backgroundDebug && !changes.vehicleVisits) return;
 
-  if (!changes.currentVehicle && !changes.currentVehicleList && !changes.scrapeDebug) {
-    return;
-  }
-
-  if (refreshTimer) {
-    clearTimeout(refreshTimer);
-  }
-
-  refreshTimer = setTimeout(() => {
-    void refreshPanel();
-  }, 150);
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => void refreshPanel(), 150);
 });
+
+async function syncCurrentVehicleFromPanel(
+  currentVehicle: CurrentVehicleState,
+  scrapeDebug?: ScrapeDebugState,
+): Promise<{ currentVehicle: CurrentVehicleState; scrapeDebug: ScrapeDebugState | undefined }> {
+  if (currentVehicle.vehicleId) {
+    return { currentVehicle, scrapeDebug };
+  }
+
+  const snapshot = currentVehicle.snapshot;
+  const saveResult = await api.saveSnapshotDetailed(snapshot);
+
+  if (saveResult.data?.vehicleId) {
+    const nextState: CurrentVehicleState = {
+      ...currentVehicle,
+      vehicleId: saveResult.data.vehicleId,
+      snapshotId: saveResult.data.snapshotId,
+      isNew: !saveResult.data.duplicate,
+    };
+
+    const nextDebug: ScrapeDebugState = {
+      ...scrapeDebug,
+      stage: saveResult.data.duplicate ? 'detail_saved_duplicate' : 'detail_saved',
+      pageType: 'detail',
+      url: snapshot.sourceUrl,
+      hashId: snapshot.hashId,
+      brand: snapshot.brand,
+      model: snapshot.model,
+      backendVehicleId: saveResult.data.vehicleId,
+      backendSnapshotId: saveResult.data.snapshotId,
+      reason: null,
+      timestamp: new Date().toISOString(),
+    };
+
+    await browser.storage.local.set({
+      currentVehicle: nextState,
+      scrapeDebug: nextDebug,
+    });
+
+    return { currentVehicle: nextState, scrapeDebug: nextDebug };
+  }
+
+  const lookup = await api.lookup({
+    reference: snapshot.reference || undefined,
+    hashId: snapshot.hashId || undefined,
+  });
+
+  if (lookup?.vehicleId) {
+    const nextState: CurrentVehicleState = {
+      ...currentVehicle,
+      vehicleId: lookup.vehicleId,
+    };
+
+    const nextDebug: ScrapeDebugState = {
+      ...scrapeDebug,
+      stage: 'detail_lookup_recovered',
+      pageType: 'detail',
+      url: snapshot.sourceUrl,
+      hashId: snapshot.hashId,
+      brand: snapshot.brand,
+      model: snapshot.model,
+      backendVehicleId: lookup.vehicleId,
+      reason: saveResult.error || 'lookup_recovered_existing_vehicle',
+      timestamp: new Date().toISOString(),
+    };
+
+    await browser.storage.local.set({
+      currentVehicle: nextState,
+      scrapeDebug: nextDebug,
+    });
+
+    return { currentVehicle: nextState, scrapeDebug: nextDebug };
+  }
+
+  const nextDebug: ScrapeDebugState = {
+    ...scrapeDebug,
+    stage: 'detail_save_failed',
+    pageType: 'detail',
+    url: snapshot.sourceUrl,
+    hashId: snapshot.hashId,
+    brand: snapshot.brand,
+    model: snapshot.model,
+    backendVehicleId: null,
+    reason: saveResult.error || 'panel_sync_failed',
+    timestamp: new Date().toISOString(),
+  };
+
+  await browser.storage.local.set({
+    scrapeDebug: nextDebug,
+  });
+
+  return { currentVehicle, scrapeDebug: nextDebug };
+}
 
 async function refreshPanel(): Promise<void> {
   root.innerHTML = renderLoading();
 
-  const [storage, health] = await Promise.all([
-    browser.storage.local.get(['currentVehicle', 'currentVehicleList', 'scrapeDebug']),
+  const [storage, health, bgPing] = await Promise.all([
+    browser.storage.local.get(['currentVehicle', 'currentVehicleList', 'scrapeDebug', 'batchTrackingResult', 'backgroundDebug', 'vehicleVisits']),
     api.healthCheck(),
+    api.pingBackground().catch(() => null),
   ]);
 
   const state = storage as StoredPanelState;
   const isApiOnline = health !== null;
-  const isListContext = state.scrapeDebug?.pageType === 'list';
+  const effectiveBackgroundDebug = bgPing?.data?.ok
+    ? {
+        ...state.backgroundDebug,
+        status: 'ping_ok',
+        updatedAt: bgPing.data.timestamp,
+        lastStage: 'ping_ok',
+        lastError: null,
+      }
+    : state.backgroundDebug;
 
-  if (isListContext || !state.currentVehicle?.snapshot) {
-    root.innerHTML = renderEmptyState(state.currentVehicleList, state.scrapeDebug, isApiOnline);
-    bindCommonActions();
-    return;
-  }
-
-  const currentVehicle = state.currentVehicle;
-  const snapshot = currentVehicle.snapshot;
-
-  let history: VehicleHistory | null = null;
-  let badges: VehicleBadge[] | null = null;
-
-  if (currentVehicle.vehicleId) {
-    [history, badges] = await Promise.all([
-      api.getHistory(currentVehicle.vehicleId),
-      api.getBadges(currentVehicle.vehicleId),
-    ]);
-  }
-
-  root.innerHTML = renderVehicleState({
-    currentVehicle,
-    currentVehicleList: state.currentVehicleList,
-    scrapeDebug: state.scrapeDebug,
-    history,
-    badges,
-    isApiOnline,
-  });
-
-  bindCommonActions(snapshot.sourceUrl);
-}
-
-function bindCommonActions(sourceUrl?: string): void {
-  const refreshButton = document.querySelector<HTMLButtonElement>('[data-action="refresh"]');
-  refreshButton?.addEventListener('click', () => {
-    void refreshPanel();
-  });
-
-  const openButton = document.querySelector<HTMLButtonElement>('[data-action="open-source"]');
-  openButton?.addEventListener('click', () => {
-    if (!sourceUrl) {
-      return;
+  // Prioritize currentVehicle: if the detail scraper set it, show vehicle view.
+  // Only show list view if there's no vehicle data (list page clears currentVehicle).
+  if (state.currentVehicle?.snapshot) {
+    let currentVehicle = state.currentVehicle;
+    let effectiveScrapeDebug = state.scrapeDebug;
+    if (isApiOnline && !currentVehicle.vehicleId) {
+      const synced = await syncCurrentVehicleFromPanel(currentVehicle, state.scrapeDebug);
+      currentVehicle = synced.currentVehicle;
+      effectiveScrapeDebug = synced.scrapeDebug;
     }
 
-    void browser.tabs.create({ url: sourceUrl });
+    const snapshot = currentVehicle.snapshot;
+    let history: VehicleHistory | null = null;
+    let badges: VehicleBadge[] | null = null;
+    let crossAuction: CrossAuctionData | null = null;
+    let similarSold: SimilarSoldData | null = null;
+
+    // If the detail page is displayed but the direct save did not return a vehicleId,
+    // recover the DB identity from reference/hashId when possible.
+    if (!currentVehicle.vehicleId && (snapshot.reference || snapshot.hashId)) {
+      const lookup = await api.lookup({
+        reference: snapshot.reference || undefined,
+        hashId: snapshot.hashId || undefined,
+      });
+
+      if (lookup?.vehicleId) {
+        currentVehicle = {
+          ...currentVehicle,
+          vehicleId: lookup.vehicleId,
+        };
+        void browser.storage.local.set({ currentVehicle }).catch(() => {});
+        effectiveScrapeDebug = {
+          ...effectiveScrapeDebug,
+          stage: 'detail_lookup_recovered',
+          pageType: 'detail',
+          url: snapshot.sourceUrl,
+          hashId: snapshot.hashId,
+          brand: snapshot.brand,
+          model: snapshot.model,
+          backendVehicleId: lookup.vehicleId,
+          reason: effectiveScrapeDebug?.reason || 'lookup_recovered_existing_vehicle',
+          timestamp: new Date().toISOString(),
+        };
+      }
+    }
+
+    if (currentVehicle.vehicleId) {
+      const currentStage = effectiveScrapeDebug?.stage;
+      const failedStage = currentStage === 'detail_save_failed' || currentStage === 'detail_scraped';
+
+      effectiveScrapeDebug = {
+        ...effectiveScrapeDebug,
+        stage: failedStage ? 'detail_saved' : (effectiveScrapeDebug?.stage || 'detail_saved'),
+        pageType: 'detail',
+        url: snapshot.sourceUrl,
+        hashId: snapshot.hashId,
+        brand: snapshot.brand,
+        model: snapshot.model,
+        backendVehicleId: currentVehicle.vehicleId,
+        backendSnapshotId: currentVehicle.snapshotId ?? effectiveScrapeDebug?.backendSnapshotId ?? null,
+        reason: failedStage ? null : (effectiveScrapeDebug?.reason ?? null),
+        timestamp: effectiveScrapeDebug?.timestamp || new Date().toISOString(),
+      };
+    }
+
+    // Fetch all data in parallel
+    const promises: Promise<void>[] = [];
+
+    if (currentVehicle.vehicleId) {
+      promises.push(
+        Promise.all([
+          api.getHistory(currentVehicle.vehicleId),
+          api.getBadges(currentVehicle.vehicleId),
+        ]).then(([h, b]) => { history = h; badges = b; })
+      );
+    }
+
+    if (snapshot.hashId) {
+      promises.push(
+        api.getCrossAuction(snapshot.hashId).then(d => { crossAuction = d; })
+      );
+    }
+
+    if (snapshot.brand) {
+      promises.push(
+        api.getSimilarSold(snapshot.brand, snapshot.model, snapshot.year, snapshot.hashId)
+          .then(d => { similarSold = d; })
+      );
+    }
+
+    await Promise.all(promises);
+
+    root.innerHTML = renderVehicleState({
+      currentVehicle,
+      currentVehicleList: state.currentVehicleList,
+      batchTracking: state.batchTrackingResult,
+      scrapeDebug: effectiveScrapeDebug,
+      vehicleVisits: state.vehicleVisits,
+      backgroundDebug: effectiveBackgroundDebug,
+      history,
+      badges,
+      crossAuction,
+      similarSold,
+      isApiOnline,
+    });
+  } else {
+    root.innerHTML = renderListState({
+      ...state,
+      backgroundDebug: effectiveBackgroundDebug,
+    }, isApiOnline);
+  }
+
+  bindActions(state);
+}
+
+function bindActions(state: StoredPanelState): void {
+  document.querySelector<HTMLButtonElement>('[data-action="refresh"]')
+    ?.addEventListener('click', () => void refreshPanel());
+
+  document.querySelector<HTMLButtonElement>('[data-action="open-source"]')
+    ?.addEventListener('click', () => {
+      const url = state.currentVehicle?.snapshot?.sourceUrl;
+      if (url) void browser.tabs.create({ url });
+    });
+
+  document.querySelector<HTMLButtonElement>('[data-action="toggle-debug"]')
+    ?.addEventListener('click', () => {
+      showDebug = !showDebug;
+      void refreshPanel();
+    });
+
+  // Vehicle list item clicks
+  document.querySelectorAll<HTMLElement>('[data-vehicle-url]').forEach(el => {
+    el.addEventListener('click', () => {
+      const url = el.dataset.vehicleUrl;
+      if (url) void browser.tabs.create({ url });
+    });
   });
 }
+
+// ── Vehicle Detail View ──────────────────────────────────────────────────
 
 function renderVehicleState(input: {
   currentVehicle: CurrentVehicleState;
   currentVehicleList?: Partial<VehicleSnapshot>[];
+  batchTracking?: BatchTrackingResult;
   scrapeDebug?: ScrapeDebugState;
+  vehicleVisits?: StoredPanelState['vehicleVisits'];
+  backgroundDebug?: StoredPanelState['backgroundDebug'];
   history: VehicleHistory | null;
   badges: VehicleBadge[] | null;
+  crossAuction?: CrossAuctionData | null;
+  similarSold?: SimilarSoldData | null;
   isApiOnline: boolean;
 }): string {
-  const { currentVehicle, currentVehicleList, scrapeDebug, history, badges, isApiOnline } = input;
+  const { currentVehicle, history, badges, crossAuction, similarSold, isApiOnline, scrapeDebug } = input;
+  const currentList = input.currentVehicleList || [];
   const { snapshot, vehicleId, isNew } = currentVehicle;
   const title = [snapshot.brand, snapshot.model].filter(Boolean).join(' ').trim() || 'Vehicule VPauto';
   const subtitle = [snapshot.year || undefined, snapshot.city || undefined, snapshot.reference || undefined]
     .filter(Boolean)
-    .join(' - ');
+    .join(' \u2022 ');
+  const visitKey = vehicleId
+    ? `vehicle:${vehicleId}`
+    : snapshot.hashId
+    ? `hash:${snapshot.hashId}`
+    : snapshot.reference
+    ? `ref:${snapshot.reference}`
+    : '';
+  const visitStats = visitKey ? input.vehicleVisits?.[visitKey] : undefined;
 
-  const metricCards = [
-    metricCard('Mise a prix', formatPrice(snapshot.startingPrice)),
-    metricCard('Kilometrage', formatDistance(snapshot.mileage)),
-    metricCard('Centre', escapeHtml(snapshot.center || snapshot.city || 'N/D')),
-    metricCard('Passages', history ? String(history.totalPassages) : vehicleId ? '1+' : 'N/D'),
-  ].join('');
-
-  const notices: string[] = [];
-  if (!isApiOnline) {
-    notices.push(notice('Le backend est hors ligne. Les donnees viennent seulement du stockage local.', 'danger'));
-  } else if (!vehicleId) {
-    notices.push(notice('La page a ete detectee, mais aucun identifiant vehicule n\'a encore ete confirme par le backend.', 'warn'));
+  // Recover startingPrice from multiple sources (sold pages hide "Mise à prix")
+  let startingPrice = snapshot.startingPrice;
+  // Source 1: cross-auction data
+  if (!startingPrice && crossAuction?.firstStartingPrice) {
+    startingPrice = crossAuction.firstStartingPrice;
+  }
+  // Source 2: history passages
+  if (!startingPrice && history && history.passages.length > 0) {
+    for (const p of history.passages) {
+      if (p.startingPrice) { startingPrice = p.startingPrice; break; }
+    }
+  }
+  // Source 3: same vehicle in current list (scraped with startingPrice on the card)
+  if (!startingPrice && snapshot.hashId && currentList.length > 0) {
+    const fromList = currentList.find(v => v.hashId === snapshot.hashId);
+    if (fromList?.startingPrice) {
+      startingPrice = fromList.startingPrice;
+    }
   }
 
-  if (isNew) {
-    notices.push(notice('Ce vehicule vient d\'etre vu pour la premiere fois dans cette session.', 'warn'));
-  }
+  // Find similar vehicles in current auction list
+  const similarInAuction = findSimilarInList(snapshot, currentList);
 
-  const badgeMarkup = badges && badges.length > 0
-    ? badges.map((badge) => `<span class="chip">${escapeHtml(formatBadge(badge))}</span>`).join('')
-    : '<span class="chip">Aucun badge calcule</span>';
+  // Build metrics dynamically — only show metrics with real data
+  const metrics: string[] = [];
+  if (startingPrice) metrics.push(metricCard('Mise a prix', formatPrice(startingPrice), 'price'));
+  if (snapshot.soldPrice) metrics.push(metricCard('Prix adjuge', formatPrice(snapshot.soldPrice), 'sold'));
+  if (snapshot.marketValue) metrics.push(metricCard('Cote', formatPrice(snapshot.marketValue), 'price'));
+  if (snapshot.newPrice) metrics.push(metricCard('Prix neuf', formatPrice(snapshot.newPrice), 'price'));
+  metrics.push(metricCard('Kilometrage', formatDistance(snapshot.mileage), 'km'));
+  metrics.push(metricCard('Centre', esc(snapshot.center || snapshot.city || 'N/D'), 'location'));
+  if (visitStats?.count) metrics.push(metricCard('Visites', String(visitStats.count), 'visit'));
+  const totalAuctionPassages = history?.totalPassages
+    ?? crossAuction?.passages?.length
+    ?? (vehicleId ? 1 : 0);
+  const previousPassageCount = Math.max(totalAuctionPassages - 1, 0);
+  metrics.push(metricCard('Passages precedents', String(previousPassageCount), 'history'));
 
-  const historyMarkup = history && history.passages.length > 0
-    ? history.passages
-        .slice(-5)
-        .reverse()
-        .map((passage) => `
-          <div class="timeline__item">
-            <div class="timeline__row">
-              <span class="timeline__date">${escapeHtml(formatDate(passage.date))}</span>
-              <span class="timeline__meta">${escapeHtml(formatStatus(passage.status))}</span>
-            </div>
-            <div>${escapeHtml(passage.city)}${passage.center ? ` - ${escapeHtml(passage.center)}` : ''}</div>
-            <div class="timeline__meta">
-              ${escapeHtml(formatPrice(passage.startingPrice))}
-              ${passage.mileage ? ` - ${escapeHtml(formatDistance(passage.mileage))}` : ''}
-            </div>
-          </div>
-        `)
-        .join('')
-    : '<div class="timeline__item"><div class="timeline__meta">Aucun historique detaille disponible.</div></div>';
-
-  const listMarkup = renderListPreview(currentVehicleList);
+  // Profit/loss for sold vehicles
+  const profitLine = (snapshot.soldPrice && startingPrice)
+    ? renderProfitLine(startingPrice, snapshot.soldPrice, snapshot.marketValue, snapshot.newPrice)
+    : '';
 
   return `
     <div class="panel">
-      <section class="hero">
-        <div class="hero__top">
-          <p class="hero__eyebrow">VPauto Assistant</p>
-          <h1 class="hero__title">${escapeHtml(title)}</h1>
-          <p class="hero__subtitle">${escapeHtml(subtitle || 'Analyse en direct depuis la page en cours')}</p>
-        </div>
-        <div class="hero__bottom">
-          <span class="chip chip--ghost">${escapeHtml(isApiOnline ? 'API connectee' : 'API indisponible')}</span>
-          <span class="chip chip--ghost">${escapeHtml(formatStatus(snapshot.status))}</span>
-          ${snapshot.lotNumber ? `<span class="chip chip--ghost">Lot ${escapeHtml(String(snapshot.lotNumber))}</span>` : ''}
-          ${snapshot.saleDate ? `<span class="chip chip--ghost">${escapeHtml(formatDate(snapshot.saleDate))}</span>` : ''}
-        </div>
-      </section>
+      ${renderHeader(title, subtitle, isApiOnline)}
 
-      <section class="grid">
-        ${metricCards}
-      </section>
+      ${renderStatusBar(snapshot, vehicleId, isNew)}
 
-      ${notices.join('')}
+      ${renderSoldBanner(snapshot, startingPrice)}
 
-      <section class="card">
-        <h2 class="card__title">Badges</h2>
-        <div class="hero__bottom">${badgeMarkup}</div>
-      </section>
+      <div class="metrics-grid">
+        ${metrics.join('')}
+      </div>
 
-      <section class="card">
-        <h2 class="card__title">Historique recent</h2>
-        <div class="timeline">${historyMarkup}</div>
-      </section>
+      ${profitLine}
+      ${renderPersistenceWarning(vehicleId, scrapeDebug)}
 
-      ${listMarkup}
-      ${renderDebugCard(isApiOnline, currentVehicleList, scrapeDebug)}
-
-      <section class="card">
-        <h2 class="card__title">Actions</h2>
-        <div class="actions">
-          <button class="button" type="button" data-action="refresh">Rafraichir</button>
-          <button class="button button--secondary" type="button" data-action="open-source">Ouvrir la page source</button>
-        </div>
-      </section>
+      ${renderBadgesSection(badges)}
+      ${renderCrossAuction(crossAuction, snapshot)}
+      ${renderSimilarInAuction(similarInAuction, snapshot, currentList.length)}
+      ${renderSimilarSold(similarSold, snapshot)}
+      ${renderHistorySection(history, vehicleId, snapshot)}
+      ${renderPriceChart(history)}
+      ${renderActionsBar(true)}
+      ${showDebug ? renderDebugCard(isApiOnline, input.currentVehicleList, scrapeDebug, input.backgroundDebug) : ''}
     </div>
   `;
 }
 
-function renderEmptyState(
-  list: Partial<VehicleSnapshot>[] | undefined,
-  debug: ScrapeDebugState | undefined,
-  isApiOnline: boolean,
-): string {
-  const listMarkup = renderListPreview(list);
+// ── List View ────────────────────────────────────────────────────────────
+
+function renderListState(state: StoredPanelState, isApiOnline: boolean): string {
+  const list = state.currentVehicleList;
+  const tracking = state.batchTrackingResult;
+  const debug = state.scrapeDebug;
+
+  const hasVehicles = list && list.length > 0;
+  const title = hasVehicles ? `${list.length} vehicules detectes` : 'VPauto Assistant';
+  const subtitle = hasVehicles
+    ? (debug?.stage?.includes('scraping') ? 'Scraping en cours...' : 'Liste analysee')
+    : 'En attente de donnees...';
 
   return `
     <div class="panel">
-      <section class="empty-state">
-        <h2>Aucun vehicule actif</h2>
-        <p>Ouvre une fiche vehicule VPauto ou une liste de resultats pour alimenter la side panel.</p>
-        <p>${escapeHtml(isApiOnline ? 'Le backend repond.' : 'Le backend ne repond pas encore.')}</p>
-      </section>
-      ${listMarkup}
-      ${renderDebugCard(isApiOnline, list, debug)}
+      ${renderHeader(title, subtitle, isApiOnline)}
+
+      ${hasVehicles ? renderAuctionSummary(list) : ''}
+      ${tracking ? renderTrackingAlerts(tracking) : ''}
+      ${hasVehicles ? renderTrackingSummary(tracking) : ''}
+      ${hasVehicles ? renderVehicleList(list) : renderEmptyState(isApiOnline)}
+
+      ${renderActionsBar(false)}
+      ${showDebug ? renderDebugCard(isApiOnline, list, debug, state.backgroundDebug) : ''}
+    </div>
+  `;
+}
+
+// ── Shared Components ────────────────────────────────────────────────────
+
+function renderHeader(title: string, subtitle: string, isApiOnline: boolean): string {
+  return `
+    <header class="hero">
+      <div class="hero__brand">
+        <div class="hero__logo">VP</div>
+        <div>
+          <p class="hero__eyebrow">VPauto Assistant</p>
+          <div class="hero__status">
+            <span class="status-dot ${isApiOnline ? 'status-dot--ok' : 'status-dot--off'}"></span>
+            <span class="hero__status-text">${isApiOnline ? 'Connecte' : 'Hors ligne'}</span>
+          </div>
+        </div>
+      </div>
+      <h1 class="hero__title">${esc(title)}</h1>
+      <p class="hero__subtitle">${esc(subtitle)}</p>
+    </header>
+  `;
+}
+
+function renderStatusBar(snapshot: VehicleSnapshot, vehicleId?: number, isNew?: boolean): string {
+  const chips: string[] = [];
+  chips.push(chip(formatStatus(snapshot.status), statusColor(snapshot.status)));
+  if (isNew) chips.push(chip('Nouveau', 'green'));
+  if (isNonRoulant(snapshot)) chips.push(chip('Non roulant', 'red'));
+  if (snapshot.lotNumber) chips.push(chip(`Lot ${snapshot.lotNumber}`, 'neutral'));
+  if (snapshot.saleDate) chips.push(chip(formatDate(snapshot.saleDate), 'neutral'));
+  if (vehicleId) chips.push(chip(`#${vehicleId}`, 'muted'));
+
+  return `<div class="chip-bar">${chips.join('')}</div>`;
+}
+
+function isNonRoulant(v: Partial<VehicleSnapshot>): boolean {
+  return /non\s*roulant/i.test(v.observations || '') || /non\s*roulant/i.test(v.model || '');
+}
+
+function renderSoldBanner(snapshot: VehicleSnapshot, resolvedStartingPrice?: number): string {
+  if (snapshot.status === 'sold' && snapshot.soldPrice) {
+    const sp = resolvedStartingPrice || snapshot.startingPrice;
+    const diff = sp ? snapshot.soldPrice - sp : null;
+    const diffText = diff !== null
+      ? `${diff >= 0 ? '+' : ''}${diff.toLocaleString('fr-FR')} \u20AC vs mise a prix`
+      : '';
+    return `
+      <div class="sold-banner sold-banner--sold">
+        <div class="sold-banner__label">ADJUGE</div>
+        <div class="sold-banner__price">${formatPrice(snapshot.soldPrice)}</div>
+        ${sp ? `<div class="sold-banner__original">Mise a prix: ${formatPrice(sp)}</div>` : ''}
+        ${diffText ? `<div class="sold-banner__diff">${diffText}</div>` : ''}
+      </div>
+    `;
+  }
+  if (snapshot.status === 'unsold') {
+    return `
+      <div class="sold-banner sold-banner--unsold">
+        <div class="sold-banner__label">NON ADJUGE</div>
+        <div class="sold-banner__price">Invendu - en apres-vente</div>
+      </div>
+    `;
+  }
+  if (snapshot.status === 'auction_live') {
+    return `
+      <div class="sold-banner sold-banner--live">
+        <div class="sold-banner__label">VENTE EN COURS</div>
+      </div>
+    `;
+  }
+  return '';
+}
+
+function renderProfitLine(startingPrice: number, soldPrice: number, marketValue?: number, newPrice?: number): string {
+  const diff = soldPrice - startingPrice;
+  const pct = ((diff / startingPrice) * 100).toFixed(0);
+  const diffClass = diff >= 0 ? 'price-up' : 'price-down';
+
+  const parts: string[] = [];
+  parts.push(`<span class="${diffClass}">${diff >= 0 ? '+' : ''}${diff.toLocaleString('fr-FR')} \u20AC (${diff >= 0 ? '+' : ''}${pct}%)</span> vs mise a prix`);
+
+  if (marketValue && marketValue > 0) {
+    const vsMarket = soldPrice - marketValue;
+    const vsMarketPct = ((vsMarket / marketValue) * 100).toFixed(0);
+    parts.push(`<span class="${vsMarket < 0 ? 'price-down' : 'price-up'}">${vsMarket < 0 ? '' : '+'}${vsMarket.toLocaleString('fr-FR')} \u20AC (${vsMarket < 0 ? '' : '+'}${vsMarketPct}%)</span> vs cote`);
+  }
+
+  if (newPrice && newPrice > 0) {
+    const vsNew = soldPrice - newPrice;
+    const vsNewPct = ((vsNew / newPrice) * 100).toFixed(0);
+    parts.push(`<span class="price-down">${vsNew.toLocaleString('fr-FR')} \u20AC (${vsNewPct}%)</span> vs neuf`);
+  }
+
+  return `
+    <div class="profit-line">
+      ${parts.map(p => `<div class="profit-line__item">${p}</div>`).join('')}
+    </div>
+  `;
+}
+
+function renderBadgesSection(badges: VehicleBadge[] | null): string {
+  if (!badges || badges.length === 0) return '';
+
+  const items = badges.map(b => {
+    const color = b.type === 'new' ? 'green' : b.type === 'price_drop' ? 'green'
+      : b.type === 'price_up' ? 'red' : b.type === 'reappeared' ? 'amber' : 'blue';
+    const label = b.detail ? `${b.label} (${b.detail})` : b.label;
+    return chip(label, color);
+  }).join('');
+
+  return `
+    <section class="card">
+      <h2 class="card__title"><span class="card__icon">&#9733;</span> Badges</h2>
+      <div class="chip-bar">${items}</div>
+    </section>
+  `;
+}
+
+function renderPersistenceWarning(vehicleId: number | null | undefined, debug?: ScrapeDebugState): string {
+  if (vehicleId) return '';
+
+  const reason = debug?.reason ? ` (${esc(debug.reason)})` : '';
+  return `
+    <section class="card">
+      <h2 class="card__title"><span class="card__icon">&#9888;</span> Synchronisation</h2>
+      <div class="card__empty">
+        Le vehicule est scrape localement, mais l'identifiant backend n'est pas encore confirme${reason}. Les sections historiques resteront limitees tant que cette sauvegarde n'aboutit pas.
+      </div>
+    </section>
+  `;
+}
+
+function getCurrentAuctionDate(snapshot: Partial<VehicleSnapshot>): string | undefined {
+  return snapshot.saleDate || snapshot.scrapedAt?.split('T')[0];
+}
+
+function isCurrentAuctionPassage(
+  passage: { city?: string; date?: string; saleDate?: string; center?: string; lotNumber?: number | null },
+  snapshot: Partial<VehicleSnapshot>,
+): boolean {
+  const currentDate = getCurrentAuctionDate(snapshot);
+  const passageDate = passage.date || passage.saleDate;
+  if (!currentDate || !passageDate) return false;
+  if ((snapshot.city || '') !== (passage.city || '')) return false;
+  if (passageDate !== currentDate) return false;
+  if (snapshot.center && passage.center && snapshot.center !== passage.center) return false;
+  if (snapshot.lotNumber != null && passage.lotNumber != null && snapshot.lotNumber !== passage.lotNumber) return false;
+  return true;
+}
+
+function renderHistorySection(history: VehicleHistory | null, vehicleId: number | null | undefined, snapshot: VehicleSnapshot): string {
+  const historicalPassages = history?.passages.filter((passage) => !isCurrentAuctionPassage(passage, snapshot)) || [];
+
+  if (!history || historicalPassages.length === 0) {
+    return `
       <section class="card">
-        <h2 class="card__title">Actions</h2>
-        <div class="actions">
-          <button class="button" type="button" data-action="refresh">Rafraichir</button>
+        <h2 class="card__title"><span class="card__icon">&#128203;</span> Historique</h2>
+        <div class="card__empty">
+          ${vehicleId
+            ? "Aucun passage precedent connu pour ce vehicule dans la base locale."
+            : "Historique indisponible tant que le vehicule n'est pas rattache a un identifiant backend."}
         </div>
       </section>
+    `;
+  }
+
+  const items = historicalPassages
+    .slice(-5)
+    .reverse()
+    .map((p, i) => {
+      const isFirst = i === 0;
+      return `
+        <div class="timeline-item ${isFirst ? 'timeline-item--current' : ''}">
+          <div class="timeline-dot"></div>
+          <div class="timeline-content">
+            <div class="timeline-header">
+              <span class="timeline-date">${esc(formatDate(p.date))}</span>
+              <span class="timeline-status">${esc(formatStatus(p.status))}</span>
+            </div>
+            <div class="timeline-body">
+              ${esc(p.city)}${p.center ? ` - ${esc(p.center)}` : ''}
+            </div>
+            <div class="timeline-meta">
+              Mise a prix: ${formatPrice(p.startingPrice)}${p.soldPrice ? ` \u2192 Adjuge: ${formatPrice(p.soldPrice)}` : ''}${p.mileage ? ` \u2022 ${formatDistance(p.mileage)}` : ''}
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+  return `
+    <section class="card">
+      <h2 class="card__title"><span class="card__icon">&#128203;</span> Historique</h2>
+      <div class="timeline">${items}</div>
+    </section>
+  `;
+}
+
+function renderCrossAuction(data: CrossAuctionData | null | undefined, snapshot: VehicleSnapshot): string {
+  const previousPassages = data?.passages.filter((passage) => !isCurrentAuctionPassage(passage, snapshot)) || [];
+
+  if (!data || previousPassages.length === 0) {
+    return `
+      <section class="card">
+        <h2 class="card__title"><span class="card__icon">&#127758;</span> Parcours multi-encheres</h2>
+        <div class="card__empty">
+          Aucun passage precedent connu pour ce vehicule dans la base locale pour le moment.
+        </div>
+      </section>
+    `;
+  }
+
+  const items = previousPassages.map(p => {
+    const isCurrent = false;
+    const statusLabel = p.status === 'sold' ? 'Vendu' : p.status === 'unsold' ? 'Invendu' : 'Disponible';
+    const statusColor = p.status === 'sold' ? 'green' : p.status === 'unsold' ? 'red' : 'blue';
+
+    let priceHtml = '';
+    if (p.soldPrice) {
+      priceHtml = `<span class="price-down" style="font-size:12px;">Adjuge ${formatPrice(p.soldPrice)}</span>`;
+      if (p.startingPrice) priceHtml += ` <span style="text-decoration:line-through;color:var(--text-muted);font-size:10px;">${formatPrice(p.startingPrice)}</span>`;
+    } else if (p.startingPrice) {
+      priceHtml = `${formatPrice(p.startingPrice)}`;
+    }
+
+    return `
+      <div class="cross-item ${isCurrent ? 'cross-item--current' : ''}">
+        <div class="cross-item__header">
+          <span class="cross-item__city">${esc(p.city)}</span>
+          <span class="chip chip--${statusColor}" style="font-size:9px;padding:2px 6px;">${statusLabel}</span>
+        </div>
+        <div class="cross-item__detail">
+          <span>${esc(formatDate(p.saleDate))}</span>
+          <span>${priceHtml}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <section class="card">
+      <h2 class="card__title"><span class="card__icon">&#127758;</span> Parcours multi-encheres</h2>
+      <div class="cross-list">${items}</div>
+    </section>
+  `;
+}
+
+/** Find vehicles of same brand/model in the current auction list */
+function findSimilarInList(
+  current: VehicleSnapshot,
+  list: Partial<VehicleSnapshot>[],
+): Partial<VehicleSnapshot>[] {
+  if (!current.brand || list.length === 0) return [];
+
+  const brandUpper = current.brand.toUpperCase();
+  const modelFirst = current.model?.split(/\s+/)[0]?.toUpperCase() || '';
+
+  return list
+    .filter(v => {
+      if (v.hashId === current.hashId) return false; // Skip self
+      const vBrand = (v.brand || '').toUpperCase();
+      if (vBrand !== brandUpper) return false;
+      // Same brand — bonus if same model
+      return true;
+    })
+    .sort((a, b) => {
+      // Sort: same model first, then by price
+      const aModel = (a.model || '').toUpperCase().includes(modelFirst) ? 1 : 0;
+      const bModel = (b.model || '').toUpperCase().includes(modelFirst) ? 1 : 0;
+      if (bModel !== aModel) return bModel - aModel;
+      return (a.startingPrice || 0) - (b.startingPrice || 0);
+    })
+    .slice(0, 10);
+}
+
+/** Render similar vehicles from the current auction (no backend needed) */
+function renderSimilarInAuction(vehicles: Partial<VehicleSnapshot>[], current: VehicleSnapshot, listSize: number): string {
+  if (vehicles.length === 0) {
+    return `
+      <section class="card">
+        <h2 class="card__title"><span class="card__icon">&#128269;</span> Similaires dans cette vente</h2>
+        <div class="card__empty">
+          ${listSize > 0
+            ? "Aucun autre vehicule comparable n'a ete trouve dans la liste memoire de l'enchere en cours."
+            : "La liste memoire de l'enchere n'est pas encore disponible pour comparer ce vehicule."}
+        </div>
+      </section>
+    `;
+  }
+
+  const modelFirst = current.model?.split(/\s+/)[0]?.toUpperCase() || '';
+
+  // Stats from similar in current auction
+  const prices = vehicles.filter(v => v.startingPrice).map(v => v.startingPrice!);
+  const soldInList = vehicles.filter(v => v.status === 'sold' && v.soldPrice);
+  const soldPrices = soldInList.map(v => v.soldPrice!);
+
+  let statsHtml = '';
+  if (prices.length > 0) {
+    const avgStart = Math.round(prices.reduce((a, b) => a + b, 0) / prices.length);
+    const minStart = Math.min(...prices);
+    const maxStart = Math.max(...prices);
+    statsHtml += `
+      <div class="recommend-box">
+        <div class="recommend-box__title">Comparaison dans cette vente</div>
+        <div class="recommend-box__row">
+          <span>Mise a prix moyenne (${prices.length})</span>
+          <span class="recommend-box__value">${formatPrice(avgStart)}</span>
+        </div>
+        <div class="recommend-box__row">
+          <span>Fourchette</span>
+          <span class="recommend-box__value">${formatPrice(minStart)} - ${formatPrice(maxStart)}</span>
+        </div>
+        ${soldPrices.length > 0 ? `
+          <div class="recommend-box__row">
+            <span>Adjuge moyen (${soldPrices.length} vendus)</span>
+            <span class="recommend-box__value">${formatPrice(Math.round(soldPrices.reduce((a, b) => a + b, 0) / soldPrices.length))}</span>
+          </div>
+        ` : ''}
+        ${current.startingPrice ? `
+          <div class="recommend-box__verdict ${current.startingPrice <= (soldPrices.length > 0 ? Math.round(soldPrices.reduce((a, b) => a + b, 0) / soldPrices.length) : avgStart) ? 'recommend-box__verdict--good' : 'recommend-box__verdict--high'}">
+            ${current.startingPrice <= avgStart
+              ? `Mise a prix inferieure de ${formatPrice(avgStart - current.startingPrice)} a la moyenne`
+              : current.startingPrice === avgStart
+              ? 'Prix aligne avec les autres'
+              : `Mise a prix superieure de ${formatPrice(current.startingPrice - avgStart)} a la moyenne`
+            }
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  const items = vehicles.map(v => {
+    const isModelMatch = (v.model || '').toUpperCase().includes(modelFirst);
+    const statusLabel = v.status === 'sold' ? 'Vendu' : v.status === 'unsold' ? 'Invendu' : '';
+    const statusColor = v.status === 'sold' ? 'green' : v.status === 'unsold' ? 'red' : '';
+    return `
+      <div class="similar-item" data-vehicle-url="${esc(v.sourceUrl || '')}">
+        <div class="similar-item__info">
+          <div class="similar-item__name">
+            ${esc(v.brand || '')} ${esc(v.model || '')}
+            ${isModelMatch ? '<span class="badge-match">Match</span>' : ''}
+          </div>
+          <div class="similar-item__meta">${v.year || ''} \u2022 ${formatDistance(v.mileage || 0)} \u2022 ${esc(v.city || '')}</div>
+        </div>
+        <div class="similar-item__prices">
+          ${v.soldPrice ? `<div class="similar-item__sold">Adjuge ${formatPrice(v.soldPrice)}</div>` : ''}
+          ${v.startingPrice ? `<div class="similar-item__start">${formatPrice(v.startingPrice)}</div>` : ''}
+          ${statusLabel ? `<span class="chip chip--${statusColor}" style="font-size:9px;padding:1px 5px;">${statusLabel}</span>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <section class="card">
+      <h2 class="card__title"><span class="card__icon">&#128269;</span> Similaires dans cette vente (${vehicles.length})</h2>
+      ${statsHtml}
+      <div class="similar-list">${items}</div>
+    </section>
+  `;
+}
+
+function renderSimilarSold(data: SimilarSoldData | null | undefined, currentSnapshot: VehicleSnapshot): string {
+  if (!data || data.results.length === 0) {
+    return `
+      <section class="card">
+        <h2 class="card__title"><span class="card__icon">&#128200;</span> Intelligence prix</h2>
+        <div class="card__empty">
+          Aucune reference vendue comparable n'est encore disponible dans la base locale pour produire une estimation fiable.
+        </div>
+      </section>
+    `;
+  }
+
+  const stats = data.stats;
+
+  // Price recommendation
+  let recommendHtml = '';
+  if (stats.avgSoldPrice && stats.count >= 1) {
+    const currentPrice = currentSnapshot.startingPrice || currentSnapshot.soldPrice;
+    recommendHtml = `
+      <div class="recommend-box">
+        <div class="recommend-box__title">Estimation de prix</div>
+        <div class="recommend-box__row">
+          <span>Prix moyen adjuge (${stats.count} ventes)</span>
+          <span class="recommend-box__value">${formatPrice(stats.avgSoldPrice)}</span>
+        </div>
+        <div class="recommend-box__row">
+          <span>Fourchette</span>
+          <span class="recommend-box__value">${formatPrice(stats.minSoldPrice || 0)} - ${formatPrice(stats.maxSoldPrice || 0)}</span>
+        </div>
+        ${currentPrice ? `
+          <div class="recommend-box__row">
+            <span>Ce vehicule (mise a prix)</span>
+            <span class="recommend-box__value">${formatPrice(currentPrice)}</span>
+          </div>
+          <div class="recommend-box__verdict ${currentPrice < stats.avgSoldPrice ? 'recommend-box__verdict--good' : 'recommend-box__verdict--high'}">
+            ${currentPrice < stats.avgSoldPrice
+              ? `Mise a prix inferieure de ${formatPrice(stats.avgSoldPrice - currentPrice)} au prix moyen adjuge`
+              : currentPrice === stats.avgSoldPrice
+              ? 'Prix aligne avec le marche'
+              : `Mise a prix superieure de ${formatPrice(currentPrice - stats.avgSoldPrice)} au prix moyen adjuge`
+            }
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  // Similar vehicles list
+  const items = data.results.slice(0, 8).map(v => {
+    const exactMatch = v.modelMatch && v.yearMatch;
+    return `
+      <div class="similar-item" data-vehicle-url="${esc(v.sourceUrl)}">
+        <div class="similar-item__info">
+          <div class="similar-item__name">
+            ${esc(v.brand)} ${esc(v.model)}
+            ${exactMatch ? '<span class="badge-match">Match</span>' : ''}
+          </div>
+          <div class="similar-item__meta">${v.year} \u2022 ${formatDistance(v.mileage)} \u2022 ${esc(v.city)}</div>
+        </div>
+        <div class="similar-item__prices">
+          <div class="similar-item__sold">Adjuge ${formatPrice(v.soldPrice)}</div>
+          ${v.startingPrice ? `<div class="similar-item__start">${formatPrice(v.startingPrice)}</div>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <section class="card">
+      <h2 class="card__title"><span class="card__icon">&#128200;</span> Intelligence prix</h2>
+      ${recommendHtml}
+      ${items ? `<div class="similar-list">${items}</div>` : ''}
+    </section>
+  `;
+}
+
+function renderPriceChart(history: VehicleHistory | null): string {
+  if (!history || history.priceHistory.length < 2) return '';
+
+  const prices = history.priceHistory;
+  const min = Math.min(...prices.map(p => p.price));
+  const max = Math.max(...prices.map(p => p.price));
+  const range = max - min || 1;
+  const w = 280;
+  const h = 60;
+
+  const points = prices.map((p, i) => {
+    const x = (i / (prices.length - 1)) * w;
+    const y = h - ((p.price - min) / range) * h;
+    return `${x},${y}`;
+  }).join(' ');
+
+  const first = prices[0].price;
+  const last = prices[prices.length - 1].price;
+  const diff = last - first;
+  const diffClass = diff < 0 ? 'price-down' : diff > 0 ? 'price-up' : '';
+  const diffText = diff < 0
+    ? `\u25BC ${Math.abs(diff).toLocaleString('fr-FR')} \u20AC`
+    : diff > 0
+    ? `\u25B2 ${diff.toLocaleString('fr-FR')} \u20AC`
+    : '\u2192 Stable';
+
+  return `
+    <section class="card">
+      <h2 class="card__title"><span class="card__icon">&#128200;</span> Evolution prix</h2>
+      <div class="price-chart">
+        <svg viewBox="0 0 ${w} ${h}" class="price-svg">
+          <defs>
+            <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="${diff <= 0 ? '#22c55e' : '#ef4444'}" stop-opacity="0.3"/>
+              <stop offset="100%" stop-color="${diff <= 0 ? '#22c55e' : '#ef4444'}" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <polygon points="0,${h} ${points} ${w},${h}" fill="url(#priceGrad)" />
+          <polyline points="${points}" fill="none" stroke="${diff <= 0 ? '#22c55e' : '#ef4444'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <div class="price-chart__labels">
+          <span>${formatPrice(first)}</span>
+          <span class="price-chart__diff ${diffClass}">${diffText}</span>
+          <span>${formatPrice(last)}</span>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderAuctionSummary(list: Partial<VehicleSnapshot>[]): string {
+  const total = list.length;
+  const sold = list.filter(v => v.status === 'sold');
+  const unsold = list.filter(v => v.status === 'unsold');
+  const available = total - sold.length - unsold.length;
+  const nonRoulant = list.filter(v => isNonRoulant(v));
+
+  // Price stats
+  const soldPrices = sold.filter(v => v.soldPrice).map(v => v.soldPrice!);
+  const startPrices = list.filter(v => v.startingPrice).map(v => v.startingPrice!);
+  const totalSoldValue = soldPrices.reduce((a, b) => a + b, 0);
+  const avgSoldPrice = soldPrices.length > 0 ? Math.round(totalSoldValue / soldPrices.length) : 0;
+  const minPrice = startPrices.length > 0 ? Math.min(...startPrices) : 0;
+  const maxPrice = startPrices.length > 0 ? Math.max(...startPrices) : 0;
+
+  // Margins (sold price vs starting price)
+  const margins = sold
+    .filter(v => v.soldPrice && v.startingPrice)
+    .map(v => v.soldPrice! - v.startingPrice!);
+  const avgMargin = margins.length > 0 ? Math.round(margins.reduce((a, b) => a + b, 0) / margins.length) : 0;
+
+  // Cities
+  const cities = new Map<string, number>();
+  for (const v of list) {
+    if (v.city) cities.set(v.city, (cities.get(v.city) || 0) + 1);
+  }
+
+  return `
+    <section class="card">
+      <h2 class="card__title"><span class="card__icon">&#128202;</span> Resume de l'enchere</h2>
+
+      <div class="auction-stats">
+        <div class="auction-stat">
+          <div class="auction-stat__value">${total}</div>
+          <div class="auction-stat__label">Total lots</div>
+        </div>
+        <div class="auction-stat">
+          <div class="auction-stat__value auction-stat--green">${sold.length}</div>
+          <div class="auction-stat__label">Vendus</div>
+        </div>
+        <div class="auction-stat">
+          <div class="auction-stat__value auction-stat--red">${unsold.length}</div>
+          <div class="auction-stat__label">Invendus</div>
+        </div>
+        <div class="auction-stat">
+          <div class="auction-stat__value auction-stat--blue">${available}</div>
+          <div class="auction-stat__label">En attente</div>
+        </div>
+      </div>
+
+      ${sold.length > 0 ? `
+        <div class="auction-detail">
+          <div class="auction-detail__row">
+            <span>Chiffre d'affaires</span>
+            <span class="auction-detail__value">${formatPrice(totalSoldValue)}</span>
+          </div>
+          <div class="auction-detail__row">
+            <span>Prix adjuge moyen</span>
+            <span class="auction-detail__value">${formatPrice(avgSoldPrice)}</span>
+          </div>
+          ${margins.length > 0 ? `
+            <div class="auction-detail__row">
+              <span>Ecart moyen vs mise a prix</span>
+              <span class="auction-detail__value ${avgMargin >= 0 ? 'price-up' : 'price-down'}">${avgMargin >= 0 ? '+' : ''}${avgMargin.toLocaleString('fr-FR')} \u20AC</span>
+            </div>
+          ` : ''}
+          <div class="auction-detail__row">
+            <span>Taux de vente</span>
+            <span class="auction-detail__value">${total > 0 ? Math.round(sold.length / total * 100) : 0}%</span>
+          </div>
+        </div>
+      ` : ''}
+
+      <div class="auction-detail">
+        <div class="auction-detail__row">
+          <span>Fourchette prix</span>
+          <span class="auction-detail__value">${formatPrice(minPrice)} - ${formatPrice(maxPrice)}</span>
+        </div>
+        ${nonRoulant.length > 0 ? `
+          <div class="auction-detail__row">
+            <span>Non roulants</span>
+            <span class="auction-detail__value" style="color:var(--amber)">${nonRoulant.length} vehicules</span>
+          </div>
+        ` : ''}
+        ${cities.size > 1 ? `
+          <div class="auction-detail__row">
+            <span>Villes</span>
+            <span class="auction-detail__value">${[...cities.entries()].map(([c, n]) => `${c} (${n})`).join(', ')}</span>
+          </div>
+        ` : ''}
+      </div>
+    </section>
+  `;
+}
+
+function renderTrackingAlerts(tracking: BatchTrackingResult): string {
+  const alerts: string[] = [];
+
+  if (tracking.newVehicles > 0) {
+    alerts.push(`
+      <div class="alert alert--green">
+        <span class="alert__icon">&#10024;</span>
+        <div>
+          <strong>${tracking.newVehicles} nouveau${tracking.newVehicles > 1 ? 'x' : ''} vehicule${tracking.newVehicles > 1 ? 's' : ''}</strong>
+          <p>Detecte${tracking.newVehicles > 1 ? 's' : ''} pour la premiere fois</p>
+        </div>
+      </div>
+    `);
+  }
+
+  if (tracking.priceChanges.length > 0) {
+    const drops = tracking.priceChanges.filter(p => p.diff < 0);
+    const ups = tracking.priceChanges.filter(p => p.diff > 0);
+
+    if (drops.length > 0) {
+      alerts.push(`
+        <div class="alert alert--green">
+          <span class="alert__icon">&#9660;</span>
+          <div>
+            <strong>${drops.length} baisse${drops.length > 1 ? 's' : ''} de prix</strong>
+            <p>${drops.map(d => `${Math.abs(d.diff).toLocaleString('fr-FR')} \u20AC`).join(', ')}</p>
+          </div>
+        </div>
+      `);
+    }
+
+    if (ups.length > 0) {
+      alerts.push(`
+        <div class="alert alert--red">
+          <span class="alert__icon">&#9650;</span>
+          <div>
+            <strong>${ups.length} hausse${ups.length > 1 ? 's' : ''} de prix</strong>
+            <p>${ups.map(d => `+${d.diff.toLocaleString('fr-FR')} \u20AC`).join(', ')}</p>
+          </div>
+        </div>
+      `);
+    }
+  }
+
+  if (tracking.disappeared.length > 0) {
+    const count = tracking.disappeared.length;
+    alerts.push(`
+      <div class="alert alert--amber">
+        <span class="alert__icon">&#128683;</span>
+        <div>
+          <strong>${count} vehicule${count > 1 ? 's' : ''} disparu${count > 1 ? 's' : ''}</strong>
+          <p>${tracking.disappeared.slice(0, 3).map(d => `${d.brand} ${d.model}`).join(', ')}${count > 3 ? ` et ${count - 3} autres` : ''}</p>
+        </div>
+      </div>
+    `);
+  }
+
+  if (alerts.length === 0) return '';
+  return `<div class="alerts-stack">${alerts.join('')}</div>`;
+}
+
+function renderTrackingSummary(tracking?: BatchTrackingResult): string {
+  if (!tracking) return '';
+  return `
+    <div class="tracking-bar">
+      <div class="tracking-stat">
+        <span class="tracking-stat__value">${tracking.saved}</span>
+        <span class="tracking-stat__label">Sauves</span>
+      </div>
+      <div class="tracking-stat">
+        <span class="tracking-stat__value tracking-stat--green">${tracking.newVehicles}</span>
+        <span class="tracking-stat__label">Nouveaux</span>
+      </div>
+      <div class="tracking-stat">
+        <span class="tracking-stat__value tracking-stat--blue">${tracking.priceChanges.length}</span>
+        <span class="tracking-stat__label">Prix changes</span>
+      </div>
+      <div class="tracking-stat">
+        <span class="tracking-stat__value tracking-stat--amber">${tracking.disappeared.length}</span>
+        <span class="tracking-stat__label">Disparus</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderVehicleList(list: Partial<VehicleSnapshot>[]): string {
+  const sorted = [...list].sort((a, b) => (a.startingPrice ?? 0) - (b.startingPrice ?? 0));
+  const displayed = sorted.slice(0, 50);
+
+  // Stats
+  const soldCount = list.filter(v => v.status === 'sold').length;
+  const unsoldCount = list.filter(v => v.status === 'unsold').length;
+  const availableCount = list.length - soldCount - unsoldCount;
+  const nonRoulantCount = list.filter(v => isNonRoulant(v)).length;
+
+  const items = displayed.map(v => {
+    const name = [v.brand, v.model].filter(Boolean).join(' ') || 'Vehicule';
+    const meta: string[] = [];
+    if (v.year) meta.push(String(v.year));
+    if (v.mileage) meta.push(formatDistance(v.mileage));
+    if (v.city) meta.push(v.city);
+    if (isNonRoulant(v)) meta.push('Non roulant');
+    const url = v.sourceUrl || (v.hashId ? `https://www.vpauto.fr/vehicule/${v.hashId}/` : '');
+
+    const isSold = v.status === 'sold';
+    const isUnsold = v.status === 'unsold';
+    const nonRoulant = isNonRoulant(v);
+    const statusClass = isSold ? ' vehicle-card--sold' : isUnsold ? ' vehicle-card--unsold' : '';
+    const nrClass = nonRoulant ? ' vehicle-card--nr' : '';
+
+    const priceDisplay = isSold && v.soldPrice
+      ? `<div class="vehicle-card__sold-price">Adjuge ${formatPrice(v.soldPrice)}</div><div class="vehicle-card__start-price">${formatPrice(v.startingPrice)}</div>`
+      : isUnsold
+      ? `<div class="vehicle-card__unsold">Invendu</div><div class="vehicle-card__start-price">${formatPrice(v.startingPrice)}</div>`
+      : `<div class="vehicle-card__price">${formatPrice(v.startingPrice)}</div>`;
+
+    return `
+      <div class="vehicle-card${statusClass}${nrClass}" ${url ? `data-vehicle-url="${esc(url)}"` : ''}>
+        <div class="vehicle-card__info">
+          <div class="vehicle-card__name">${esc(name)}${nonRoulant ? ' <span class="badge-nr">NR</span>' : ''}</div>
+          <div class="vehicle-card__meta">${esc(meta.join(' \u2022 '))}</div>
+        </div>
+        <div class="vehicle-card__pricing">${priceDisplay}</div>
+      </div>
+    `;
+  }).join('');
+
+  const moreText = list.length > 50 ? `<div class="list-more">et ${list.length - 50} autres vehicules...</div>` : '';
+
+  const statsLine = [
+    availableCount > 0 ? `${availableCount} disponibles` : '',
+    soldCount > 0 ? `${soldCount} adjuges` : '',
+    unsoldCount > 0 ? `${unsoldCount} invendus` : '',
+    nonRoulantCount > 0 ? `${nonRoulantCount} non roulants` : '',
+  ].filter(Boolean).join(' \u2022 ');
+
+  return `
+    <section class="card">
+      <h2 class="card__title"><span class="card__icon">&#128663;</span> Vehicules (${list.length})</h2>
+      ${statsLine ? `<div class="list-stats">${statsLine}</div>` : ''}
+      <div class="vehicle-list">${items}</div>
+      ${moreText}
+    </section>
+  `;
+}
+
+function renderEmptyState(isApiOnline: boolean): string {
+  return `
+    <section class="empty-hero">
+      <div class="empty-hero__icon">&#128269;</div>
+      <h2>En attente</h2>
+      <p>Naviguez sur une page VPauto pour commencer l'analyse.</p>
+      <p class="empty-hero__status">${isApiOnline ? 'Backend connecte' : 'Backend hors ligne'}</p>
+    </section>
+  `;
+}
+
+function renderActionsBar(hasSource: boolean): string {
+  return `
+    <div class="actions-bar">
+      <button class="btn btn--primary" type="button" data-action="refresh">
+        &#8635; Rafraichir
+      </button>
+      ${hasSource ? '<button class="btn btn--ghost" type="button" data-action="open-source">Ouvrir la page &#8599;</button>' : ''}
+      <button class="btn btn--ghost btn--small" type="button" data-action="toggle-debug">
+        ${showDebug ? 'Masquer debug' : 'Debug'}
+      </button>
     </div>
   `;
 }
@@ -262,70 +1268,33 @@ function renderDebugCard(
   isApiOnline: boolean,
   list: Partial<VehicleSnapshot>[] | undefined,
   debug: ScrapeDebugState | undefined,
+  backgroundDebug?: StoredPanelState['backgroundDebug'],
 ): string {
-  const rows: Array<[string, string]> = [
+  const rows: [string, string][] = [
     ['API', isApiOnline ? 'connectee' : 'hors ligne'],
-    ['Liste memoire', list?.length ? `${list.length} vehicules` : 'vide'],
-    ['Derniere etape', debug?.stage || 'aucune'],
-    ['Type de page', debug?.pageType || 'inconnu'],
-    ['Compteur detecte', typeof debug?.vehicleCount === 'number' ? String(debug.vehicleCount) : 'n/d'],
+    ['BG', backgroundDebug?.status || 'inconnu'],
+    ['BG Maj', backgroundDebug?.updatedAt ? formatDateTime(backgroundDebug.updatedAt) : backgroundDebug?.startedAt ? formatDateTime(backgroundDebug.startedAt) : 'n/d'],
+    ['BG Etape', backgroundDebug?.lastStage || 'n/d'],
+    ['BG Req', backgroundDebug?.lastRequestId || 'n/d'],
+    ['BG Route', [backgroundDebug?.lastMethod, backgroundDebug?.lastPath].filter(Boolean).join(' ') || 'n/d'],
+    ['BG Err', backgroundDebug?.lastError || 'n/d'],
+    ['Liste', list?.length ? `${list.length} vehicules` : 'vide'],
+    ['Etape', debug?.stage || 'aucune'],
+    ['Page', debug?.pageType || 'inconnu'],
+    ['Count', typeof debug?.vehicleCount === 'number' ? String(debug.vehicleCount) : 'n/d'],
     ['Vehicule', [debug?.brand, debug?.model].filter(Boolean).join(' ') || debug?.hashId || 'n/d'],
-    ['Backend vehicleId', debug?.backendVehicleId != null ? String(debug.backendVehicleId) : 'n/d'],
+    ['ID Backend', debug?.backendVehicleId != null ? String(debug.backendVehicleId) : 'n/d'],
     ['Raison', debug?.reason || 'n/d'],
     ['Maj', debug?.timestamp ? formatDateTime(debug.timestamp) : 'n/d'],
   ];
 
-  const urlMarkup = debug?.url
-    ? `<div class="timeline__meta">${escapeHtml(debug.url)}</div>`
-    : '<div class="timeline__meta">Aucune URL capturee.</div>';
-
   return `
-    <section class="card">
+    <section class="card card--debug">
       <h2 class="card__title">Diagnostic</h2>
-      <div class="timeline">
-        ${rows.map(([label, value]) => `
-          <div class="timeline__item">
-            <div class="timeline__row">
-              <span>${escapeHtml(label)}</span>
-              <span class="timeline__meta">${escapeHtml(value)}</span>
-            </div>
-          </div>
-        `).join('')}
-        <div class="timeline__item">
-          <div class="timeline__row">
-            <span>URL</span>
-          </div>
-          ${urlMarkup}
-        </div>
+      <div class="debug-grid">
+        ${rows.map(([l, v]) => `<span class="debug-label">${esc(l)}</span><span class="debug-value">${esc(v)}</span>`).join('')}
       </div>
-    </section>
-  `;
-}
-
-function renderListPreview(list: Partial<VehicleSnapshot>[] | undefined): string {
-  if (!list || list.length === 0) {
-    return '';
-  }
-
-  const items = list.slice(0, 5).map((vehicle) => `
-    <div class="list-preview__item">
-      <div>
-        <strong>${escapeHtml([vehicle.brand, vehicle.model].filter(Boolean).join(' ') || 'Vehicule')}</strong>
-        <div class="timeline__meta">${escapeHtml(vehicle.city || 'Ville inconnue')}</div>
-      </div>
-      <div class="timeline__meta">
-        ${escapeHtml(formatPrice(vehicle.startingPrice))}
-      </div>
-    </div>
-  `).join('');
-
-  return `
-    <section class="card">
-      <h2 class="card__title">Derniere liste detectee</h2>
-      <div class="list-preview">
-        <div class="notice">${escapeHtml(`${list.length} vehicules detectes sur la derniere page liste analysee.`)}</div>
-        ${items}
-      </div>
+      ${debug?.url ? `<div class="debug-url">${esc(debug.url)}</div>` : ''}
     </section>
   `;
 }
@@ -333,83 +1302,78 @@ function renderListPreview(list: Partial<VehicleSnapshot>[] | undefined): string
 function renderLoading(): string {
   return `
     <div class="panel">
-      <section class="empty-state">
-        <h2>Chargement</h2>
-        <p>Lecture du stockage local et synchronisation avec le backend.</p>
-      </section>
+      <div class="loading">
+        <div class="loading__spinner"></div>
+        <p>Chargement...</p>
+      </div>
     </div>
   `;
 }
 
-function metricCard(label: string, value: string): string {
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+function metricCard(label: string, value: string, icon: string): string {
+  const iconMap: Record<string, string> = {
+    price: '&#128176;', sold: '&#9989;', km: '&#128663;', location: '&#128205;', history: '&#128203;', visit: '&#128065;',
+  };
   return `
-    <section class="metric">
-      <p class="metric__label">${escapeHtml(label)}</p>
-      <p class="metric__value">${escapeHtml(value)}</p>
-    </section>
+    <div class="metric">
+      <div class="metric__icon">${iconMap[icon] || ''}</div>
+      <div>
+        <div class="metric__label">${esc(label)}</div>
+        <div class="metric__value">${esc(value)}</div>
+      </div>
+    </div>
   `;
 }
 
-function notice(message: string, tone: 'warn' | 'danger'): string {
-  return `<section class="notice notice--${tone}">${escapeHtml(message)}</section>`;
+function chip(label: string, color: string): string {
+  return `<span class="chip chip--${color}">${esc(label)}</span>`;
+}
+
+function statusColor(status?: string): string {
+  switch (status) {
+    case 'available': case 'auction_live': return 'blue';
+    case 'sold': return 'green';
+    case 'unsold': case 'removed': return 'red';
+    default: return 'neutral';
+  }
 }
 
 function formatPrice(value?: number): string {
-  if (value == null || Number.isNaN(value)) {
-    return 'N/D';
-  }
-
+  if (value == null || Number.isNaN(value)) return 'N/D';
   return currencyFormatter.format(value);
 }
 
 function formatDistance(value?: number): string {
-  if (value == null || Number.isNaN(value)) {
-    return 'N/D';
-  }
-
+  if (value == null || Number.isNaN(value)) return 'N/D';
   return `${numberFormatter.format(value)} km`;
 }
 
 function formatDate(value: string): string {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
+  if (Number.isNaN(date.getTime())) return value;
   return dateFormatter.format(date);
 }
 
 function formatDateTime(value: string): string {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
+  if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString('fr-FR');
 }
 
 function formatStatus(status?: string): string {
   switch (status) {
-    case 'auction_live':
-      return 'Enchere en cours';
-    case 'sold':
-      return 'Vendu';
-    case 'unsold':
-      return 'Invendu';
-    case 'removed':
-      return 'Retire';
-    case 'available':
-      return 'Disponible';
-    default:
-      return status || 'Statut inconnu';
+    case 'auction_live': return 'Enchere en cours';
+    case 'sold': return 'Vendu';
+    case 'unsold': return 'Invendu';
+    case 'removed': return 'Retire';
+    case 'available': return 'Disponible';
+    default: return status || 'Inconnu';
   }
 }
 
-function formatBadge(badge: VehicleBadge): string {
-  return badge.detail ? `${badge.label} - ${badge.detail}` : badge.label;
-}
-
-function escapeHtml(value: string): string {
+function esc(value: string): string {
   return value
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')

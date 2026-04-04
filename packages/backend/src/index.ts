@@ -32,6 +32,17 @@ app.use('*', cors({
   allowHeaders: ['Content-Type'],
 }));
 
+// Request logging middleware
+app.use('*', async (c, next) => {
+  const start = Date.now();
+  const method = c.req.method;
+  const path = c.req.path;
+  console.log(`[VPauto API] → ${method} ${path}`);
+  await next();
+  const ms = Date.now() - start;
+  console.log(`[VPauto API] ← ${method} ${path} ${c.res.status} (${ms}ms)`);
+});
+
 app.route('/api/vehicles', vehicleRoutes);
 app.route('/api/watchlist', watchlistRoutes);
 

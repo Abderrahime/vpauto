@@ -1,7 +1,7 @@
-export const VPAUTO_BASE_URL = 'https://www.vpauto.fr';
+export const VPAUTO_BASE_URL = 'https://vpauto.fr';
 export const VPAUTO_CDN_URL = 'https://cdn.vpauto.fr';
 export const VPAUTO_LIST_URL = `${VPAUTO_BASE_URL}/vehicule/liste`;
-export const VPAUTO_VEHICLE_URL_PATTERN = /^https:\/\/www\.vpauto\.fr\/vehicule\/([a-f0-9]+)\//;
+export const VPAUTO_VEHICLE_URL_PATTERN = /^https:\/\/(?:www\.)?vpauto\.fr\/vehicule\/([a-f0-9]+)\//;
 export const DEFAULT_API_URL = 'http://localhost:3456';
 // Matching thresholds
 export const EXACT_MATCH_THRESHOLD = 90;

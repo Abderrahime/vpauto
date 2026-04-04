@@ -1,6 +1,6 @@
-export declare const VPAUTO_BASE_URL = "https://www.vpauto.fr";
+export declare const VPAUTO_BASE_URL = "https://vpauto.fr";
 export declare const VPAUTO_CDN_URL = "https://cdn.vpauto.fr";
-export declare const VPAUTO_LIST_URL = "https://www.vpauto.fr/vehicule/liste";
+export declare const VPAUTO_LIST_URL = "https://vpauto.fr/vehicule/liste";
 export declare const VPAUTO_VEHICLE_URL_PATTERN: RegExp;
 export declare const DEFAULT_API_URL = "http://localhost:3456";
 export declare const EXACT_MATCH_THRESHOLD = 90;

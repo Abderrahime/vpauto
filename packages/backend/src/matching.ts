@@ -4,34 +4,212 @@ import type { MatchLevel, MatchResult, VehicleSnapshot } from '@vpauto/shared';
 import { prisma } from './db.js';
 import { snapshotToApi } from './utils.js';
 
+export interface ExactVehicleMatch {
+  vehicleId: number | null;
+  matchedBy: 'reference' | 'hash' | 'details' | null;
+  duplicateVehicleId?: number | null;
+  score?: number;
+  reasons?: string[];
+}
+
+function normalize(value?: string | null): string {
+  return (value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function tokenOverlap(a?: string | null, b?: string | null): number {
+  const aTokens = new Set(normalize(a).split(/\s+/).filter(Boolean));
+  const bTokens = new Set(normalize(b).split(/\s+/).filter(Boolean));
+  if (aTokens.size === 0 || bTokens.size === 0) return 0;
+
+  let shared = 0;
+  for (const token of aTokens) {
+    if (bTokens.has(token)) shared++;
+  }
+  return shared / Math.max(aTokens.size, bTokens.size);
+}
+
+function computeIdentityScore(
+  input: VehicleSnapshot,
+  candidate: {
+    id: number;
+    reference: string | null;
+    hashId: string | null;
+    brand: string;
+    model: string;
+    version: string;
+    year: number;
+    color: string;
+    fuel: string;
+    transmission: string;
+    engineSize: number | null;
+    power: number | null;
+    fiscalPower: number | null;
+    snapshots: Array<{
+      mileage: number;
+      color: string;
+      fuel: string;
+      transmission: string;
+      engineSize: number | null;
+      power: number | null;
+      fiscalPower: number | null;
+      technicalCheckUrl: string | null;
+      conditionImageUrl: string | null;
+      cdnHash: string | null;
+      saleDate: string | null;
+      city: string;
+      scrapedAt: Date;
+    }>;
+  },
+): { score: number; reasons: string[]; mileageDiff: number } {
+  const lastSnapshot = candidate.snapshots[0];
+  const reasons: string[] = [];
+  let score = 0;
+
+  if (normalize(candidate.brand) !== normalize(input.brand)) {
+    return { score: 0, reasons: ['brand_mismatch'], mileageDiff: Number.POSITIVE_INFINITY };
+  }
+
+  const modelOverlap = tokenOverlap(candidate.model, input.model);
+  if (modelOverlap >= 1) {
+    score += 28;
+    reasons.push('same_model');
+  } else if (modelOverlap >= 0.6) {
+    score += 18;
+    reasons.push('close_model');
+  } else {
+    return { score: 0, reasons: ['model_mismatch'], mileageDiff: Number.POSITIVE_INFINITY };
+  }
+
+  const yearDiff = Math.abs(candidate.year - input.year);
+  if (yearDiff === 0) {
+    score += 14;
+    reasons.push('same_year');
+  } else if (yearDiff === 1) {
+    score += 8;
+    reasons.push('year_plus_minus_1');
+  } else if (yearDiff > 1) {
+    return { score: 0, reasons: ['year_mismatch'], mileageDiff: Number.POSITIVE_INFINITY };
+  }
+
+  const versionOverlap = tokenOverlap(candidate.version, input.version);
+  if (versionOverlap >= 0.75) {
+    score += 12;
+    reasons.push('close_version');
+  } else if (versionOverlap >= 0.5) {
+    score += 6;
+    reasons.push('partial_version');
+  }
+
+  const mileageDiff = lastSnapshot ? Math.abs(lastSnapshot.mileage - input.mileage) : Number.POSITIVE_INFINITY;
+  if (Number.isFinite(mileageDiff)) {
+    if (mileageDiff <= 500) {
+      score += 22;
+      reasons.push('km_very_close');
+    } else if (mileageDiff <= 1500) {
+      score += 18;
+      reasons.push('km_close');
+    } else if (mileageDiff <= 3000) {
+      score += 14;
+      reasons.push('km_plus_minus_3k');
+    } else if (mileageDiff <= 5000) {
+      score += 8;
+      reasons.push('km_plus_minus_5k');
+    }
+  }
+
+  const candidateFuel = normalize(input.fuel ? candidate.fuel || lastSnapshot?.fuel : '');
+  if (input.fuel && candidateFuel && candidateFuel === normalize(input.fuel)) {
+    score += 8;
+    reasons.push('same_fuel');
+  }
+
+  const candidateTransmission = normalize(input.transmission ? candidate.transmission || lastSnapshot?.transmission : '');
+  if (input.transmission && candidateTransmission && candidateTransmission === normalize(input.transmission)) {
+    score += 8;
+    reasons.push('same_transmission');
+  }
+
+  const candidateColor = normalize(input.color ? candidate.color || lastSnapshot?.color : '');
+  if (input.color && candidateColor && candidateColor === normalize(input.color)) {
+    score += 5;
+    reasons.push('same_color');
+  }
+
+  const candidateEngineSize = candidate.engineSize ?? lastSnapshot?.engineSize ?? null;
+  if (input.engineSize && candidateEngineSize && input.engineSize === candidateEngineSize) {
+    score += 8;
+    reasons.push('same_engine_size');
+  }
+
+  const candidatePower = candidate.power ?? lastSnapshot?.power ?? null;
+  if (input.power && candidatePower && input.power === candidatePower) {
+    score += 6;
+    reasons.push('same_power');
+  }
+
+  const candidateFiscalPower = candidate.fiscalPower ?? lastSnapshot?.fiscalPower ?? null;
+  if (input.fiscalPower && candidateFiscalPower && input.fiscalPower === candidateFiscalPower) {
+    score += 4;
+    reasons.push('same_fiscal_power');
+  }
+
+  if (input.technicalCheckUrl && lastSnapshot?.technicalCheckUrl && input.technicalCheckUrl === lastSnapshot.technicalCheckUrl) {
+    score += 35;
+    reasons.push('same_technical_check');
+  }
+
+  if (input.conditionImageUrl && lastSnapshot?.conditionImageUrl && input.conditionImageUrl === lastSnapshot.conditionImageUrl) {
+    score += 20;
+    reasons.push('same_condition_sheet');
+  }
+
+  if (input.cdnHash && lastSnapshot?.cdnHash && input.cdnHash === lastSnapshot.cdnHash) {
+    score += 15;
+    reasons.push('same_photo_hash');
+  }
+
+  return { score, reasons, mileageDiff };
+}
+
 /**
  * Find the best matching vehicle for a given snapshot.
  * Priority: reference match > attribute match
  */
-export async function findExactVehicle(data: VehicleSnapshot): Promise<number | null> {
+export async function findExactVehicle(data: VehicleSnapshot): Promise<ExactVehicleMatch> {
   // 1. Try matching by reference (strongest signal)
   if (data.reference) {
     const byRef = await prisma.vehicle.findUnique({
       where: { reference: data.reference },
     });
-    if (byRef) return byRef.id;
+    if (byRef) {
+      return { vehicleId: byRef.id, matchedBy: 'reference', score: 100, reasons: ['same_reference'] };
+    }
   }
 
-  // 2. Try matching by hashId
+  // 2. Candidate already created from list page with current hashId
+  let byHashIdVehicleId: number | null = null;
   if (data.hashId) {
     const byHash = await prisma.vehicle.findFirst({
       where: { hashId: data.hashId },
     });
-    if (byHash) return byHash.id;
+    if (byHash) {
+      byHashIdVehicleId = byHash.id;
+    }
   }
 
-  // 3. Try matching by brand+model+year+color+similar mileage
+  // 3. Try matching by detailed identity against prior vehicles/snapshots
   const candidates = await prisma.vehicle.findMany({
     where: {
       brand: data.brand,
-      model: data.model,
-      year: data.year,
-      color: data.color,
+      year: {
+        gte: data.year - 1,
+        lte: data.year + 1,
+      },
     },
     include: {
       snapshots: {
@@ -41,16 +219,68 @@ export async function findExactVehicle(data: VehicleSnapshot): Promise<number | 
     },
   });
 
+  let bestCandidate: { vehicleId: number; score: number; reasons: string[]; mileageDiff: number } | null = null;
+
   for (const candidate of candidates) {
-    const lastSnapshot = candidate.snapshots[0];
-    if (!lastSnapshot) continue;
-    // Mileage within 2000 km → likely same vehicle
-    if (Math.abs(lastSnapshot.mileage - data.mileage) <= 2000) {
-      return candidate.id;
+    const scored = computeIdentityScore(data, candidate);
+    if (scored.score === 0) continue;
+
+    if (!bestCandidate || scored.score > bestCandidate.score) {
+      bestCandidate = {
+        vehicleId: candidate.id,
+        score: scored.score,
+        reasons: scored.reasons,
+        mileageDiff: scored.mileageDiff,
+      };
     }
   }
 
-  return null;
+  const isStrongDetailsMatch = Boolean(
+    bestCandidate
+    && (
+      bestCandidate.score >= 70
+      || (
+        bestCandidate.score >= 55
+        && Number.isFinite(bestCandidate.mileageDiff)
+        && bestCandidate.mileageDiff <= 3000
+      )
+    ),
+  );
+
+  if (byHashIdVehicleId) {
+    if (
+      isStrongDetailsMatch
+      && bestCandidate
+      && bestCandidate.vehicleId !== byHashIdVehicleId
+      && bestCandidate.score >= 70
+    ) {
+      return {
+        vehicleId: bestCandidate.vehicleId,
+        matchedBy: 'details',
+        duplicateVehicleId: byHashIdVehicleId,
+        score: bestCandidate.score,
+        reasons: bestCandidate.reasons,
+      };
+    }
+
+    return {
+      vehicleId: byHashIdVehicleId,
+      matchedBy: 'hash',
+      score: bestCandidate?.vehicleId === byHashIdVehicleId ? bestCandidate.score : 50,
+      reasons: bestCandidate?.vehicleId === byHashIdVehicleId ? bestCandidate.reasons : ['same_hash'],
+    };
+  }
+
+  if (isStrongDetailsMatch && bestCandidate) {
+    return {
+      vehicleId: bestCandidate.vehicleId,
+      matchedBy: 'details',
+      score: bestCandidate.score,
+      reasons: bestCandidate.reasons,
+    };
+  }
+
+  return { vehicleId: null, matchedBy: null };
 }
 
 /**
