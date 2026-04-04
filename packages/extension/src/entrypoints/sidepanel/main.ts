@@ -1,5 +1,5 @@
 import { browser } from 'wxt/browser';
-import type { VehicleBadge, VehicleHistory, VehicleSnapshot } from '@vpauto/shared';
+import type { MatchResult, VehicleBadge, VehicleHistory, VehicleSnapshot } from '@vpauto/shared';
 import { api } from '../../lib/api';
 import './style.css';
 
@@ -256,6 +256,7 @@ async function refreshPanel(): Promise<void> {
     let history: VehicleHistory | null = null;
     let badges: VehicleBadge[] | null = null;
     let crossAuction: CrossAuctionData | null = null;
+    let similarAvailable: MatchResult[] | null = null;
     let similarSold: SimilarSoldData | null = null;
 
     // If the detail page is displayed but the direct save did not return a vehicleId,
@@ -326,6 +327,10 @@ async function refreshPanel(): Promise<void> {
 
     if (snapshot.brand) {
       promises.push(
+        api.findSimilar(snapshot, currentVehicle.vehicleId)
+          .then(d => { similarAvailable = d; })
+      );
+      promises.push(
         api.getSimilarSold(snapshot.brand, snapshot.model, snapshot.year, snapshot.hashId)
           .then(d => { similarSold = d; })
       );
@@ -343,6 +348,7 @@ async function refreshPanel(): Promise<void> {
       history,
       badges,
       crossAuction,
+      similarAvailable,
       similarSold,
       isApiOnline,
     });
@@ -393,10 +399,11 @@ function renderVehicleState(input: {
   history: VehicleHistory | null;
   badges: VehicleBadge[] | null;
   crossAuction?: CrossAuctionData | null;
+  similarAvailable?: MatchResult[] | null;
   similarSold?: SimilarSoldData | null;
   isApiOnline: boolean;
 }): string {
-  const { currentVehicle, history, badges, crossAuction, similarSold, isApiOnline, scrapeDebug } = input;
+  const { currentVehicle, history, badges, crossAuction, similarAvailable, similarSold, isApiOnline, scrapeDebug } = input;
   const currentList = input.currentVehicleList || [];
   const { snapshot, vehicleId, isNew } = currentVehicle;
   const title = [snapshot.brand, snapshot.model].filter(Boolean).join(' ').trim() || 'Vehicule VPauto';
@@ -473,6 +480,7 @@ function renderVehicleState(input: {
       ${renderBadgesSection(badges)}
       ${renderCrossAuction(crossAuction, snapshot)}
       ${renderSimilarInAuction(similarInAuction, snapshot, currentList.length)}
+      ${renderSimilarElsewhere(similarAvailable, snapshot)}
       ${renderSimilarSold(similarSold, snapshot)}
       ${renderHistorySection(history, vehicleId, snapshot)}
       ${renderPriceChart(history)}
@@ -867,6 +875,116 @@ function renderSimilarInAuction(vehicles: Partial<VehicleSnapshot>[], current: V
     <section class="card">
       <h2 class="card__title"><span class="card__icon">&#128269;</span> Similaires dans cette vente (${vehicles.length})</h2>
       ${statsHtml}
+      <div class="similar-list">${items}</div>
+    </section>
+  `;
+}
+
+function renderSimilarElsewhere(matches: MatchResult[] | null | undefined, current: VehicleSnapshot): string {
+  const currentPrice = current.startingPrice || current.soldPrice || null;
+  const filtered = (matches || [])
+    .filter((match) => match.level !== 'exact')
+    .filter((match) => match.snapshot.hashId !== current.hashId)
+    .filter((match) => Boolean(match.snapshot.city) && match.snapshot.city !== current.city)
+    .filter((match) => ['available', 'auction_live', 'unsold'].includes(match.snapshot.status))
+    .sort((a, b) => {
+      const levelScore = (m: MatchResult) => m.level === 'same_model' ? 2 : 1;
+      const availabilityScore = (m: MatchResult) => m.snapshot.status === 'available' ? 2 : m.snapshot.status === 'auction_live' ? 1 : 0;
+      const priceDelta = (m: MatchResult) => {
+        if (currentPrice == null || m.snapshot.startingPrice == null) return Number.POSITIVE_INFINITY;
+        return m.snapshot.startingPrice - currentPrice;
+      };
+
+      return (
+        levelScore(b) - levelScore(a)
+        || availabilityScore(b) - availabilityScore(a)
+        || priceDelta(a) - priceDelta(b)
+        || b.score - a.score
+      );
+    })
+    .slice(0, 8);
+
+  if (filtered.length === 0) {
+    return `
+      <section class="card">
+        <h2 class="card__title"><span class="card__icon">&#127968;</span> Similaires disponibles ailleurs</h2>
+        <div class="card__empty">
+          Aucun exemplaire similaire actuellement disponible dans une autre ville n'a encore ete trouve dans la base locale.
+        </div>
+      </section>
+    `;
+  }
+
+  const cheaperCount = currentPrice != null
+    ? filtered.filter((match) => match.snapshot.startingPrice != null && match.snapshot.startingPrice < currentPrice).length
+    : 0;
+  const sameModelCount = filtered.filter((match) => match.level === 'same_model').length;
+
+  const summary = `
+    <div class="recommend-box">
+      <div class="recommend-box__title">Opportunites ailleurs</div>
+      <div class="recommend-box__row">
+        <span>Vehicules disponibles trouves</span>
+        <span class="recommend-box__value">${filtered.length}</span>
+      </div>
+      <div class="recommend-box__row">
+        <span>Memes modeles</span>
+        <span class="recommend-box__value">${sameModelCount}</span>
+      </div>
+      ${currentPrice != null ? `
+        <div class="recommend-box__row">
+          <span>Moins chers que ce vehicule</span>
+          <span class="recommend-box__value">${cheaperCount}</span>
+        </div>
+      ` : ''}
+    </div>
+  `;
+
+  const items = filtered.map((match) => {
+    const candidate = match.snapshot;
+    const priceDiff = currentPrice != null && candidate.startingPrice != null
+      ? candidate.startingPrice - currentPrice
+      : null;
+    const kmDiff = candidate.mileage - current.mileage;
+    const statusLabel = candidate.status === 'auction_live'
+      ? 'En cours'
+      : candidate.status === 'unsold'
+      ? 'Invendu'
+      : 'Disponible';
+    const statusColor = candidate.status === 'auction_live'
+      ? 'blue'
+      : candidate.status === 'unsold'
+      ? 'amber'
+      : 'green';
+
+    return `
+      <div class="similar-item" data-vehicle-url="${esc(candidate.sourceUrl || '')}">
+        <div class="similar-item__info">
+          <div class="similar-item__name">
+            ${esc(candidate.brand)} ${esc(candidate.model)}
+            ${match.level === 'same_model' ? '<span class="badge-match">Match</span>' : ''}
+          </div>
+          <div class="similar-item__meta">
+            ${candidate.year} \u2022 ${formatDistance(candidate.mileage)} \u2022 ${esc(candidate.city)}
+          </div>
+          <div class="similar-item__meta">
+            ${match.reasons.slice(0, 3).join(' \u2022 ')}
+          </div>
+        </div>
+        <div class="similar-item__prices">
+          ${candidate.startingPrice != null ? `<div class="similar-item__start">${formatPrice(candidate.startingPrice)}</div>` : ''}
+          ${priceDiff != null && priceDiff !== 0 ? `<div class="${priceDiff < 0 ? 'similar-item__sold price-down' : 'similar-item__start price-up'}">${priceDiff > 0 ? '+' : ''}${formatPrice(priceDiff).replace(/\s?€/g, ' €')} </div>` : ''}
+          <span class="chip chip--${statusColor}" style="font-size:9px;padding:1px 5px;">${statusLabel}</span>
+          ${kmDiff !== 0 ? `<div class="similar-item__meta ${kmDiff < 0 ? 'price-down' : 'price-up'}">${kmDiff > 0 ? '+' : ''}${numberFormatter.format(kmDiff)} km</div>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <section class="card">
+      <h2 class="card__title"><span class="card__icon">&#127968;</span> Similaires disponibles ailleurs</h2>
+      ${summary}
       <div class="similar-list">${items}</div>
     </section>
   `;
