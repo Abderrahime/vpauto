@@ -116,15 +116,24 @@ const dateFormatter = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium' });
 
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let showDebug = false;
+let hasRenderedOnce = false;
+let isRefreshing = false;
+let pendingRefresh = false;
 
 void refreshPanel();
 
 browser.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local') return;
-  if (!changes.currentVehicle && !changes.currentVehicleList && !changes.scrapeDebug && !changes.batchTrackingResult && !changes.backgroundDebug && !changes.vehicleVisits) return;
+  if (!changes.currentVehicle && !changes.currentVehicleList && !changes.scrapeDebug && !changes.batchTrackingResult && !changes.vehicleVisits) return;
 
   if (refreshTimer) clearTimeout(refreshTimer);
-  refreshTimer = setTimeout(() => void refreshPanel(), 150);
+  refreshTimer = setTimeout(() => {
+    if (isRefreshing) {
+      pendingRefresh = true;
+      return;
+    }
+    void refreshPanel();
+  }, 150);
 });
 
 async function syncCurrentVehicleFromPanel(
@@ -221,145 +230,153 @@ async function syncCurrentVehicleFromPanel(
 }
 
 async function refreshPanel(): Promise<void> {
-  root.innerHTML = renderLoading();
+  if (isRefreshing) {
+    pendingRefresh = true;
+    return;
+  }
+  isRefreshing = true;
 
-  const [storage, health, bgPing] = await Promise.all([
-    browser.storage.local.get(['currentVehicle', 'currentVehicleList', 'scrapeDebug', 'batchTrackingResult', 'backgroundDebug', 'vehicleVisits']),
-    api.healthCheck(),
-    api.pingBackground().catch(() => null),
-  ]);
+  if (!hasRenderedOnce) {
+    root.innerHTML = renderLoading();
+  }
 
-  const state = storage as StoredPanelState;
-  const isApiOnline = health !== null;
-  const effectiveBackgroundDebug = bgPing?.data?.ok
-    ? {
-        ...state.backgroundDebug,
-        status: 'ping_ok',
-        updatedAt: bgPing.data.timestamp,
-        lastStage: 'ping_ok',
-        lastError: null,
+  try {
+    const [storage, health] = await Promise.all([
+      browser.storage.local.get(['currentVehicle', 'currentVehicleList', 'scrapeDebug', 'batchTrackingResult', 'backgroundDebug', 'vehicleVisits']),
+      api.healthCheck(),
+    ]);
+
+    const state = storage as StoredPanelState;
+    const isApiOnline = health !== null;
+    const effectiveBackgroundDebug = state.backgroundDebug;
+
+    void api.pingBackground().catch(() => null);
+
+    if (state.currentVehicle?.snapshot) {
+      let currentVehicle = state.currentVehicle;
+      let effectiveScrapeDebug = state.scrapeDebug;
+      if (isApiOnline && !currentVehicle.vehicleId) {
+        const synced = await syncCurrentVehicleFromPanel(currentVehicle, state.scrapeDebug);
+        currentVehicle = synced.currentVehicle;
+        effectiveScrapeDebug = synced.scrapeDebug;
       }
-    : state.backgroundDebug;
 
-  // Prioritize currentVehicle: if the detail scraper set it, show vehicle view.
-  // Only show list view if there's no vehicle data (list page clears currentVehicle).
-  if (state.currentVehicle?.snapshot) {
-    let currentVehicle = state.currentVehicle;
-    let effectiveScrapeDebug = state.scrapeDebug;
-    if (isApiOnline && !currentVehicle.vehicleId) {
-      const synced = await syncCurrentVehicleFromPanel(currentVehicle, state.scrapeDebug);
-      currentVehicle = synced.currentVehicle;
-      effectiveScrapeDebug = synced.scrapeDebug;
-    }
+      const snapshot = currentVehicle.snapshot;
+      let history: VehicleHistory | null = null;
+      let badges: VehicleBadge[] | null = null;
+      let crossAuction: CrossAuctionData | null = null;
+      let similarAvailable: MatchResult[] | null = null;
+      let similarSold: SimilarSoldData | null = null;
 
-    const snapshot = currentVehicle.snapshot;
-    let history: VehicleHistory | null = null;
-    let badges: VehicleBadge[] | null = null;
-    let crossAuction: CrossAuctionData | null = null;
-    let similarAvailable: MatchResult[] | null = null;
-    let similarSold: SimilarSoldData | null = null;
+      if (!currentVehicle.vehicleId && (snapshot.reference || snapshot.hashId)) {
+        const lookup = await api.lookup({
+          reference: snapshot.reference || undefined,
+          hashId: snapshot.hashId || undefined,
+        });
 
-    // If the detail page is displayed but the direct save did not return a vehicleId,
-    // recover the DB identity from reference/hashId when possible.
-    if (!currentVehicle.vehicleId && (snapshot.reference || snapshot.hashId)) {
-      const lookup = await api.lookup({
-        reference: snapshot.reference || undefined,
-        hashId: snapshot.hashId || undefined,
-      });
+        if (lookup?.vehicleId) {
+          currentVehicle = {
+            ...currentVehicle,
+            vehicleId: lookup.vehicleId,
+          };
+          void browser.storage.local.set({ currentVehicle }).catch(() => {});
+          effectiveScrapeDebug = {
+            ...effectiveScrapeDebug,
+            stage: 'detail_lookup_recovered',
+            pageType: 'detail',
+            url: snapshot.sourceUrl,
+            hashId: snapshot.hashId,
+            brand: snapshot.brand,
+            model: snapshot.model,
+            backendVehicleId: lookup.vehicleId,
+            reason: effectiveScrapeDebug?.reason || 'lookup_recovered_existing_vehicle',
+            timestamp: new Date().toISOString(),
+          };
+        }
+      }
 
-      if (lookup?.vehicleId) {
-        currentVehicle = {
-          ...currentVehicle,
-          vehicleId: lookup.vehicleId,
-        };
-        void browser.storage.local.set({ currentVehicle }).catch(() => {});
+      if (currentVehicle.vehicleId) {
+        const currentStage = effectiveScrapeDebug?.stage;
+        const failedStage = currentStage === 'detail_save_failed' || currentStage === 'detail_scraped';
+
         effectiveScrapeDebug = {
           ...effectiveScrapeDebug,
-          stage: 'detail_lookup_recovered',
+          stage: failedStage ? 'detail_saved' : (effectiveScrapeDebug?.stage || 'detail_saved'),
           pageType: 'detail',
           url: snapshot.sourceUrl,
           hashId: snapshot.hashId,
           brand: snapshot.brand,
           model: snapshot.model,
-          backendVehicleId: lookup.vehicleId,
-          reason: effectiveScrapeDebug?.reason || 'lookup_recovered_existing_vehicle',
-          timestamp: new Date().toISOString(),
+          backendVehicleId: currentVehicle.vehicleId,
+          backendSnapshotId: currentVehicle.snapshotId ?? effectiveScrapeDebug?.backendSnapshotId ?? null,
+          reason: failedStage ? null : (effectiveScrapeDebug?.reason ?? null),
+          timestamp: effectiveScrapeDebug?.timestamp || new Date().toISOString(),
         };
       }
+
+      const promises: Promise<void>[] = [];
+
+      if (currentVehicle.vehicleId) {
+        promises.push(
+          Promise.all([
+            api.getHistory(currentVehicle.vehicleId),
+            api.getBadges(currentVehicle.vehicleId),
+          ]).then(([h, b]) => { history = h; badges = b; })
+        );
+      }
+
+      if (snapshot.hashId) {
+        promises.push(
+          api.getCrossAuction(snapshot.hashId).then(d => { crossAuction = d; })
+        );
+      }
+
+      if (snapshot.brand) {
+        promises.push(
+          api.findSimilar(snapshot, currentVehicle.vehicleId)
+            .then(d => { similarAvailable = d; })
+        );
+        promises.push(
+          api.getSimilarSold(snapshot.brand, snapshot.model, snapshot.year, snapshot.hashId)
+            .then(d => { similarSold = d; })
+        );
+      }
+
+      await Promise.all(promises);
+
+      root.innerHTML = renderVehicleState({
+        currentVehicle,
+        currentVehicleList: state.currentVehicleList,
+        batchTracking: state.batchTrackingResult,
+        scrapeDebug: effectiveScrapeDebug,
+        vehicleVisits: state.vehicleVisits,
+        backgroundDebug: effectiveBackgroundDebug,
+        history,
+        badges,
+        crossAuction,
+        similarAvailable,
+        similarSold,
+        isApiOnline,
+      });
+    } else {
+      root.innerHTML = renderListState({
+        ...state,
+        backgroundDebug: effectiveBackgroundDebug,
+      }, isApiOnline);
     }
 
-    if (currentVehicle.vehicleId) {
-      const currentStage = effectiveScrapeDebug?.stage;
-      const failedStage = currentStage === 'detail_save_failed' || currentStage === 'detail_scraped';
-
-      effectiveScrapeDebug = {
-        ...effectiveScrapeDebug,
-        stage: failedStage ? 'detail_saved' : (effectiveScrapeDebug?.stage || 'detail_saved'),
-        pageType: 'detail',
-        url: snapshot.sourceUrl,
-        hashId: snapshot.hashId,
-        brand: snapshot.brand,
-        model: snapshot.model,
-        backendVehicleId: currentVehicle.vehicleId,
-        backendSnapshotId: currentVehicle.snapshotId ?? effectiveScrapeDebug?.backendSnapshotId ?? null,
-        reason: failedStage ? null : (effectiveScrapeDebug?.reason ?? null),
-        timestamp: effectiveScrapeDebug?.timestamp || new Date().toISOString(),
-      };
+    bindActions(state);
+    hasRenderedOnce = true;
+  } catch (error) {
+    root.innerHTML = renderError(error instanceof Error ? error.message : String(error));
+    hasRenderedOnce = true;
+  } finally {
+    isRefreshing = false;
+    if (pendingRefresh) {
+      pendingRefresh = false;
+      setTimeout(() => void refreshPanel(), 0);
     }
-
-    // Fetch all data in parallel
-    const promises: Promise<void>[] = [];
-
-    if (currentVehicle.vehicleId) {
-      promises.push(
-        Promise.all([
-          api.getHistory(currentVehicle.vehicleId),
-          api.getBadges(currentVehicle.vehicleId),
-        ]).then(([h, b]) => { history = h; badges = b; })
-      );
-    }
-
-    if (snapshot.hashId) {
-      promises.push(
-        api.getCrossAuction(snapshot.hashId).then(d => { crossAuction = d; })
-      );
-    }
-
-    if (snapshot.brand) {
-      promises.push(
-        api.findSimilar(snapshot, currentVehicle.vehicleId)
-          .then(d => { similarAvailable = d; })
-      );
-      promises.push(
-        api.getSimilarSold(snapshot.brand, snapshot.model, snapshot.year, snapshot.hashId)
-          .then(d => { similarSold = d; })
-      );
-    }
-
-    await Promise.all(promises);
-
-    root.innerHTML = renderVehicleState({
-      currentVehicle,
-      currentVehicleList: state.currentVehicleList,
-      batchTracking: state.batchTrackingResult,
-      scrapeDebug: effectiveScrapeDebug,
-      vehicleVisits: state.vehicleVisits,
-      backgroundDebug: effectiveBackgroundDebug,
-      history,
-      badges,
-      crossAuction,
-      similarAvailable,
-      similarSold,
-      isApiOnline,
-    });
-  } else {
-    root.innerHTML = renderListState({
-      ...state,
-      backgroundDebug: effectiveBackgroundDebug,
-    }, isApiOnline);
   }
-
-  bindActions(state);
 }
 
 function bindActions(state: StoredPanelState): void {
@@ -1424,6 +1441,19 @@ function renderLoading(): string {
         <div class="loading__spinner"></div>
         <p>Chargement...</p>
       </div>
+    </div>
+  `;
+}
+
+function renderError(message: string): string {
+  return `
+    <div class="panel">
+      <section class="empty-hero">
+        <div class="empty-hero__icon">&#9888;</div>
+        <h2>Erreur de chargement</h2>
+        <p>${esc(message || 'Erreur inconnue')}</p>
+      </section>
+      ${renderActionsBar(false)}
     </div>
   `;
 }
