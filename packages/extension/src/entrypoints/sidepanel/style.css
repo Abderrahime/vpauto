@@ -555,6 +555,273 @@ button, a { font: inherit; }
   color: var(--text-muted);
 }
 
+/* ── Importer ─────────────────────────────────────────────────────── */
+
+.import-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.import-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at top right, rgba(244, 121, 32, 0.12), transparent 45%);
+  pointer-events: none;
+}
+
+.import-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  position: relative;
+}
+
+.import-card__subtitle {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.import-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  position: relative;
+}
+
+.import-grid--secondary {
+  margin-top: 10px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field__label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.field__control {
+  width: 100%;
+  min-height: 38px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  outline: none;
+}
+
+.field__control:focus {
+  border-color: var(--border-accent);
+  box-shadow: 0 0 0 3px rgba(244, 121, 32, 0.12);
+}
+
+.import-hint {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  position: relative;
+}
+
+.import-hint__meta {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 10px;
+}
+
+.import-job {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  position: relative;
+}
+
+.import-job--running {
+  border-color: rgba(59, 130, 246, 0.25);
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.import-job--done {
+  border-color: rgba(34, 197, 94, 0.25);
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.import-job--error,
+.import-job--cancelled {
+  border-color: rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.import-job__top,
+.import-job__stats {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.import-job__top {
+  margin-bottom: 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.import-job__progress {
+  width: 100%;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.import-job__bar {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), #ffb15a);
+  transition: width 0.2s ease;
+}
+
+.import-job__stats {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.import-job__stats--secondary {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.import-job__current {
+  margin-top: 10px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.import-job__changes {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.import-job__toolbar {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.import-job__filter,
+.import-job__search {
+  width: 100%;
+}
+
+.import-job__meta--changes {
+  margin-top: 8px;
+}
+
+.import-job__change {
+  display: grid;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 11px;
+}
+
+.import-job__change-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.import-job__change strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.import-job__change-link {
+  flex-shrink: 0;
+}
+
+.import-job__change span {
+  color: var(--text-secondary);
+}
+
+.import-job__empty {
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.import-job__change--new {
+  border-color: rgba(59, 130, 246, 0.28);
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.import-job__change--price_up {
+  border-color: rgba(239, 68, 68, 0.28);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.import-job__change--price_down {
+  border-color: rgba(34, 197, 94, 0.28);
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.import-job__change--status_change,
+.import-job__change--updated {
+  border-color: rgba(245, 158, 11, 0.28);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.import-job__errors {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 4px;
+  color: #ffb4b4;
+  font-size: 11px;
+}
+
+.import-job__pager {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.actions-bar--import .btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
 /* ── Empty State ──────────────────────────────────────────────────── */
 
 .empty-hero {
@@ -638,6 +905,12 @@ button, a { font: inherit; }
   padding: 4px 10px;
   font-size: 10px;
   margin-left: auto;
+}
+
+@media (max-width: 420px) {
+  .import-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ── Debug ─────────────────────────────────────────────────────────── */

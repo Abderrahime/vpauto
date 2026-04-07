@@ -252,6 +252,7 @@ app.post('/snapshot', async (c) => {
     // Find or create the vehicle
     const vehicleMatch = await findExactVehicle(data);
     let vehicleId = vehicleMatch.vehicleId;
+    const createdVehicle = !vehicleId;
 
     if (vehicleMatch.duplicateVehicleId && vehicleId && vehicleMatch.duplicateVehicleId !== vehicleId) {
       await mergeVehicleIntoCanonical(vehicleMatch.duplicateVehicleId, vehicleId);
@@ -316,16 +317,16 @@ app.post('/snapshot', async (c) => {
         });
         console.log(`[VPauto] Snapshot: Enriched recent snapshot id=${enriched.id} for vehicle=${vehicleId}`);
 
-        return c.json<ApiResponse<{ vehicleId: number; snapshotId: number; duplicate: boolean }>>({
+        return c.json<ApiResponse<{ vehicleId: number; snapshotId: number; duplicate: boolean; createdVehicle: boolean }>>({
           success: true,
-          data: { vehicleId, snapshotId: enriched.id, duplicate: false },
+          data: { vehicleId, snapshotId: enriched.id, duplicate: false, createdVehicle },
         });
       }
 
       console.log(`[VPauto] Snapshot: Duplicate (recent snapshot id=${recentSnapshot.id}) for vehicle=${vehicleId}`);
-      return c.json<ApiResponse<{ vehicleId: number; snapshotId: number; duplicate: boolean }>>({
+      return c.json<ApiResponse<{ vehicleId: number; snapshotId: number; duplicate: boolean; createdVehicle: boolean }>>({
         success: true,
-        data: { vehicleId, snapshotId: recentSnapshot.id, duplicate: true },
+        data: { vehicleId, snapshotId: recentSnapshot.id, duplicate: true, createdVehicle },
       });
     }
 
@@ -334,9 +335,9 @@ app.post('/snapshot', async (c) => {
     });
     console.log(`[VPauto] Snapshot: Created snapshot id=${snapshot.id} for vehicle=${vehicleId}`);
 
-    return c.json<ApiResponse<{ vehicleId: number; snapshotId: number; duplicate: boolean }>>({
+    return c.json<ApiResponse<{ vehicleId: number; snapshotId: number; duplicate: boolean; createdVehicle: boolean }>>({
       success: true,
-      data: { vehicleId, snapshotId: snapshot.id, duplicate: false },
+      data: { vehicleId, snapshotId: snapshot.id, duplicate: false, createdVehicle },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

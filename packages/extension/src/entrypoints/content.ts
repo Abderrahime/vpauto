@@ -112,6 +112,7 @@ async function persistDetailSnapshot(snapshot: import('@vpauto/shared').VehicleS
   vehicleId: number | null;
   snapshotId: number | null;
   duplicate: boolean;
+  createdVehicle: boolean;
   recoveredByLookup: boolean;
   error: string | null;
 }> {
@@ -131,6 +132,7 @@ async function persistDetailSnapshot(snapshot: import('@vpauto/shared').VehicleS
       vehicleId: saveResult.data.vehicleId,
       snapshotId: saveResult.data.snapshotId,
       duplicate: saveResult.data.duplicate,
+      createdVehicle: !!saveResult.data.createdVehicle,
       recoveredByLookup: false,
       error: saveResult.error,
     };
@@ -151,6 +153,7 @@ async function persistDetailSnapshot(snapshot: import('@vpauto/shared').VehicleS
       vehicleId: lookup.vehicleId,
       snapshotId: null,
       duplicate: true,
+      createdVehicle: false,
       recoveredByLookup: true,
       error: saveResult.error || 'lookup_recovered_existing_vehicle',
     };
@@ -161,6 +164,7 @@ async function persistDetailSnapshot(snapshot: import('@vpauto/shared').VehicleS
     vehicleId: null,
     snapshotId: null,
     duplicate: false,
+    createdVehicle: false,
     recoveredByLookup: false,
     error: saveResult.error,
   };
@@ -268,7 +272,7 @@ async function handleVehiclePage() {
   if (persistence.vehicleId) {
     currentVehicle.vehicleId = persistence.vehicleId;
     currentVehicle.snapshotId = persistence.snapshotId;
-    currentVehicle.isNew = persistence.recoveredByLookup ? undefined : !persistence.duplicate;
+    currentVehicle.isNew = persistence.recoveredByLookup ? undefined : persistence.createdVehicle;
 
     // Update storage with vehicleId so side panel can fetch intelligence data
     void browser.storage.local.set({ currentVehicle }).catch(() => {});

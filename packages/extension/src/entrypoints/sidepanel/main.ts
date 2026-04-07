@@ -1,6 +1,7 @@
 import { browser } from 'wxt/browser';
 import type { MatchResult, VehicleBadge, VehicleHistory, VehicleSnapshot } from '@vpauto/shared';
 import { api } from '../../lib/api';
+import { scrapeRemotePage, scrapeVehicleDetailFromHtml } from '../../lib/scraper';
 import './style.css';
 
 interface CurrentVehicleState {
@@ -99,6 +100,55 @@ interface ScrapeDebugState {
   tabId?: number;
 }
 
+type ImportScope = 'detected' | 'current_page' | 'first_n' | 'page_range';
+type ImportMode = 'silent' | 'visible';
+
+interface ImportOptions {
+  scope: ImportScope;
+  mode: ImportMode;
+  firstN: number;
+  fromPage: number;
+  toPage: number;
+}
+
+interface ImportTarget {
+  url: string;
+  label: string;
+}
+
+interface ImportChangeEntry {
+  label: string;
+  kind: 'new' | 'price_up' | 'price_down' | 'status_change' | 'updated';
+  detail: string;
+  url: string;
+}
+
+type ImportChangeFilter = 'all' | ImportChangeEntry['kind'];
+
+interface ImportJobState {
+  status: 'idle' | 'preparing' | 'running' | 'done' | 'error' | 'cancelled';
+  scope: ImportScope;
+  mode: ImportMode;
+  total: number;
+  processed: number;
+  saved: number;
+  duplicates: number;
+  failed: number;
+  newVehicles: number;
+  updated: number;
+  unchanged: number;
+  priceUps: number;
+  priceDowns: number;
+  statusChanges: number;
+  currentLabel?: string;
+  lastMessage?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  errors: string[];
+  changes: ImportChangeEntry[];
+  abortRequested?: boolean;
+}
+
 const root = document.querySelector<HTMLDivElement>('#app');
 
 if (!root) {
@@ -119,6 +169,19 @@ let showDebug = false;
 let hasRenderedOnce = false;
 let isRefreshing = false;
 let pendingRefresh = false;
+let importOptions: ImportOptions = {
+  scope: 'detected',
+  mode: 'silent',
+  firstN: 50,
+  fromPage: 1,
+  toPage: 3,
+};
+let importJob: ImportJobState | null = null;
+let importChangeQuery = '';
+let importChangeFilter: ImportChangeFilter = 'all';
+let importChangePage = 1;
+
+const IMPORT_CHANGE_PAGE_SIZE = 12;
 
 void refreshPanel();
 
@@ -126,6 +189,10 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local') return;
   if (!changes.currentVehicle && !changes.currentVehicleList && !changes.scrapeDebug && !changes.batchTrackingResult && !changes.vehicleVisits) return;
 
+  scheduleRefresh();
+});
+
+function scheduleRefresh(delay = 150): void {
   if (refreshTimer) clearTimeout(refreshTimer);
   refreshTimer = setTimeout(() => {
     if (isRefreshing) {
@@ -133,8 +200,8 @@ browser.storage.onChanged.addListener((changes, areaName) => {
       return;
     }
     void refreshPanel();
-  }, 150);
-});
+  }, delay);
+}
 
 async function syncCurrentVehicleFromPanel(
   currentVehicle: CurrentVehicleState,
@@ -152,7 +219,7 @@ async function syncCurrentVehicleFromPanel(
       ...currentVehicle,
       vehicleId: saveResult.data.vehicleId,
       snapshotId: saveResult.data.snapshotId,
-      isNew: !saveResult.data.duplicate,
+      isNew: !!saveResult.data.createdVehicle,
     };
 
     const nextDebug: ScrapeDebugState = {
@@ -227,6 +294,484 @@ async function syncCurrentVehicleFromPanel(
   });
 
   return { currentVehicle, scrapeDebug: nextDebug };
+}
+
+async function persistImportedSnapshot(snapshot: VehicleSnapshot): Promise<{
+  vehicleId: number | null;
+  duplicate: boolean;
+  createdVehicle: boolean;
+  recoveredByLookup: boolean;
+  error: string | null;
+}> {
+  const saveResult = await api.saveSnapshotDetailed(snapshot);
+
+  if (saveResult.data?.vehicleId) {
+    return {
+      vehicleId: saveResult.data.vehicleId,
+      duplicate: !!saveResult.data.duplicate,
+      createdVehicle: !!saveResult.data.createdVehicle,
+      recoveredByLookup: false,
+      error: saveResult.error,
+    };
+  }
+
+  const lookup = await api.lookup({
+    reference: snapshot.reference || undefined,
+    hashId: snapshot.hashId || undefined,
+  }).catch(() => null);
+
+  if (lookup?.vehicleId) {
+    return {
+      vehicleId: lookup.vehicleId,
+      duplicate: true,
+      createdVehicle: false,
+      recoveredByLookup: true,
+      error: saveResult.error || 'lookup_recovered_existing_vehicle',
+    };
+  }
+
+  return {
+    vehicleId: null,
+    duplicate: false,
+    createdVehicle: false,
+    recoveredByLookup: false,
+    error: saveResult.error || 'import_save_failed',
+  };
+}
+
+function describeImportChange(
+  label: string,
+  url: string,
+  createdVehicle: boolean,
+  previous: VehicleSnapshot | null,
+  next: VehicleSnapshot,
+): {
+  isNew: boolean;
+  updated: boolean;
+  unchanged: boolean;
+  priceDirection: 'up' | 'down' | null;
+  statusChanged: boolean;
+  changeEntry: ImportChangeEntry | null;
+} {
+  if (!previous) {
+    return createdVehicle
+      ? {
+          isNew: true,
+          updated: false,
+          unchanged: false,
+          priceDirection: null,
+          statusChanged: false,
+          changeEntry: {
+            label,
+            kind: 'new',
+            detail: 'Nouveau vehicule enregistre.',
+            url,
+          },
+        }
+      : {
+          isNew: false,
+          updated: true,
+          unchanged: false,
+          priceDirection: null,
+          statusChanged: false,
+          changeEntry: {
+            label,
+            kind: 'updated',
+            detail: 'Vehicule rattache a un enregistrement existant.',
+            url,
+          },
+        };
+  }
+
+  const previousPrice = previous.startingPrice ?? null;
+  const nextPrice = next.startingPrice ?? null;
+  const previousStatus = previous.status || 'available';
+  const nextStatus = next.status || 'available';
+
+  const priceDelta = previousPrice != null && nextPrice != null && previousPrice !== nextPrice
+    ? nextPrice - previousPrice
+    : null;
+  const priceDirection = priceDelta == null
+    ? null
+    : priceDelta > 0
+      ? 'up'
+      : priceDelta < 0
+        ? 'down'
+        : null;
+  const statusChanged = previousStatus !== nextStatus;
+  const soldPriceChanged = (previous.soldPrice ?? null) !== (next.soldPrice ?? null);
+  const lotChanged = (previous.lotNumber ?? null) !== (next.lotNumber ?? null);
+  const updated = priceDelta !== null || statusChanged || soldPriceChanged || lotChanged;
+
+  let changeEntry: ImportChangeEntry | null = null;
+  if (priceDelta !== null) {
+    changeEntry = {
+      label,
+      kind: priceDelta > 0 ? 'price_up' : 'price_down',
+      detail: `${priceDelta > 0 ? '+' : ''}${priceDelta.toLocaleString('fr-FR')} € sur la mise a prix`,
+      url,
+    };
+  } else if (statusChanged) {
+    changeEntry = {
+      label,
+      kind: 'status_change',
+      detail: `Statut: ${formatStatus(previousStatus)} → ${formatStatus(nextStatus)}`,
+      url,
+    };
+  } else if (updated) {
+    changeEntry = {
+      label,
+      kind: 'updated',
+      detail: 'Fiche enrichie avec de nouvelles informations.',
+      url,
+    };
+  }
+
+  return {
+    isNew: false,
+    updated,
+    unchanged: !updated,
+    priceDirection,
+    statusChanged,
+    changeEntry,
+  };
+}
+
+function dedupeImportTargets(targets: ImportTarget[]): ImportTarget[] {
+  const seen = new Set<string>();
+  const deduped: ImportTarget[] = [];
+
+  for (const target of targets) {
+    if (!target.url || seen.has(target.url)) continue;
+    seen.add(target.url);
+    deduped.push(target);
+  }
+
+  return deduped;
+}
+
+function buildImportTargetsFromList(list: Partial<VehicleSnapshot>[], limit?: number): ImportTarget[] {
+  const items = limit ? list.slice(0, limit) : list;
+  return dedupeImportTargets(items
+    .filter((vehicle) => !!vehicle.sourceUrl)
+    .map((vehicle) => ({
+      url: vehicle.sourceUrl!,
+      label: [vehicle.brand, vehicle.model, vehicle.city].filter(Boolean).join(' • ') || vehicle.hashId || 'Vehicule VPauto',
+    })));
+}
+
+function buildPagedUrl(baseListUrl: string, page: number): string {
+  const url = new URL(baseListUrl);
+  if (page <= 1) {
+    url.searchParams.delete('page');
+  } else {
+    url.searchParams.set('page', String(page));
+  }
+  return url.toString();
+}
+
+async function collectImportTargets(state: StoredPanelState): Promise<ImportTarget[]> {
+  const detectedList = state.currentVehicleList || [];
+  const listUrl = state.scrapeDebug?.pageType === 'list' ? state.scrapeDebug.url : undefined;
+
+  if (importOptions.scope === 'detected') {
+    if (!detectedList.length) {
+      throw new Error('Aucun vehicule detecte dans la liste courante.');
+    }
+    return buildImportTargetsFromList(detectedList);
+  }
+
+  if (importOptions.scope === 'first_n') {
+    if (!detectedList.length) {
+      throw new Error('La liste detectee est vide. Attends la fin du scraping.');
+    }
+    const firstN = Math.max(1, Math.floor(importOptions.firstN || 1));
+    return buildImportTargetsFromList(detectedList, firstN);
+  }
+
+  if (!listUrl) {
+    throw new Error('Ouvre une page liste VPauto pour lancer un import.');
+  }
+
+  if (importOptions.scope === 'current_page') {
+    const pageVehicles = await scrapeRemotePage(listUrl);
+    if (!pageVehicles.length) {
+      throw new Error('Impossible de lire les vehicules de la page courante.');
+    }
+    return buildImportTargetsFromList(pageVehicles);
+  }
+
+  const fromPage = Math.max(1, Math.floor(importOptions.fromPage || 1));
+  const toPage = Math.max(fromPage, Math.floor(importOptions.toPage || fromPage));
+  const targets: ImportTarget[] = [];
+
+  for (let page = fromPage; page <= toPage; page += 1) {
+    const pageUrl = buildPagedUrl(listUrl, page);
+    const pageVehicles = await scrapeRemotePage(pageUrl);
+    targets.push(...buildImportTargetsFromList(pageVehicles));
+  }
+
+  if (!targets.length) {
+    throw new Error('Aucun vehicule trouve sur la plage de pages demandee.');
+  }
+
+  return dedupeImportTargets(targets);
+}
+
+function patchImportJob(patch: Partial<ImportJobState>): void {
+  if (!importJob) return;
+  importJob = {
+    ...importJob,
+    ...patch,
+  };
+  scheduleRefresh(0);
+}
+
+function normalizeSearchValue(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+function getVisibleImportChanges(): {
+  pageItems: ImportChangeEntry[];
+  totalMatches: number;
+  totalPages: number;
+  currentPage: number;
+} {
+  const allChanges = importJob?.changes || [];
+  const query = normalizeSearchValue(importChangeQuery);
+
+  const filtered = allChanges.filter((change) => {
+    if (importChangeFilter !== 'all' && change.kind !== importChangeFilter) {
+      return false;
+    }
+
+    if (!query) {
+      return true;
+    }
+
+    const haystack = normalizeSearchValue(`${change.label} ${change.detail} ${change.url}`);
+    return haystack.includes(query);
+  });
+
+  const totalMatches = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(totalMatches / IMPORT_CHANGE_PAGE_SIZE));
+  const currentPage = Math.min(importChangePage, totalPages);
+  const startIndex = (currentPage - 1) * IMPORT_CHANGE_PAGE_SIZE;
+
+  return {
+    pageItems: filtered.slice(startIndex, startIndex + IMPORT_CHANGE_PAGE_SIZE),
+    totalMatches,
+    totalPages,
+    currentPage,
+  };
+}
+
+function cancelImportJob(): void {
+  if (!importJob || importJob.status !== 'running') return;
+  importJob.abortRequested = true;
+  importJob.lastMessage = 'Arret demande...';
+  scheduleRefresh(0);
+}
+
+async function importVehicleSilently(target: ImportTarget): Promise<{
+  ok: boolean;
+  duplicate: boolean;
+  error: string | null;
+  isNew: boolean;
+  updated: boolean;
+  unchanged: boolean;
+  priceDirection: 'up' | 'down' | null;
+  statusChanged: boolean;
+  changeEntry: ImportChangeEntry | null;
+}> {
+  let previousSnapshot: VehicleSnapshot | null = null;
+
+  const res = await fetch(target.url, { credentials: 'include' });
+  if (!res.ok) {
+    return {
+      ok: false,
+      duplicate: false,
+      error: `HTTP ${res.status}`,
+      isNew: false,
+      updated: false,
+      unchanged: false,
+      priceDirection: null,
+      statusChanged: false,
+      changeEntry: null,
+    };
+  }
+
+  const html = await res.text();
+  const snapshot = scrapeVehicleDetailFromHtml(html, target.url);
+  if (!snapshot || !snapshot.brand) {
+    return {
+      ok: false,
+      duplicate: false,
+      error: 'detail_scrape_failed',
+      isNew: false,
+      updated: false,
+      unchanged: false,
+      priceDirection: null,
+      statusChanged: false,
+      changeEntry: null,
+    };
+  }
+
+  const lookupBeforeSave = await api.lookup({
+    reference: snapshot.reference || undefined,
+    hashId: snapshot.hashId || undefined,
+  }).catch(() => null);
+  previousSnapshot = lookupBeforeSave?.lastSnapshot || null;
+
+  const persisted = await persistImportedSnapshot(snapshot);
+  const change = describeImportChange(target.label, target.url, persisted.createdVehicle, previousSnapshot, snapshot);
+
+  return {
+    ok: !!persisted.vehicleId,
+    duplicate: persisted.duplicate || persisted.recoveredByLookup,
+    error: persisted.error,
+    isNew: persisted.createdVehicle,
+    updated: change.updated,
+    unchanged: change.unchanged,
+    priceDirection: change.priceDirection,
+    statusChanged: change.statusChanged,
+    changeEntry: change.changeEntry,
+  };
+}
+
+async function runSilentImport(state: StoredPanelState): Promise<void> {
+  if (importJob && (importJob.status === 'preparing' || importJob.status === 'running')) {
+    return;
+  }
+
+  if (importOptions.mode !== 'silent') {
+    importJob = {
+      status: 'error',
+      scope: importOptions.scope,
+      mode: importOptions.mode,
+      total: 0,
+      processed: 0,
+      saved: 0,
+      duplicates: 0,
+      failed: 0,
+      newVehicles: 0,
+      updated: 0,
+      unchanged: 0,
+      priceUps: 0,
+      priceDowns: 0,
+      statusChanges: 0,
+      errors: ['Le mode avec onglets sera ajoute apres le flux silencieux.'],
+      changes: [],
+      lastMessage: 'Mode avec onglets non active pour le moment.',
+      finishedAt: new Date().toISOString(),
+    };
+    scheduleRefresh(0);
+    return;
+  }
+
+  importJob = {
+    status: 'preparing',
+    scope: importOptions.scope,
+    mode: importOptions.mode,
+    total: 0,
+    processed: 0,
+    saved: 0,
+    duplicates: 0,
+    failed: 0,
+    newVehicles: 0,
+    updated: 0,
+    unchanged: 0,
+    priceUps: 0,
+    priceDowns: 0,
+    statusChanges: 0,
+    errors: [],
+    changes: [],
+    lastMessage: 'Preparation de la file d\'import...',
+    startedAt: new Date().toISOString(),
+  };
+  importChangePage = 1;
+  scheduleRefresh(0);
+
+  try {
+    const targets = await collectImportTargets(state);
+    patchImportJob({
+      status: 'running',
+      total: targets.length,
+      lastMessage: 'Import silencieux en cours...',
+    });
+
+    for (let index = 0; index < targets.length; index += 1) {
+      if (!importJob || importJob.abortRequested) {
+        importJob = {
+          ...(importJob as ImportJobState),
+          status: 'cancelled',
+          finishedAt: new Date().toISOString(),
+          lastMessage: 'Import interrompu.',
+        };
+        scheduleRefresh(0);
+        return;
+      }
+
+      const target = targets[index];
+      patchImportJob({
+        currentLabel: target.label,
+        lastMessage: `Traitement ${index + 1}/${targets.length}`,
+      });
+
+      try {
+        const result = await importVehicleSilently(target);
+        patchImportJob({
+          processed: index + 1,
+          saved: (importJob?.saved || 0) + (result.ok ? 1 : 0),
+          duplicates: (importJob?.duplicates || 0) + (result.duplicate ? 1 : 0),
+          failed: (importJob?.failed || 0) + (result.ok ? 0 : 1),
+          newVehicles: (importJob?.newVehicles || 0) + (result.isNew ? 1 : 0),
+          updated: (importJob?.updated || 0) + (result.updated ? 1 : 0),
+          unchanged: (importJob?.unchanged || 0) + (result.unchanged ? 1 : 0),
+          priceUps: (importJob?.priceUps || 0) + (result.priceDirection === 'up' ? 1 : 0),
+          priceDowns: (importJob?.priceDowns || 0) + (result.priceDirection === 'down' ? 1 : 0),
+          statusChanges: (importJob?.statusChanges || 0) + (result.statusChanged ? 1 : 0),
+          errors: result.ok
+            ? (importJob?.errors || [])
+            : [...(importJob?.errors || []), `${target.label}: ${result.error || 'erreur inconnue'}`].slice(-5),
+          changes: result.changeEntry
+            ? [result.changeEntry, ...(importJob?.changes || [])]
+            : (importJob?.changes || []),
+        });
+      } catch (error) {
+        patchImportJob({
+          processed: index + 1,
+          failed: (importJob?.failed || 0) + 1,
+          errors: [...(importJob?.errors || []), `${target.label}: ${error instanceof Error ? error.message : String(error)}`].slice(-5),
+        });
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+
+    importJob = {
+      ...(importJob as ImportJobState),
+      status: 'done',
+      finishedAt: new Date().toISOString(),
+      currentLabel: undefined,
+      lastMessage: `Import termine. ${importJob?.updated || 0} fiches mises a jour, ${importJob?.newVehicles || 0} nouvelles.`,
+    };
+    scheduleRefresh(0);
+  } catch (error) {
+    importJob = {
+      ...(importJob as ImportJobState),
+      status: 'error',
+      finishedAt: new Date().toISOString(),
+      currentLabel: undefined,
+      lastMessage: 'Import impossible.',
+      errors: [error instanceof Error ? error.message : String(error)],
+    };
+    scheduleRefresh(0);
+  }
 }
 
 async function refreshPanel(): Promise<void> {
@@ -395,6 +940,73 @@ function bindActions(state: StoredPanelState): void {
       void refreshPanel();
     });
 
+  document.querySelector<HTMLSelectElement>('[data-import-scope]')
+    ?.addEventListener('change', (event) => {
+      importOptions.scope = (event.currentTarget as HTMLSelectElement).value as ImportScope;
+      scheduleRefresh(0);
+    });
+
+  document.querySelector<HTMLSelectElement>('[data-import-mode]')
+    ?.addEventListener('change', (event) => {
+      importOptions.mode = (event.currentTarget as HTMLSelectElement).value as ImportMode;
+      scheduleRefresh(0);
+    });
+
+  document.querySelector<HTMLInputElement>('[data-import-first-n]')
+    ?.addEventListener('input', (event) => {
+      const nextValue = Math.max(1, parseInt((event.currentTarget as HTMLInputElement).value || '1', 10) || 1);
+      importOptions.firstN = nextValue;
+    });
+
+  document.querySelector<HTMLInputElement>('[data-import-from-page]')
+    ?.addEventListener('input', (event) => {
+      const nextValue = Math.max(1, parseInt((event.currentTarget as HTMLInputElement).value || '1', 10) || 1);
+      importOptions.fromPage = nextValue;
+      if (importOptions.toPage < nextValue) {
+        importOptions.toPage = nextValue;
+        scheduleRefresh(0);
+      }
+    });
+
+  document.querySelector<HTMLInputElement>('[data-import-to-page]')
+    ?.addEventListener('input', (event) => {
+      const nextValue = Math.max(importOptions.fromPage, parseInt((event.currentTarget as HTMLInputElement).value || String(importOptions.fromPage), 10) || importOptions.fromPage);
+      importOptions.toPage = nextValue;
+    });
+
+  document.querySelector<HTMLButtonElement>('[data-action="start-import"]')
+    ?.addEventListener('click', () => void runSilentImport(state));
+
+  document.querySelector<HTMLButtonElement>('[data-action="cancel-import"]')
+    ?.addEventListener('click', () => cancelImportJob());
+
+  document.querySelector<HTMLInputElement>('[data-import-change-query]')
+    ?.addEventListener('input', (event) => {
+      importChangeQuery = (event.currentTarget as HTMLInputElement).value || '';
+      importChangePage = 1;
+      scheduleRefresh(0);
+    });
+
+  document.querySelector<HTMLSelectElement>('[data-import-change-filter]')
+    ?.addEventListener('change', (event) => {
+      importChangeFilter = (event.currentTarget as HTMLSelectElement).value as ImportChangeFilter;
+      importChangePage = 1;
+      scheduleRefresh(0);
+    });
+
+  document.querySelector<HTMLButtonElement>('[data-action="import-changes-prev"]')
+    ?.addEventListener('click', () => {
+      importChangePage = Math.max(1, importChangePage - 1);
+      scheduleRefresh(0);
+    });
+
+  document.querySelector<HTMLButtonElement>('[data-action="import-changes-next"]')
+    ?.addEventListener('click', () => {
+      const { totalPages } = getVisibleImportChanges();
+      importChangePage = Math.min(totalPages, importChangePage + 1);
+      scheduleRefresh(0);
+    });
+
   // Vehicle list item clicks
   document.querySelectorAll<HTMLElement>('[data-vehicle-url]').forEach(el => {
     el.addEventListener('click', () => {
@@ -527,6 +1139,7 @@ function renderListState(state: StoredPanelState, isApiOnline: boolean): string 
       ${hasVehicles ? renderAuctionSummary(list) : ''}
       ${tracking ? renderTrackingAlerts(tracking) : ''}
       ${hasVehicles ? renderTrackingSummary(tracking) : ''}
+      ${hasVehicles ? renderImportSection(state, isApiOnline) : ''}
       ${hasVehicles ? renderVehicleList(list) : renderEmptyState(isApiOnline)}
 
       ${renderActionsBar(false)}
@@ -1385,6 +1998,177 @@ function renderEmptyState(isApiOnline: boolean): string {
   `;
 }
 
+function renderImportSection(state: StoredPanelState, isApiOnline: boolean): string {
+  const list = state.currentVehicleList || [];
+  const listUrl = state.scrapeDebug?.pageType === 'list' ? state.scrapeDebug.url : '';
+  const canStart = isApiOnline
+    && !!list.length
+    && importOptions.mode === 'silent'
+    && !importJob?.status?.match(/^(preparing|running)$/);
+  const modeHint = importOptions.mode === 'silent'
+    ? 'Recupere les fiches et les sauvegarde sans ouvrir une serie d’onglets.'
+    : 'Le mode avec onglets sera ajoute ensuite. Le flux silencieux est la voie fiable pour l’instant.';
+
+  return `
+    <section class="card import-card">
+      <div class="import-card__header">
+        <div>
+          <h2 class="card__title"><span class="card__icon">&#128190;</span> Importer cette vente</h2>
+          <p class="import-card__subtitle">Alimente la base locale a la demande, sans ouvrir chaque fiche a la main.</p>
+        </div>
+        <span class="chip chip--blue">${importOptions.mode === 'silent' ? 'Silencieux' : 'Avec onglets'}</span>
+      </div>
+
+      <div class="import-grid">
+        <label class="field">
+          <span class="field__label">Portee</span>
+          <select class="field__control" data-import-scope>
+            <option value="detected" ${importOptions.scope === 'detected' ? 'selected' : ''}>Vehicules detectes (${list.length})</option>
+            <option value="current_page" ${importOptions.scope === 'current_page' ? 'selected' : ''}>Page courante</option>
+            <option value="first_n" ${importOptions.scope === 'first_n' ? 'selected' : ''}>N premiers</option>
+            <option value="page_range" ${importOptions.scope === 'page_range' ? 'selected' : ''}>Pages X a Y</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span class="field__label">Mode</span>
+          <select class="field__control" data-import-mode>
+            <option value="silent" ${importOptions.mode === 'silent' ? 'selected' : ''}>Silencieux (recommande)</option>
+            <option value="visible" ${importOptions.mode === 'visible' ? 'selected' : ''}>Avec onglets (bientot)</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="import-grid import-grid--secondary">
+        ${importOptions.scope === 'first_n' ? `
+          <label class="field">
+            <span class="field__label">Nombre</span>
+            <input class="field__control" type="number" min="1" step="1" value="${importOptions.firstN}" data-import-first-n>
+          </label>
+        ` : ''}
+        ${importOptions.scope === 'page_range' ? `
+          <label class="field">
+            <span class="field__label">Page de debut</span>
+            <input class="field__control" type="number" min="1" step="1" value="${importOptions.fromPage}" data-import-from-page>
+          </label>
+          <label class="field">
+            <span class="field__label">Page de fin</span>
+            <input class="field__control" type="number" min="${importOptions.fromPage}" step="1" value="${importOptions.toPage}" data-import-to-page>
+          </label>
+        ` : ''}
+      </div>
+
+      <div class="import-hint">
+        <div>${esc(modeHint)}</div>
+        ${listUrl ? `<div class="import-hint__meta">Source liste: ${esc(shortenUrl(listUrl))}</div>` : ''}
+      </div>
+
+      ${renderImportJobState()}
+
+      <div class="actions-bar actions-bar--import">
+        <button class="btn btn--primary" type="button" data-action="start-import" ${canStart ? '' : 'disabled'}>
+          &#11015; Lancer l'import
+        </button>
+        <button class="btn btn--ghost" type="button" data-action="cancel-import" ${(importJob?.status === 'running' || importJob?.status === 'preparing') ? '' : 'disabled'}>
+          Arreter
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+function renderImportJobState(): string {
+  if (!importJob || importJob.status === 'idle') {
+    return `
+      <div class="import-job import-job--idle">
+        <div class="import-job__meta">Pret a lancer un import cible.</div>
+      </div>
+    `;
+  }
+
+  const percent = importJob.total > 0
+    ? Math.max(4, Math.min(100, Math.round((importJob.processed / importJob.total) * 100)))
+    : (importJob.status === 'preparing' ? 8 : 100);
+  const {
+    pageItems: visibleChanges,
+    totalMatches,
+    totalPages,
+    currentPage,
+  } = getVisibleImportChanges();
+
+  return `
+    <div class="import-job import-job--${importJob.status}">
+      <div class="import-job__top">
+        <strong>${esc(importJob.lastMessage || 'Import')}</strong>
+        <span>${esc(importJob.status)}</span>
+      </div>
+      <div class="import-job__progress">
+        <div class="import-job__bar" style="width:${percent}%"></div>
+      </div>
+      <div class="import-job__stats">
+        <span>${importJob.processed}/${importJob.total || '?'}</span>
+        <span>${importJob.saved} sauves</span>
+        <span>${importJob.duplicates} deja connus</span>
+        <span>${importJob.failed} erreurs</span>
+      </div>
+      <div class="import-job__stats import-job__stats--secondary">
+        <span>${importJob.newVehicles} nouveaux</span>
+        <span>${importJob.updated} mis a jour</span>
+        <span>${importJob.unchanged} inchanges</span>
+        <span>${importJob.priceUps} hausses</span>
+        <span>${importJob.priceDowns} baisses</span>
+        <span>${importJob.statusChanges} statuts modifies</span>
+      </div>
+      ${importJob.currentLabel ? `<div class="import-job__current">${esc(importJob.currentLabel)}</div>` : ''}
+      ${importJob.changes.length ? `
+        <div class="import-job__toolbar">
+          <input
+            class="field__control import-job__search"
+            type="search"
+            placeholder="Rechercher un vehicule, ex: Peugeot"
+            value="${esc(importChangeQuery)}"
+            data-import-change-query
+          >
+          <select class="field__control import-job__filter" data-import-change-filter>
+            <option value="all" ${importChangeFilter === 'all' ? 'selected' : ''}>Tous (${importJob.changes.length})</option>
+            <option value="new" ${importChangeFilter === 'new' ? 'selected' : ''}>Nouveaux</option>
+            <option value="updated" ${importChangeFilter === 'updated' ? 'selected' : ''}>Mises a jour</option>
+            <option value="price_up" ${importChangeFilter === 'price_up' ? 'selected' : ''}>Prix en hausse</option>
+            <option value="price_down" ${importChangeFilter === 'price_down' ? 'selected' : ''}>Prix en baisse</option>
+            <option value="status_change" ${importChangeFilter === 'status_change' ? 'selected' : ''}>Statut modifie</option>
+          </select>
+        </div>
+        <div class="import-job__meta import-job__meta--changes">
+          ${totalMatches} resultat${totalMatches > 1 ? 's' : ''} ${importChangeFilter !== 'all' ? `• filtre: ${esc(importChangeFilter)}` : ''}
+        </div>
+        <div class="import-job__changes">
+          ${visibleChanges.length ? visibleChanges.map((change) => `
+            <div class="import-job__change import-job__change--${change.kind}">
+              <div class="import-job__change-head">
+                <strong>${esc(change.label)}</strong>
+                ${change.url ? `<button class="btn btn--ghost btn--small import-job__change-link" type="button" data-vehicle-url="${esc(change.url)}">Ouvrir</button>` : ''}
+              </div>
+              <span>${esc(change.detail)}</span>
+            </div>
+          `).join('') : `
+            <div class="import-job__empty">
+              Aucun changement ne correspond a ce filtre.
+            </div>
+          `}
+        </div>
+        ${totalPages > 1 ? `
+          <div class="import-job__pager">
+            <button class="btn btn--ghost btn--small" type="button" data-action="import-changes-prev" ${currentPage <= 1 ? 'disabled' : ''}>Prec.</button>
+            <span>Page ${currentPage}/${totalPages}</span>
+            <button class="btn btn--ghost btn--small" type="button" data-action="import-changes-next" ${currentPage >= totalPages ? 'disabled' : ''}>Suiv.</button>
+          </div>
+        ` : ''}
+      ` : ''}
+      ${importJob.errors.length ? `<div class="import-job__errors">${importJob.errors.map((error) => `<div>${esc(error)}</div>`).join('')}</div>` : ''}
+    </div>
+  `;
+}
+
 function renderActionsBar(hasSource: boolean): string {
   return `
     <div class="actions-bar">
@@ -1459,6 +2243,11 @@ function renderError(message: string): string {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+function shortenUrl(url: string, max = 52): string {
+  if (url.length <= max) return url;
+  return `${url.slice(0, max - 1)}…`;
+}
 
 function metricCard(label: string, value: string, icon: string): string {
   const iconMap: Record<string, string> = {

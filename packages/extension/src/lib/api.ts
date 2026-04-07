@@ -206,14 +206,14 @@ async function requestDetailed<T>(path: string, options?: RequestInit): Promise<
 
 export const api = {
   saveSnapshot(snapshot: VehicleSnapshot) {
-    return request<{ vehicleId: number; snapshotId: number; duplicate: boolean }>(
+    return request<{ vehicleId: number; snapshotId: number; duplicate: boolean; createdVehicle: boolean }>(
       '/api/vehicles/snapshot',
       { method: 'POST', body: JSON.stringify(snapshot) },
     );
   },
 
   saveSnapshotDetailed(snapshot: VehicleSnapshot) {
-    return requestDetailed<{ vehicleId: number; snapshotId: number; duplicate: boolean }>(
+    return requestDetailed<{ vehicleId: number; snapshotId: number; duplicate: boolean; createdVehicle: boolean }>(
       '/api/vehicles/snapshot',
       { method: 'POST', body: JSON.stringify(snapshot) },
     );

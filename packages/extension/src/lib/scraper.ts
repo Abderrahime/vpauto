@@ -259,20 +259,35 @@ export function scrapeVehicleListFromDocument(doc: Document): Partial<VehicleSna
  * Extract full vehicle data from a VPauto vehicle detail page.
  */
 export function scrapeVehicleDetail(): VehicleSnapshot | null {
+  return scrapeVehicleDetailFromDocument(document, window.location.href);
+}
+
+export function scrapeVehicleDetailFromHtml(html: string, pageUrl: string): VehicleSnapshot | null {
   try {
-    const url = window.location.href;
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    return scrapeVehicleDetailFromDocument(doc, pageUrl);
+  } catch (err) {
+    console.error('[VPauto] scrapeVehicleDetailFromHtml error:', err);
+    return null;
+  }
+}
+
+export function scrapeVehicleDetailFromDocument(doc: Document, pageUrl: string): VehicleSnapshot | null {
+  try {
+    const url = pageUrl;
     const urlMatch = url.match(VPAUTO_VEHICLE_URL_PATTERN);
     if (!urlMatch) return null;
     const hashId = urlMatch[1];
 
     // ── Key/value extraction from <dt>/<dd>, <th>/<td>, and labelled spans ──
-    const kv = extractKeyValues(document.body);
+    const kv = extractKeyValues(doc.body);
 
     // ── Title / brand / model ──
     // Most reliable source: document.title = "TESLA MODEL 3 Standard Range Plus RWD Bleu foncé métal | VPauto.fr"
     // Extract vehicle name by removing " | VPauto.fr" suffix and optional color suffix
     let titleText = '';
-    const pageTitle = document.title || '';
+    const pageTitle = doc.title || '';
     const titleClean = pageTitle.replace(/\s*\|\s*VPauto\.fr$/i, '').trim();
     if (titleClean && titleClean.length > 3) {
       titleText = titleClean;
@@ -294,7 +309,7 @@ export function scrapeVehicleDetail(): VehicleSnapshot | null {
     const model = extractModel(version);
 
     // ── Reference (from subtitle line "2021 - 72429 km ... Ref. : 11396385") ──
-    const bodyText = document.body.innerText;
+    const bodyText = (doc.body as HTMLElement).innerText || doc.body.textContent || '';
     const refMatch = bodyText.match(/Ref\.?\s*:?\s*(\d{7,})/i);
     const reference = refMatch?.[1] || '';
 
@@ -340,10 +355,10 @@ export function scrapeVehicleDetail(): VehicleSnapshot | null {
     const lotNumber  = parseInt(bodyText.match(/lot\s+n°?\s*(\d+)/i)?.[1] || '0') || undefined;
 
     // ── Condition ──
-    const technicalCheckUrl = (document.querySelector('a[href*="_CT.pdf"]') as HTMLAnchorElement)?.href;
-    const conditionImageUrl = (document.querySelector('img[src*="_ET."]') as HTMLImageElement)?.src;
+    const technicalCheckUrl = (doc.querySelector('a[href*="_CT.pdf"]') as HTMLAnchorElement)?.href;
+    const conditionImageUrl = (doc.querySelector('img[src*="_ET."]') as HTMLImageElement)?.src;
     const isNonRoulant      = /non\s*roulant|hors\s*d[''\u2019]usage|[eé]pave|accident[eé]/i.test(bodyText);
-    const baseObservations  = extractObservations(document.body);
+    const baseObservations  = extractObservations(doc.body);
     const observations      = isNonRoulant
       ? (baseObservations ? `Véhicule non roulant | ${baseObservations}` : 'Véhicule non roulant')
       : baseObservations;
@@ -351,13 +366,13 @@ export function scrapeVehicleDetail(): VehicleSnapshot | null {
     const serviceHistory    = /carnet.*oui|oui.*carnet/i.test(bodyText) || undefined;
     const firstOwner        = /1[eè]re?\s*main|premi[eè]re?\s*main/i.test(bodyText) || undefined;
     const warranty          = kv['garantie'] || undefined;
-    const equipment         = extractEquipment(document.body);
+    const equipment         = extractEquipment(doc.body);
 
     // ── Photos ──
     // CDN pattern: cdn.vpauto.fr/{hash}_{number}-80.jpg (e.g. YbUnrKP_01-80.jpg)
     const photoUrls: string[] = [];
     const cdnHashes = new Set<string>();
-    for (const img of document.querySelectorAll<HTMLImageElement>('img[src*="cdn.vpauto.fr"]')) {
+    for (const img of doc.querySelectorAll<HTMLImageElement>('img[src*="cdn.vpauto.fr"]')) {
       const src = img.src;
       if (src.includes('_ET.') || src.includes('_CT')) continue;
       if (!photoUrls.includes(src)) photoUrls.push(src);
@@ -426,7 +441,7 @@ export function scrapeVehicleDetail(): VehicleSnapshot | null {
 
     return snapshot;
   } catch (err) {
-    console.error('[VPauto] scrapeVehicleDetail error:', err);
+    console.error('[VPauto] scrapeVehicleDetailFromDocument error:', err);
     return null;
   }
 }
