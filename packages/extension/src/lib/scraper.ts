@@ -101,6 +101,119 @@ export async function scrapeRemotePage(pageUrl: string): Promise<Partial<Vehicle
   }
 }
 
+// ── Vehicle detail document probe (CT + Bilan Expert detection) ────────────
+
+export type VehicleDocProbeResult = {
+  ctUrl: string | null;
+  bilanExpertUrl: string | null;
+  hasCt: boolean;
+  hasBilanExpert: boolean;
+  probedAt: string;
+};
+
+/**
+ * Extract document URLs (Contrôle Technique + Bilan Expert) from a parsed
+ * VPauto vehicle detail Document.
+ *
+ * VPauto structure observed (April 2026):
+ *   <h2>Etat du véhicule</h2>
+ *   <ul class="liens00">
+ *     <li><a href=".../{hash}_CT.pdf">Contrôle Technique</a></li>
+ *     <li><a href=".../{hash}_BE.pdf">Bilan Expert</a></li>
+ *   </ul>
+ *
+ * Either item may be absent. Absence of `_CT.pdf` means the vehicle has
+ * no official CT on file (confirmed by observation on electric vehicles
+ * and vehicles registered <4 years).
+ */
+export function extractVehicleDocsFromDocument(doc: Document): VehicleDocProbeResult {
+  // We use getAttribute('href') rather than `.href` because DOMParser-created
+  // documents have no base URI — `.href` can return weird resolved values
+  // for some attribute serialisations. The CDN URLs we look for are
+  // always absolute (`https://cdn.vpauto.fr/...`), so the literal value
+  // is exactly what we want.
+  const allLinks = Array.from(doc.querySelectorAll<HTMLAnchorElement>('a[href]'));
+
+  // ── CT detection ──
+  // Primary: href contains `_CT.pdf` (observed naming as of 2026-04).
+  // Fallback: anchor whose visible text matches "Contrôle Technique" and
+  // whose href ends with `.pdf` (defensive against future CDN naming).
+  let ctUrl: string | null = null;
+  for (const a of allLinks) {
+    const href = a.getAttribute('href') || '';
+    if (/_CT\.pdf(?:\?|$)/i.test(href)) {
+      ctUrl = href;
+      break;
+    }
+  }
+  if (!ctUrl) {
+    for (const a of allLinks) {
+      const href = a.getAttribute('href') || '';
+      if (!/\.pdf(?:\?|$)/i.test(href)) continue;
+      const text = (a.textContent || '').trim();
+      if (/contr[oô]le\s*technique/i.test(text)) {
+        ctUrl = href;
+        break;
+      }
+    }
+  }
+
+  // ── Bilan Expert detection ──
+  // Primary: href contains `_BE.pdf` (observed naming).
+  // Fallback: anchor whose visible text matches "Bilan Expert" and whose
+  // href ends with `.pdf`.
+  let bilanExpertUrl: string | null = null;
+  for (const a of allLinks) {
+    const href = a.getAttribute('href') || '';
+    if (/_BE\.pdf(?:\?|$)/i.test(href)) {
+      bilanExpertUrl = href;
+      break;
+    }
+  }
+  if (!bilanExpertUrl) {
+    for (const a of allLinks) {
+      const href = a.getAttribute('href') || '';
+      if (!/\.pdf(?:\?|$)/i.test(href)) continue;
+      const text = (a.textContent || '').trim();
+      if (/bilan\s*expert/i.test(text)) {
+        bilanExpertUrl = href;
+        break;
+      }
+    }
+  }
+
+  return {
+    ctUrl,
+    bilanExpertUrl,
+    hasCt: !!ctUrl,
+    hasBilanExpert: !!bilanExpertUrl,
+    probedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Fetch a VPauto vehicle detail page and probe for CT + Bilan Expert links.
+ * Returns null on network error. Used by list card enhancement.
+ */
+export async function probeVehicleDocuments(detailPageUrl: string): Promise<VehicleDocProbeResult | null> {
+  try {
+    const res = await fetch(detailPageUrl, { credentials: 'include' });
+    if (!res.ok) {
+      console.warn(`[VPauto] probeVehicleDocuments: HTTP ${res.status} for ${detailPageUrl}`);
+      return null;
+    }
+    const html = await res.text();
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    const result = extractVehicleDocsFromDocument(doc);
+    console.log(`[VPauto] probe ${detailPageUrl} → CT=${result.hasCt} BE=${result.hasBilanExpert}`);
+    return result;
+  } catch (err) {
+    console.warn(`[VPauto] probeVehicleDocuments error for ${detailPageUrl}:`, err);
+    return null;
+  }
+}
+
 /**
  * Scrape vehicle list from a given Document (current page or parsed remote page).
  */
