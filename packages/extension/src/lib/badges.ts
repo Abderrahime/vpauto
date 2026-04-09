@@ -25,8 +25,11 @@ type ProbeEntry = {
 };
 
 const probeCache = new Map<string, ProbeEntry>();
-// Bumped to v2 to invalidate stale cache from the previous (buggy) layout.
-const PROBE_STORAGE_KEY = 'vpautoDocProbe.v2';
+// Bumped when the probe schema changes so old cached entries are ignored.
+// v2: switched from tentative-URL optimism to state-machine buttons.
+// v3: added Suivi d'Entretien (`hasSuiviEntretien` / `suiviEntretienUrl`).
+// v4: added Diagnostic batterie (`hasDiagnosticBatterie` / `diagnosticBatterieUrl`).
+const PROBE_STORAGE_KEY = 'vpautoDocProbe.v4';
 const PROBE_TTL_MS = 24 * 3600 * 1000; // 24 h
 const MAX_CONCURRENT_PROBES = 3;
 let activeProbes = 0;
@@ -38,9 +41,13 @@ async function hydrateProbeCache(): Promise<void> {
   if (storageHydrated) return;
   storageHydrated = true;
   try {
-    // Drop the legacy v1 cache key so we don't carry over stale "no probe ran"
-    // entries from previous installs of the extension.
-    chrome.storage.local.remove('vpautoDocProbe').catch(() => {});
+    // Drop legacy cache keys so we don't carry over stale entries from
+    // previous installs of the extension (older probe schemas).
+    chrome.storage.local.remove([
+      'vpautoDocProbe',
+      'vpautoDocProbe.v2',
+      'vpautoDocProbe.v3',
+    ]).catch(() => {});
 
     const stored = await chrome.storage.local.get(PROBE_STORAGE_KEY);
     const raw = (stored[PROBE_STORAGE_KEY] || {}) as Record<string, VehicleDocProbeResult>;
@@ -259,7 +266,7 @@ function injectBadgeOverlay(card: HTMLElement, badges: VehicleBadge[]): void {
 
 // ── Document buttons (CT + Bilan Expert) ───────────────────────────────────
 
-type DocKind = 'ct' | 'be';
+type DocKind = 'ct' | 'be' | 'se' | 'db';
 type DocButtonState = 'checking' | 'confirmed' | 'missing' | 'fallback';
 
 type DocButtonConfig = {
@@ -360,6 +367,10 @@ function addDocumentButtons(
     }
 
     // ── Bilan Expert handling ──
+    // Only add a BE button if a `_BE.pdf` was positively found. We deliberately
+    // do NOT render a "missing" BE button when absent — the absence of a Bilan
+    // Expert is the norm (most cars don't have one) and a greyed-out button
+    // would add visual noise on every card.
     if (result.hasBilanExpert && result.bilanExpertUrl) {
       const beConfig: DocButtonConfig = {
         kind: 'be',
@@ -371,6 +382,40 @@ function addDocumentButtons(
       };
       const beButton = createDocButton(card, dock, v, beConfig);
       applyConfirmedState(beButton, beConfig);
+    }
+
+    // ── Suivi d'Entretien handling ──
+    // Same philosophy as BE: only render the button when the document is
+    // positively present. The "Suivi d'Entretien : Non" metadata field is
+    // also the norm, and silencing it visually keeps cards clean.
+    if (result.hasSuiviEntretien && result.suiviEntretienUrl) {
+      const seConfig: DocButtonConfig = {
+        kind: 'se',
+        label: 'Voir entretien',
+        tooltip: 'Afficher le Suivi d\'Entretien',
+        confirmedUrl: result.suiviEntretienUrl,
+        state: 'confirmed',
+        detailPageUrl,
+      };
+      const seButton = createDocButton(card, dock, v, seConfig);
+      applyConfirmedState(seButton, seConfig);
+    }
+
+    // ── Diagnostic batterie handling ──
+    // Only for EVs and PHEVs — ICE cars will never have a `_TB.pdf`, so
+    // rendering a greyed "Diagnostic batterie indisponible" button on every
+    // petrol car would be pure noise. Present-only rendering.
+    if (result.hasDiagnosticBatterie && result.diagnosticBatterieUrl) {
+      const dbConfig: DocButtonConfig = {
+        kind: 'db',
+        label: 'Voir batterie',
+        tooltip: 'Afficher le Diagnostic batterie',
+        confirmedUrl: result.diagnosticBatterieUrl,
+        state: 'confirmed',
+        detailPageUrl,
+      };
+      const dbButton = createDocButton(card, dock, v, dbConfig);
+      applyConfirmedState(dbButton, dbConfig);
     }
   });
 }
@@ -448,12 +493,23 @@ function applyConfirmedState(button: HTMLButtonElement, config: DocButtonConfig)
   button.disabled = false;
   button.textContent = config.label;
   button.title = config.tooltip;
-  button.style.background = config.kind === 'be' ? 'rgba(244,121,32,0.92)' : 'rgba(15,17,23,0.85)';
+  button.style.background = confirmedBackground(config.kind);
   button.style.opacity = '1';
   button.style.filter = 'none';
   button.style.cursor = 'pointer';
   button.dataset.vpautoCtState = 'confirmed';
   button.removeAttribute('aria-disabled');
+}
+
+/** Colour used for the confirmed state of each document kind. */
+function confirmedBackground(kind: DocKind): string {
+  switch (kind) {
+    case 'be': return 'rgba(244,121,32,0.92)';  // orange — Bilan Expert
+    case 'se': return 'rgba(34,197,94,0.92)';   // green  — Suivi d'Entretien
+    case 'db': return 'rgba(59,130,246,0.92)';  // blue   — Diagnostic batterie
+    case 'ct':
+    default:   return 'rgba(15,17,23,0.85)';    // dark   — Contrôle Technique
+  }
 }
 
 /** Apply "missing" visuals — fully greyed, "indisponible", non-clickable. */
@@ -573,8 +629,16 @@ function openDocPopup(
     </div>
   `;
 
-  const badgeLabel = config.kind === 'be' ? 'Aperçu Bilan Expert' : 'Aperçu CT';
-  const openLabel = config.kind === 'be' ? 'Ouvrir le Bilan ↗' : 'Ouvrir le CT ↗';
+  const badgeLabel =
+    config.kind === 'be' ? 'Aperçu Bilan Expert'
+    : config.kind === 'se' ? 'Aperçu Suivi d\'Entretien'
+    : config.kind === 'db' ? 'Aperçu Diagnostic batterie'
+    : 'Aperçu CT';
+  const openLabel =
+    config.kind === 'be' ? 'Ouvrir le Bilan ↗'
+    : config.kind === 'se' ? 'Ouvrir le Suivi ↗'
+    : config.kind === 'db' ? 'Ouvrir le Diagnostic ↗'
+    : 'Ouvrir le CT ↗';
 
   const docHtml = `
     <div style="position:relative; flex:1 1 auto; min-height:220px; background:#0f1117;">
@@ -608,7 +672,11 @@ function openDocPopup(
   popup.innerHTML = headerHtml + docHtml;
   card.appendChild(popup);
   button.setAttribute('aria-expanded', 'true');
-  button.textContent = config.kind === 'be' ? 'Masquer bilan' : 'Masquer le CT';
+  button.textContent =
+    config.kind === 'be' ? 'Masquer bilan'
+    : config.kind === 'se' ? 'Masquer entretien'
+    : config.kind === 'db' ? 'Masquer batterie'
+    : 'Masquer le CT';
 
   popup.querySelector<HTMLButtonElement>('.vpauto-doc-close')?.addEventListener('click', (e) => {
     e.preventDefault();

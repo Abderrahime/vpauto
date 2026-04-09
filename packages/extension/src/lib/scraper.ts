@@ -101,30 +101,37 @@ export async function scrapeRemotePage(pageUrl: string): Promise<Partial<Vehicle
   }
 }
 
-// ── Vehicle detail document probe (CT + Bilan Expert detection) ────────────
+// ── Vehicle detail document probe (CT + BE + SE + Diagnostic batterie) ─────
 
 export type VehicleDocProbeResult = {
   ctUrl: string | null;
   bilanExpertUrl: string | null;
+  suiviEntretienUrl: string | null;
+  diagnosticBatterieUrl: string | null;
   hasCt: boolean;
   hasBilanExpert: boolean;
+  hasSuiviEntretien: boolean;
+  hasDiagnosticBatterie: boolean;
   probedAt: string;
 };
 
 /**
- * Extract document URLs (Contrôle Technique + Bilan Expert) from a parsed
- * VPauto vehicle detail Document.
+ * Extract document URLs (Contrôle Technique, Bilan Expert, Suivi d'Entretien,
+ * Diagnostic batterie) from a parsed VPauto vehicle detail Document.
  *
  * VPauto structure observed (April 2026):
  *   <h2>Etat du véhicule</h2>
  *   <ul class="liens00">
  *     <li><a href=".../{hash}_CT.pdf">Contrôle Technique</a></li>
  *     <li><a href=".../{hash}_BE.pdf">Bilan Expert</a></li>
+ *     <li><a href=".../{hash}_SE.pdf">Suivi d'Entretien</a></li>
+ *     <li><a href=".../{hash}_TB.pdf">Diagnostic batterie</a></li>
  *   </ul>
  *
- * Either item may be absent. Absence of `_CT.pdf` means the vehicle has
- * no official CT on file (confirmed by observation on electric vehicles
- * and vehicles registered <4 years).
+ * Any item may be absent. Absence of a given suffix is a reliable signal
+ * that the corresponding document is not on file for that vehicle (verified
+ * empirically: `_TB.pdf` only appears on EVs, `_CT.pdf` absent on some EVs
+ * and <4-year-old cars, `_SE.pdf` correlates with the "Oui/Non" meta field).
  */
 export function extractVehicleDocsFromDocument(doc: Document): VehicleDocProbeResult {
   // We use getAttribute('href') rather than `.href` because DOMParser-created
@@ -134,59 +141,38 @@ export function extractVehicleDocsFromDocument(doc: Document): VehicleDocProbeRe
   // is exactly what we want.
   const allLinks = Array.from(doc.querySelectorAll<HTMLAnchorElement>('a[href]'));
 
-  // ── CT detection ──
-  // Primary: href contains `_CT.pdf` (observed naming as of 2026-04).
-  // Fallback: anchor whose visible text matches "Contrôle Technique" and
-  // whose href ends with `.pdf` (defensive against future CDN naming).
-  let ctUrl: string | null = null;
-  for (const a of allLinks) {
-    const href = a.getAttribute('href') || '';
-    if (/_CT\.pdf(?:\?|$)/i.test(href)) {
-      ctUrl = href;
-      break;
+  // Generic extractor: primary by href pattern, fallback by visible text.
+  const findDoc = (
+    hrefPattern: RegExp,
+    textPattern: RegExp,
+  ): string | null => {
+    for (const a of allLinks) {
+      const href = a.getAttribute('href') || '';
+      if (hrefPattern.test(href)) return href;
     }
-  }
-  if (!ctUrl) {
     for (const a of allLinks) {
       const href = a.getAttribute('href') || '';
       if (!/\.pdf(?:\?|$)/i.test(href)) continue;
       const text = (a.textContent || '').trim();
-      if (/contr[oô]le\s*technique/i.test(text)) {
-        ctUrl = href;
-        break;
-      }
+      if (textPattern.test(text)) return href;
     }
-  }
+    return null;
+  };
 
-  // ── Bilan Expert detection ──
-  // Primary: href contains `_BE.pdf` (observed naming).
-  // Fallback: anchor whose visible text matches "Bilan Expert" and whose
-  // href ends with `.pdf`.
-  let bilanExpertUrl: string | null = null;
-  for (const a of allLinks) {
-    const href = a.getAttribute('href') || '';
-    if (/_BE\.pdf(?:\?|$)/i.test(href)) {
-      bilanExpertUrl = href;
-      break;
-    }
-  }
-  if (!bilanExpertUrl) {
-    for (const a of allLinks) {
-      const href = a.getAttribute('href') || '';
-      if (!/\.pdf(?:\?|$)/i.test(href)) continue;
-      const text = (a.textContent || '').trim();
-      if (/bilan\s*expert/i.test(text)) {
-        bilanExpertUrl = href;
-        break;
-      }
-    }
-  }
+  const ctUrl = findDoc(/_CT\.pdf(?:\?|$)/i, /contr[oô]le\s*technique/i);
+  const bilanExpertUrl = findDoc(/_BE\.pdf(?:\?|$)/i, /bilan\s*expert/i);
+  const suiviEntretienUrl = findDoc(/_SE\.pdf(?:\?|$)/i, /suivi\s*d['’]?\s*entretien/i);
+  const diagnosticBatterieUrl = findDoc(/_TB\.pdf(?:\?|$)/i, /diagnostic\s*batterie/i);
 
   return {
     ctUrl,
     bilanExpertUrl,
+    suiviEntretienUrl,
+    diagnosticBatterieUrl,
     hasCt: !!ctUrl,
     hasBilanExpert: !!bilanExpertUrl,
+    hasSuiviEntretien: !!suiviEntretienUrl,
+    hasDiagnosticBatterie: !!diagnosticBatterieUrl,
     probedAt: new Date().toISOString(),
   };
 }
@@ -206,7 +192,7 @@ export async function probeVehicleDocuments(detailPageUrl: string): Promise<Vehi
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
     const result = extractVehicleDocsFromDocument(doc);
-    console.log(`[VPauto] probe ${detailPageUrl} → CT=${result.hasCt} BE=${result.hasBilanExpert}`);
+    console.log(`[VPauto] probe ${detailPageUrl} → CT=${result.hasCt} BE=${result.hasBilanExpert} SE=${result.hasSuiviEntretien} TB=${result.hasDiagnosticBatterie}`);
     return result;
   } catch (err) {
     console.warn(`[VPauto] probeVehicleDocuments error for ${detailPageUrl}:`, err);
