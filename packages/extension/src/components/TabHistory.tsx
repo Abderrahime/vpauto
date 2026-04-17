@@ -1,5 +1,5 @@
 import React from 'react';
-import type { VehicleHistory, VehicleSnapshot } from '@vpauto/shared';
+import type { VehicleHistory, VehicleSnapshot, VehiclePassage } from '@vpauto/shared';
 import PriceChart from './PriceChart';
 
 interface Props {
@@ -19,28 +19,78 @@ export default function TabHistory({ history, snapshot, vehicleId }: Props) {
     );
   }
 
-  const lastPrice = history.priceHistory.at(-1)?.price;
-  const firstPrice = history.priceHistory[0]?.price;
-  const priceDiff = lastPrice && firstPrice ? lastPrice - firstPrice : null;
+  const ev = history.evolution;
+  const lastDisplayedPrice = ev.lastEffectivePrice;
+
+  // Display semantics: price went UP = red (diff-negative for buyer);
+  // price went DOWN = green (diff-positive for buyer); equal = neutral.
+  const diffClass =
+    ev.evolutionDirection === 'up' ? 'diff-negative' :
+    ev.evolutionDirection === 'down' ? 'diff-positive' :
+    ev.evolutionDirection === 'stable' ? 'diff-neutral' : '';
+  const diffArrow =
+    ev.evolutionDirection === 'up' ? '↑' :
+    ev.evolutionDirection === 'down' ? '↓' :
+    ev.evolutionDirection === 'stable' ? '=' : '';
+  const diffText = ev.evolutionAmount != null
+    ? `${diffArrow} ${ev.evolutionAmount > 0 ? '+' : ev.evolutionAmount < 0 ? '−' : ''}${Math.abs(ev.evolutionAmount).toLocaleString('fr-FR')} €`
+    : '–';
+
+  const lastPassageLabel = ev.lastPassageSold ? 'Adjugé' : 'Dernière MAP';
 
   return (
     <>
+      {/* Summary banner — only when this vehicle has history beyond a first single MAP-only passage */}
+      {ev.totalPassages >= 2 && (
+        <div className="vpa-history-banner">
+          <div className="vpa-history-banner-title">
+            📜 Ce véhicule a déjà été vu <strong>{ev.totalPassages} fois</strong>
+            {ev.soldCount > 0 && <> · adjugé {ev.soldCount} fois</>}
+            {ev.unsoldCount > 0 && <> · invendu {ev.unsoldCount} fois</>}
+          </div>
+          <ul className="vpa-history-banner-list">
+            {history.passages.map((p) => (
+              <li key={p.snapshotId}>
+                <strong>Passage {p.passageNumber}</strong> – {formatDate(p.date)}, {p.city} :{' '}
+                <PassagePriceSummary p={p} />{' '}
+                <a
+                  href={p.sourceUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="vpa-history-banner-link"
+                  title="Voir la fiche de ce passage"
+                >
+                  🔗 lien
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Single-passage sold-above-MAP highlight */}
+      {ev.totalPassages === 1 && ev.lastPassageSold && ev.evolutionAmount != null && ev.evolutionAmount > 0 && (
+        <div className="vpa-history-banner">
+          <div className="vpa-history-banner-title">
+            🏷️ Adjugé <strong>{Math.abs(ev.evolutionAmount).toLocaleString('fr-FR')} €</strong> au-dessus de la mise à prix
+          </div>
+        </div>
+      )}
+
       {/* Stats strip */}
       <div className="vpa-stats">
         <div className="vpa-stat">
-          <div className="vpa-stat-value">{history.totalPassages}</div>
-          <div className="vpa-stat-label">Passages</div>
+          <div className="vpa-stat-value">{ev.totalPassages}</div>
+          <div className="vpa-stat-label">{ev.totalPassages > 1 ? 'Passages' : 'Passage'}</div>
         </div>
         <div className="vpa-stat">
           <div className="vpa-stat-value">
-            {lastPrice ? `${lastPrice.toLocaleString('fr-FR')} €` : '–'}
+            {lastDisplayedPrice != null ? `${lastDisplayedPrice.toLocaleString('fr-FR')} €` : '–'}
           </div>
-          <div className="vpa-stat-label">Dernière MAP</div>
+          <div className="vpa-stat-label">{lastPassageLabel}</div>
         </div>
         <div className="vpa-stat">
-          <div className={`vpa-stat-value ${priceDiff !== null ? (priceDiff < 0 ? 'diff-positive' : priceDiff > 0 ? 'diff-negative' : 'diff-neutral') : ''}`}>
-            {priceDiff !== null ? `${priceDiff > 0 ? '+' : ''}${priceDiff.toLocaleString('fr-FR')} €` : '–'}
-          </div>
+          <div className={`vpa-stat-value ${diffClass}`}>{diffText}</div>
           <div className="vpa-stat-label">Évolution prix</div>
         </div>
       </div>
@@ -79,14 +129,16 @@ export default function TabHistory({ history, snapshot, vehicleId }: Props) {
         {[...history.passages].reverse().map((p) => (
           <div key={p.snapshotId} className="vpa-passage">
             <div className="vpa-passage-header">
-              <span className="vpa-passage-date">{formatDate(p.date)}</span>
-              <span className="vpa-passage-city">📍 {p.city}</span>
+              <span className="vpa-passage-date">
+                <span className="vpa-passage-num">P{p.passageNumber}</span> {formatDate(p.date)}
+              </span>
+              <span className="vpa-passage-city">📍 {p.city}{p.center ? ` – ${p.center}` : ''}</span>
               <span className={`vpa-passage-status status-${p.status}`}>{statusLabel(p.status)}</span>
             </div>
             <div className="vpa-passage-fields">
               {p.mileage > 0 && <span>🛣️ {p.mileage.toLocaleString('fr-FR')} km</span>}
-              {p.startingPrice && <span>💶 MAP : {p.startingPrice.toLocaleString('fr-FR')} €</span>}
-              {p.soldPrice && <span>✅ Vendu : {p.soldPrice.toLocaleString('fr-FR')} €</span>}
+              {p.startingPrice != null && <span>💶 MAP : {p.startingPrice.toLocaleString('fr-FR')} €</span>}
+              {p.soldPrice != null && <span>✅ Adjugé : {p.soldPrice.toLocaleString('fr-FR')} €</span>}
               {p.technicalCheckUrl && (
                 <a className="vpa-ct-link" href={p.technicalCheckUrl} target="_blank" rel="noreferrer">
                   📄 CT
@@ -96,14 +148,37 @@ export default function TabHistory({ history, snapshot, vehicleId }: Props) {
             {p.observations && <div className="vpa-passage-obs">{p.observations}</div>}
             {p.sourceUrl && (
               <div style={{ marginTop: 5 }}>
-                <a href={p.sourceUrl} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: '#1e40af' }}>
-                  🔗 Voir la fiche
+                <a href={p.sourceUrl} target="_blank" rel="noreferrer" className="vpa-passage-link">
+                  🔗 Voir la fiche de ce passage
                 </a>
               </div>
             )}
           </div>
         ))}
       </div>
+    </>
+  );
+}
+
+function PassagePriceSummary({ p }: { p: VehiclePassage }) {
+  if (p.status === 'sold' && p.soldPrice != null) {
+    return (
+      <>
+        adjugé à <strong>{p.soldPrice.toLocaleString('fr-FR')} €</strong>
+        {p.startingPrice != null && <> (MAP {p.startingPrice.toLocaleString('fr-FR')} €)</>}
+      </>
+    );
+  }
+  if (p.status === 'unsold') {
+    return (
+      <>
+        invendu, MAP <strong>{p.startingPrice != null ? `${p.startingPrice.toLocaleString('fr-FR')} €` : '–'}</strong>
+      </>
+    );
+  }
+  return (
+    <>
+      {statusLabel(p.status)}, MAP <strong>{p.startingPrice != null ? `${p.startingPrice.toLocaleString('fr-FR')} €` : '–'}</strong>
     </>
   );
 }

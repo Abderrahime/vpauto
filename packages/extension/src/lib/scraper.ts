@@ -112,6 +112,18 @@ export type VehicleDocProbeResult = {
   hasBilanExpert: boolean;
   hasSuiviEntretien: boolean;
   hasDiagnosticBatterie: boolean;
+  /**
+   * Raw-text content extracted from three dedicated sections on the detail
+   * page. Stored as a single joined string with `\n` separators between
+   * bullet items. `null` means the section wasn't found on the page
+   * (vs empty string which would mean an empty but present section).
+   */
+  observationsText: string | null;
+  equipmentText: string | null;
+  technicalSpecsText: string | null;
+  hasObservationsText: boolean;
+  hasEquipmentText: boolean;
+  hasTechnicalSpecsText: boolean;
   probedAt: string;
 };
 
@@ -164,6 +176,15 @@ export function extractVehicleDocsFromDocument(doc: Document): VehicleDocProbeRe
   const suiviEntretienUrl = findDoc(/_SE\.pdf(?:\?|$)/i, /suivi\s*d['’]?\s*entretien/i);
   const diagnosticBatterieUrl = findDoc(/_TB\.pdf(?:\?|$)/i, /diagnostic\s*batterie/i);
 
+  // ── Extract three text-only sections ───────────────────────────────────
+  // VPauto renders these as a <h2> heading followed by a <ul><li>…</li></ul>.
+  // There are no stable class/id hooks, so we locate each section by
+  // matching the heading text (case + accent insensitive) and then
+  // collect the immediately-following list items.
+  const observationsText = extractSectionText(doc, /^\s*observation/i);
+  const equipmentText = extractSectionText(doc, /^\s*[eé]quipements?\s*[/\-]?\s*options?/i);
+  const technicalSpecsText = extractSectionText(doc, /^\s*caract[eé]ristiques?\s*techniques?/i);
+
   return {
     ctUrl,
     bilanExpertUrl,
@@ -173,8 +194,142 @@ export function extractVehicleDocsFromDocument(doc: Document): VehicleDocProbeRe
     hasBilanExpert: !!bilanExpertUrl,
     hasSuiviEntretien: !!suiviEntretienUrl,
     hasDiagnosticBatterie: !!diagnosticBatterieUrl,
+    observationsText,
+    equipmentText,
+    technicalSpecsText,
+    hasObservationsText: !!observationsText && observationsText.trim().length > 0,
+    hasEquipmentText: !!equipmentText && equipmentText.trim().length > 0,
+    hasTechnicalSpecsText: !!technicalSpecsText && technicalSpecsText.trim().length > 0,
     probedAt: new Date().toISOString(),
   };
+}
+
+/**
+ * Find a <h2>/<h3>/<h4> whose text matches `headingRe` and return the
+ * visible text of the following <ul>/<ol>/<dl>/<p> block, joined with
+ * newlines between list items. Returns null if no matching heading is found.
+ *
+ * VPauto detail-page layout (April 2026):
+ *   <h2>Observation(s)</h2>
+ *   <ul>
+ *     <li>- Export impossible — …</li>
+ *     <li>- Garantie 3 mois …</li>
+ *   </ul>
+ * Same shape for "Equipements/Options" and "Caractéristiques techniques".
+ */
+function extractSectionText(doc: Document, headingRe: RegExp): string | null {
+  // Normalize a string: strip accents, collapse whitespace, lowercase.
+  const normalize = (s: string) => s
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+  const headingReNorm = new RegExp(
+    headingRe.source
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, ''),
+    headingRe.flags,
+  );
+
+  const headings = Array.from(doc.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'));
+  for (const h of headings) {
+    const text = normalize(h.textContent || '');
+    if (!headingReNorm.test(text)) continue;
+
+    // Walk siblings forward to find the first list/paragraph block.
+    // Stops at the next heading so we don't bleed into another section.
+    const items: string[] = [];
+    let sib: Element | null = h.nextElementSibling;
+    while (sib) {
+      const tag = sib.tagName.toUpperCase();
+      if (/^H[1-6]$/.test(tag)) break;
+
+      if (tag === 'UL' || tag === 'OL') {
+        sib.querySelectorAll('li').forEach((li) => {
+          const t = (li.textContent || '').replace(/\s+/g, ' ').trim();
+          if (t) items.push(t);
+        });
+        break;
+      }
+
+      if (tag === 'DL') {
+        const dts = sib.querySelectorAll('dt');
+        dts.forEach((dt) => {
+          const dd = dt.nextElementSibling;
+          const k = (dt.textContent || '').replace(/\s+/g, ' ').trim();
+          const v = dd?.tagName === 'DD'
+            ? (dd.textContent || '').replace(/\s+/g, ' ').trim()
+            : '';
+          if (k && v) items.push(`${k} : ${v}`);
+          else if (k) items.push(k);
+        });
+        break;
+      }
+
+      if (tag === 'TABLE') {
+        sib.querySelectorAll('tr').forEach((tr) => {
+          const cells = Array.from(tr.children).map(
+            (c) => (c.textContent || '').replace(/\s+/g, ' ').trim(),
+          ).filter(Boolean);
+          if (cells.length === 2) items.push(`${cells[0]} : ${cells[1]}`);
+          else if (cells.length > 0) items.push(cells.join(' | '));
+        });
+        break;
+      }
+
+      if (tag === 'P' || tag === 'DIV') {
+        // Some sections are plain text paragraphs; collect until we hit a
+        // heading, list, or another block-level container with lots of
+        // unrelated content.
+        const t = (sib.textContent || '').replace(/\s+/g, ' ').trim();
+        if (t) items.push(t);
+        // If this DIV contains a nested UL, dig into it.
+        const nestedUl = sib.querySelector('ul, ol');
+        if (nestedUl) {
+          nestedUl.querySelectorAll('li').forEach((li) => {
+            const lt = (li.textContent || '').replace(/\s+/g, ' ').trim();
+            if (lt) items.push(lt);
+          });
+          break;
+        }
+      }
+
+      sib = sib.nextElementSibling;
+    }
+
+    if (items.length === 0) {
+      // Fallback: dig inside the heading's parent container (some layouts
+      // wrap the <h2> and <ul> in a shared <div> rather than siblings).
+      const parent = h.parentElement;
+      if (parent) {
+        const nestedList = parent.querySelector('ul, ol, dl');
+        if (nestedList) {
+          nestedList.querySelectorAll('li').forEach((li) => {
+            const t = (li.textContent || '').replace(/\s+/g, ' ').trim();
+            if (t) items.push(t);
+          });
+        }
+      }
+    }
+
+    if (items.length === 0) return null;
+
+    // Deduplicate while preserving order (some VPauto pages duplicate items).
+    const seen = new Set<string>();
+    const deduped: string[] = [];
+    for (const it of items) {
+      const key = it.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(it);
+    }
+
+    return deduped.join('\n');
+  }
+
+  return null;
 }
 
 /**

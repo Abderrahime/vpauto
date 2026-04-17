@@ -335,6 +335,22 @@ button, a { font: inherit; }
   color: var(--text);
 }
 
+.timeline-link {
+  font-size: 10px;
+  font-weight: 500;
+  color: rgba(59, 130, 246, 0.9);
+  text-decoration: none;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.timeline-link:hover {
+  background: rgba(59, 130, 246, 0.22);
+  text-decoration: none;
+}
+
 .timeline-status {
   font-size: 10px;
   font-weight: 600;
@@ -797,6 +813,94 @@ button, a { font: inherit; }
   background: rgba(245, 158, 11, 0.08);
 }
 
+.import-job__change-detail {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.import-job__updates {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 8px 0 0;
+  border-top: 1px dashed var(--border);
+  display: grid;
+  gap: 4px;
+}
+
+.import-job__update {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  column-gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.import-job__update-label {
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.import-job__update-values {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text);
+}
+
+.import-job__update-before {
+  color: var(--text-secondary);
+  text-decoration: line-through;
+  text-decoration-color: rgba(148, 163, 184, 0.35);
+}
+
+.import-job__update-arrow {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.import-job__update-after {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.import-job__update-delta {
+  margin-left: 2px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.import-job__update-delta--up {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
+.import-job__update-delta--down {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+
+.import-job__update-delta--neutral {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--text-secondary);
+}
+
+.import-job__update--up .import-job__update-after {
+  color: #f87171;
+}
+
+.import-job__update--down .import-job__update-after {
+  color: #4ade80;
+}
+
 .import-job__errors {
   margin-top: 10px;
   padding-top: 10px;
@@ -1162,6 +1266,25 @@ button, a { font: inherit; }
   color: var(--text-secondary);
 }
 
+.cross-item--link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  transition: background 0.15s, border-left-color 0.15s;
+  cursor: pointer;
+}
+
+.cross-item--link:hover {
+  background: rgba(59, 130, 246, 0.08);
+  border-left-color: rgba(59, 130, 246, 0.8);
+}
+
+.cross-item__link-hint {
+  opacity: 0.55;
+  font-size: 10px;
+  margin-left: 3px;
+}
+
 /* ── Similar Sold / Intelligence Prix ─────────────────────────────── */
 
 .recommend-box {
@@ -1216,6 +1339,24 @@ button, a { font: inherit; }
   border: 1px solid rgba(245, 158, 11, 0.2);
 }
 
+/* Warning variant of the recommend-box: shown when the DB has no sale
+   comparable enough (same model + year ± 2 + km ± 50k) to estimate the
+   price. We surface the limitation instead of averaging a far-off car. */
+.recommend-box--warn {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(245, 158, 11, 0.04));
+  border-color: rgba(245, 158, 11, 0.25);
+}
+
+.recommend-box--warn .recommend-box__title {
+  color: var(--amber);
+}
+
+.recommend-box__note {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
 .similar-list {
   display: flex;
   flex-direction: column;
@@ -1237,6 +1378,17 @@ button, a { font: inherit; }
   background: var(--bg-card-hover);
 }
 
+/* Non-roulant similar: subtle red tint + left bar so the outlier price
+   (suspiciously low because the car doesn't run) is visually flagged. */
+.similar-item--nr {
+  background: rgba(239, 68, 68, 0.06);
+  border-left: 3px solid var(--red);
+  padding-left: 7px;
+}
+.similar-item--nr:hover {
+  background: rgba(239, 68, 68, 0.1);
+}
+
 .similar-item__info {
   min-width: 0;
   flex: 1;
@@ -1249,6 +1401,10 @@ button, a { font: inherit; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
 }
 
 .similar-item__meta {
@@ -1284,6 +1440,24 @@ button, a { font: inherit; }
   font-weight: 700;
   vertical-align: middle;
   margin-left: 4px;
+}
+
+/* Badge on similar-sold rows that are in the displayed list but NOT in the
+   average-price sample (year or mileage out of tolerance). Keeps the row
+   visible for context while signalling that the price should not be read
+   as representative. */
+.badge-off {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 600;
+  vertical-align: middle;
+  margin-left: 4px;
+  border: 1px solid var(--border);
+  text-transform: lowercase;
 }
 
 /* ── Auction Summary ──────────────────────────────────────────────── */

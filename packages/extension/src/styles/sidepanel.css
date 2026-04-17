@@ -452,3 +452,71 @@ body {
 .diff-positive { color: #166534; }
 .diff-negative { color: #991b1b; }
 .diff-neutral  { color: #6b7280; }
+
+/* ── History summary banner ── */
+.vpa-history-banner {
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 8px;
+  padding: 9px 11px;
+  margin-bottom: 10px;
+  font-size: 11px;
+  color: #0c4a6e;
+  line-height: 1.5;
+}
+
+.vpa-history-banner-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: #075985;
+}
+
+.vpa-history-banner-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.vpa-history-banner-list li {
+  padding: 3px 0;
+  border-top: 1px dashed #bae6fd;
+}
+
+.vpa-history-banner-list li:first-child {
+  border-top: none;
+}
+
+.vpa-history-banner-link {
+  color: #1e40af;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.vpa-history-banner-link:hover {
+  text-decoration: underline;
+}
+
+/* ── Passage number badge ── */
+.vpa-passage-num {
+  display: inline-block;
+  background: #dbeafe;
+  color: #1e40af;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 8px;
+  margin-right: 4px;
+  vertical-align: middle;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.vpa-passage-link {
+  font-size: 11px;
+  color: #1e40af;
+  text-decoration: none;
+}
+
+.vpa-passage-link:hover {
+  text-decoration: underline;
+}

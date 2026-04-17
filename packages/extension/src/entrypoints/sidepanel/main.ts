@@ -1,5 +1,6 @@
 import { browser } from 'wxt/browser';
 import type { MatchResult, VehicleBadge, VehicleHistory, VehicleSnapshot } from '@vpauto/shared';
+import { buildPriceHistory, computeEvolution } from '@vpauto/shared';
 import { api } from '../../lib/api';
 import { scrapeRemotePage, scrapeVehicleDetailFromHtml } from '../../lib/scraper';
 import './style.css';
@@ -74,6 +75,7 @@ interface SimilarSoldData {
     soldPrice: number;
     saleDate: string | null;
     sourceUrl: string;
+    observations: string | null;
     yearMatch: boolean;
     modelMatch: boolean;
   }[];
@@ -119,8 +121,38 @@ interface ImportTarget {
 interface ImportChangeEntry {
   label: string;
   kind: 'new' | 'price_up' | 'price_down' | 'status_change' | 'updated';
+  /** Short one-line summary (kept for backwards-compat with filters). */
   detail: string;
+  /**
+   * Detailed, per-field diff between the previous snapshot (or none) and the
+   * freshly scraped one. Rendered under `detail` so the user sees *exactly*
+   * what changed on this vehicle, e.g. "Mise à prix : 15 400 € → 14 900 €
+   * (−500 €)", "Kilométrage : 78 500 → 82 300 (+3 800)".
+   */
+  updates: FieldUpdate[];
   url: string;
+}
+
+interface FieldUpdate {
+  /** Technical field key — matches `VehicleSnapshot` property name. */
+  field: string;
+  /** Human-friendly French label shown to the user. */
+  label: string;
+  /** Pre-formatted "before" value, or '—' when absent. */
+  before: string;
+  /** Pre-formatted "after" value, or '—' when absent. */
+  after: string;
+  /**
+   * Direction of the change — 'up' for an increase (green for km, red for
+   * mise-à-prix raise), 'down' for a drop, 'neutral' for non-numeric shifts
+   * like a status or city change.
+   */
+  direction: 'up' | 'down' | 'neutral';
+  /**
+   * Optional short delta label (e.g. "+3 800 km", "−500 €") shown next to
+   * the arrow. Omitted for non-numeric changes.
+   */
+  delta?: string;
 }
 
 type ImportChangeFilter = 'all' | ImportChangeEntry['kind'];
@@ -365,6 +397,7 @@ function describeImportChange(
             label,
             kind: 'new',
             detail: 'Nouveau vehicule enregistre.',
+            updates: buildNewVehicleSummary(next),
             url,
           },
         }
@@ -378,53 +411,44 @@ function describeImportChange(
             label,
             kind: 'updated',
             detail: 'Vehicule rattache a un enregistrement existant.',
+            updates: [],
             url,
           },
         };
   }
 
-  const previousPrice = previous.startingPrice ?? null;
-  const nextPrice = next.startingPrice ?? null;
-  const previousStatus = previous.status || 'available';
-  const nextStatus = next.status || 'available';
+  // Full field-by-field diff. Order matters — this is the display order in
+  // the UI. Most actionable changes first (price, km, status).
+  const updates = diffSnapshots(previous, next);
 
-  const priceDelta = previousPrice != null && nextPrice != null && previousPrice !== nextPrice
-    ? nextPrice - previousPrice
-    : null;
-  const priceDirection = priceDelta == null
-    ? null
-    : priceDelta > 0
-      ? 'up'
-      : priceDelta < 0
-        ? 'down'
-        : null;
-  const statusChanged = previousStatus !== nextStatus;
-  const soldPriceChanged = (previous.soldPrice ?? null) !== (next.soldPrice ?? null);
-  const lotChanged = (previous.lotNumber ?? null) !== (next.lotNumber ?? null);
-  const updated = priceDelta !== null || statusChanged || soldPriceChanged || lotChanged;
+  const priceUpdate = updates.find((u) => u.field === 'startingPrice');
+  const statusUpdate = updates.find((u) => u.field === 'status');
+  const priceDirection = priceUpdate?.direction === 'up'
+    ? 'up'
+    : priceUpdate?.direction === 'down' ? 'down' : null;
+  const statusChanged = !!statusUpdate;
+  const updated = updates.length > 0;
 
   let changeEntry: ImportChangeEntry | null = null;
-  if (priceDelta !== null) {
-    changeEntry = {
-      label,
-      kind: priceDelta > 0 ? 'price_up' : 'price_down',
-      detail: `${priceDelta > 0 ? '+' : ''}${priceDelta.toLocaleString('fr-FR')} € sur la mise a prix`,
-      url,
-    };
-  } else if (statusChanged) {
-    changeEntry = {
-      label,
-      kind: 'status_change',
-      detail: `Statut: ${formatStatus(previousStatus)} → ${formatStatus(nextStatus)}`,
-      url,
-    };
-  } else if (updated) {
-    changeEntry = {
-      label,
-      kind: 'updated',
-      detail: 'Fiche enrichie avec de nouvelles informations.',
-      url,
-    };
+  if (updated) {
+    // Pick the most salient change to drive the filter chip colour and the
+    // one-line summary. Price changes dominate, then status, then "updated".
+    let kind: ImportChangeEntry['kind'];
+    let detail: string;
+    if (priceUpdate && priceUpdate.direction !== 'neutral') {
+      kind = priceUpdate.direction === 'up' ? 'price_up' : 'price_down';
+      detail = `Mise a prix: ${priceUpdate.before} → ${priceUpdate.after}${priceUpdate.delta ? ` (${priceUpdate.delta})` : ''}`;
+    } else if (statusUpdate) {
+      kind = 'status_change';
+      detail = `Statut: ${statusUpdate.before} → ${statusUpdate.after}`;
+    } else {
+      kind = 'updated';
+      // Build a short multi-field summary (first 2 fields).
+      const preview = updates.slice(0, 2).map((u) => u.label).join(', ');
+      detail = `${updates.length} modification${updates.length > 1 ? 's' : ''}: ${preview}${updates.length > 2 ? `, +${updates.length - 2}` : ''}`;
+    }
+
+    changeEntry = { label, kind, detail, updates, url };
   }
 
   return {
@@ -435,6 +459,201 @@ function describeImportChange(
     statusChanged,
     changeEntry,
   };
+}
+
+/**
+ * For a newly-imported vehicle (no previous snapshot), build a short list of
+ * salient fields so the UI can still say "voilà ce qui a été enregistré"
+ * instead of just "Nouveau véhicule".
+ */
+function buildNewVehicleSummary(next: VehicleSnapshot): FieldUpdate[] {
+  const items: FieldUpdate[] = [];
+  const push = (field: string, label: string, value: string | null | undefined) => {
+    if (value == null || value === '') return;
+    items.push({ field, label, before: '—', after: value, direction: 'neutral' });
+  };
+  push('startingPrice', 'Mise a prix', formatMoney(next.startingPrice));
+  if (next.status === 'sold') push('soldPrice', 'Prix adjuge', formatMoney(next.soldPrice));
+  push('mileage', 'Kilometrage', formatKm(next.mileage));
+  push('status', 'Statut', formatStatus(next.status || 'available'));
+  push('city', 'Ville', next.city || null);
+  if (next.saleDate) push('saleDate', 'Date de vente', formatSaleDate(next.saleDate));
+  return items;
+}
+
+/**
+ * Compare every user-visible field between two snapshots and return a
+ * structured list of what changed, with pre-formatted before/after strings
+ * ready for rendering.
+ */
+function diffSnapshots(previous: VehicleSnapshot, next: VehicleSnapshot): FieldUpdate[] {
+  const updates: FieldUpdate[] = [];
+
+  // ── Pricing (most important, displayed first) ──
+  const priceDelta = numberDelta(previous.startingPrice, next.startingPrice);
+  if (priceDelta !== null) {
+    updates.push({
+      field: 'startingPrice',
+      label: 'Mise a prix',
+      before: formatMoney(previous.startingPrice),
+      after: formatMoney(next.startingPrice),
+      direction: priceDelta > 0 ? 'up' : priceDelta < 0 ? 'down' : 'neutral',
+      delta: priceDelta !== 0 ? `${priceDelta > 0 ? '+' : ''}${priceDelta.toLocaleString('fr-FR')} €` : undefined,
+    });
+  }
+
+  const soldDelta = numberDelta(previous.soldPrice, next.soldPrice);
+  if (soldDelta !== null) {
+    updates.push({
+      field: 'soldPrice',
+      label: 'Prix adjuge',
+      before: formatMoney(previous.soldPrice),
+      after: formatMoney(next.soldPrice),
+      direction: soldDelta > 0 ? 'up' : soldDelta < 0 ? 'down' : 'neutral',
+      delta: soldDelta !== 0 ? `${soldDelta > 0 ? '+' : ''}${soldDelta.toLocaleString('fr-FR')} €` : undefined,
+    });
+  }
+
+  const htDelta = numberDelta(previous.startingPriceHT, next.startingPriceHT);
+  if (htDelta !== null) {
+    updates.push({
+      field: 'startingPriceHT',
+      label: 'Mise a prix HT',
+      before: formatMoney(previous.startingPriceHT),
+      after: formatMoney(next.startingPriceHT),
+      direction: htDelta > 0 ? 'up' : htDelta < 0 ? 'down' : 'neutral',
+      delta: htDelta !== 0 ? `${htDelta > 0 ? '+' : ''}${htDelta.toLocaleString('fr-FR')} €` : undefined,
+    });
+  }
+
+  const coteDelta = numberDelta(previous.marketValue, next.marketValue);
+  if (coteDelta !== null) {
+    updates.push({
+      field: 'marketValue',
+      label: 'Cote',
+      before: formatMoney(previous.marketValue),
+      after: formatMoney(next.marketValue),
+      direction: coteDelta > 0 ? 'up' : coteDelta < 0 ? 'down' : 'neutral',
+      delta: coteDelta !== 0 ? `${coteDelta > 0 ? '+' : ''}${coteDelta.toLocaleString('fr-FR')} €` : undefined,
+    });
+  }
+
+  // ── Vehicle state ──
+  const kmDelta = numberDelta(previous.mileage, next.mileage);
+  if (kmDelta !== null && kmDelta !== 0) {
+    updates.push({
+      field: 'mileage',
+      label: 'Kilometrage',
+      before: formatKm(previous.mileage),
+      after: formatKm(next.mileage),
+      direction: kmDelta > 0 ? 'up' : 'down',
+      delta: `${kmDelta > 0 ? '+' : ''}${kmDelta.toLocaleString('fr-FR')} km`,
+    });
+  }
+
+  const prevStatus = previous.status || 'available';
+  const nextStatus = next.status || 'available';
+  if (prevStatus !== nextStatus) {
+    updates.push({
+      field: 'status',
+      label: 'Statut',
+      before: formatStatus(prevStatus),
+      after: formatStatus(nextStatus),
+      direction: 'neutral',
+    });
+  }
+
+  // ── Sale metadata ──
+  if ((previous.lotNumber ?? null) !== (next.lotNumber ?? null)) {
+    updates.push({
+      field: 'lotNumber',
+      label: 'Numero de lot',
+      before: previous.lotNumber != null ? `N°${previous.lotNumber}` : '—',
+      after: next.lotNumber != null ? `N°${next.lotNumber}` : '—',
+      direction: 'neutral',
+    });
+  }
+
+  if ((previous.city || '').trim() !== (next.city || '').trim()) {
+    updates.push({
+      field: 'city',
+      label: 'Ville',
+      before: previous.city || '—',
+      after: next.city || '—',
+      direction: 'neutral',
+    });
+  }
+
+  if ((previous.saleDate || '') !== (next.saleDate || '')) {
+    updates.push({
+      field: 'saleDate',
+      label: 'Date de vente',
+      before: formatSaleDate(previous.saleDate) || '—',
+      after: formatSaleDate(next.saleDate) || '—',
+      direction: 'neutral',
+    });
+  }
+
+  // ── Condition ──
+  if ((previous.observations || '').trim() !== (next.observations || '').trim()) {
+    updates.push({
+      field: 'observations',
+      label: 'Observations',
+      before: truncate(previous.observations) || '—',
+      after: truncate(next.observations) || '—',
+      direction: 'neutral',
+    });
+  }
+
+  // ── Media (photo count) ──
+  const prevPhotos = previous.photoUrls?.length ?? 0;
+  const nextPhotos = next.photoUrls?.length ?? 0;
+  if (prevPhotos !== nextPhotos) {
+    updates.push({
+      field: 'photoUrls',
+      label: 'Photos',
+      before: `${prevPhotos} photo${prevPhotos > 1 ? 's' : ''}`,
+      after: `${nextPhotos} photo${nextPhotos > 1 ? 's' : ''}`,
+      direction: nextPhotos > prevPhotos ? 'up' : 'down',
+      delta: `${nextPhotos > prevPhotos ? '+' : ''}${nextPhotos - prevPhotos}`,
+    });
+  }
+
+  return updates;
+}
+
+function numberDelta(a: number | null | undefined, b: number | null | undefined): number | null {
+  const aNum = typeof a === 'number' ? a : null;
+  const bNum = typeof b === 'number' ? b : null;
+  if (aNum === null && bNum === null) return null;
+  if (aNum === null || bNum === null) return (bNum ?? 0) - (aNum ?? 0);
+  if (aNum === bNum) return null;
+  return bNum - aNum;
+}
+
+function formatMoney(v: number | null | undefined): string {
+  if (v == null) return '—';
+  return `${v.toLocaleString('fr-FR')} €`;
+}
+
+function formatKm(v: number | null | undefined): string {
+  if (v == null) return '—';
+  return `${v.toLocaleString('fr-FR')} km`;
+}
+
+function formatSaleDate(s: string | null | undefined): string {
+  if (!s) return '';
+  // Snapshot format is ISO `YYYY-MM-DD` — render as `DD/MM/YYYY` for FR users.
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+  return s;
+}
+
+function truncate(s: string | null | undefined, max = 60): string {
+  if (!s) return '';
+  const trimmed = s.trim();
+  if (trimmed.length <= max) return trimmed;
+  return `${trimmed.slice(0, max - 1)}…`;
 }
 
 function dedupeImportTargets(targets: ImportTarget[]): ImportTarget[] {
@@ -882,7 +1101,7 @@ async function refreshPanel(): Promise<void> {
             .then(d => { similarAvailable = d; })
         );
         promises.push(
-          api.getSimilarSold(snapshot.brand, snapshot.model, snapshot.year, snapshot.hashId)
+          api.getSimilarSold(snapshot.brand, snapshot.model, snapshot.year, snapshot.mileage, snapshot.hashId)
             .then(d => { similarSold = d; })
         );
       }
@@ -1048,28 +1267,35 @@ function renderVehicleState(input: {
     : '';
   const visitStats = visitKey ? input.vehicleVisits?.[visitKey] : undefined;
 
-  // Recover startingPrice from multiple sources (sold pages hide "Mise à prix")
+  // Recover startingPrice for the CURRENT passage (sold detail pages hide "Mise à prix").
+  // Priority order matters: we want the MAP of this passage, NOT the MAP of an older passage.
+  //   1. snapshot.startingPrice — scraped directly from the current detail page (when available)
+  //   2. currentList card — live DOM of the current auction list ALWAYS reflects the current MAP
+  //   3. Latest history passage that has a startingPrice — a recent passage is likely this one
+  // We deliberately do NOT fall back to crossAuction.firstStartingPrice because that's the
+  // OLDEST MAP ever recorded; using it would mix prices from different listings and has
+  // caused "-300 € vs mise à prix" when the current passage was actually +100 € vs its MAP.
   let startingPrice = snapshot.startingPrice;
-  // Source 1: cross-auction data
-  if (!startingPrice && crossAuction?.firstStartingPrice) {
-    startingPrice = crossAuction.firstStartingPrice;
-  }
-  // Source 2: history passages
-  if (!startingPrice && history && history.passages.length > 0) {
-    for (const p of history.passages) {
-      if (p.startingPrice) { startingPrice = p.startingPrice; break; }
-    }
-  }
-  // Source 3: same vehicle in current list (scraped with startingPrice on the card)
   if (!startingPrice && snapshot.hashId && currentList.length > 0) {
     const fromList = currentList.find(v => v.hashId === snapshot.hashId);
     if (fromList?.startingPrice) {
       startingPrice = fromList.startingPrice;
     }
   }
+  if (!startingPrice && history && history.passages.length > 0) {
+    // passages are oldest-first; walk backwards to find the most recent passage with a MAP
+    for (let i = history.passages.length - 1; i >= 0; i--) {
+      const sp = history.passages[i].startingPrice;
+      if (sp) { startingPrice = sp; break; }
+    }
+  }
 
   // Find similar vehicles in current auction list
   const similarInAuction = findSimilarInList(snapshot, currentList);
+
+  // Patch the server-side history with the live-resolved MAP so the history
+  // section and price chart stay in sync. Compute once, reuse twice.
+  const enrichedHistory = enrichHistoryWithResolvedMap(history, snapshot, startingPrice);
 
   // Build metrics dynamically — only show metrics with real data
   const metrics: string[] = [];
@@ -1111,8 +1337,8 @@ function renderVehicleState(input: {
       ${renderSimilarInAuction(similarInAuction, snapshot, currentList.length)}
       ${renderSimilarElsewhere(similarAvailable, snapshot)}
       ${renderSimilarSold(similarSold, snapshot)}
-      ${renderHistorySection(history, vehicleId, snapshot)}
-      ${renderPriceChart(history)}
+      ${renderHistorySection(enrichedHistory, vehicleId, snapshot)}
+      ${renderPriceChart(enrichedHistory)}
       ${renderActionsBar(true)}
       ${showDebug ? renderDebugCard(isApiOnline, input.currentVehicleList, scrapeDebug, input.backgroundDebug) : ''}
     </div>
@@ -1296,6 +1522,49 @@ function isCurrentAuctionPassage(
   return true;
 }
 
+/**
+ * Patch the passage that matches the current snapshot with a MAP resolved from
+ * the live list card (or other fallback). This compensates for sold/unsold
+ * detail pages that hide "Mise à prix" — the stored snapshot has null MAP,
+ * but the list card still displays it. Also regenerates priceHistory so the
+ * chart reflects the real MAP→Adjugé trajectory instead of a misleading drop
+ * between two passages' MAPs.
+ */
+function enrichHistoryWithResolvedMap(
+  history: VehicleHistory | null,
+  snapshot: VehicleSnapshot,
+  resolvedStartingPrice: number | undefined,
+): VehicleHistory | null {
+  if (!history || !resolvedStartingPrice) return history;
+
+  // The resolved MAP comes from the live list card, which represents the most
+  // recent state of this vehicle. So we patch the LATEST passage in the same
+  // city that still has a null MAP. If the most-recent passage already has a
+  // MAP, nothing to do — the data is already correct.
+  const snapshotCity = snapshot.city || '';
+  const passages = history.passages.slice();
+  let patched = false;
+  for (let i = passages.length - 1; i >= 0; i--) {
+    const p = passages[i];
+    if ((p.city || '') !== snapshotCity) continue;
+    if (p.startingPrice != null) break;
+    passages[i] = { ...p, startingPrice: resolvedStartingPrice };
+    patched = true;
+    break;
+  }
+  if (!patched) return history;
+
+  // Re-derive the chart data and the evolution summary from the patched
+  // passages using the same helpers the backend uses, so client and server
+  // stay in lock-step on labelling and anchor-point selection.
+  return {
+    ...history,
+    passages,
+    priceHistory: buildPriceHistory(passages),
+    evolution: computeEvolution(passages),
+  };
+}
+
 function renderHistorySection(history: VehicleHistory | null, vehicleId: number | null | undefined, snapshot: VehicleSnapshot): string {
   const historicalPassages = history?.passages.filter((passage) => !isCurrentAuctionPassage(passage, snapshot)) || [];
 
@@ -1317,12 +1586,15 @@ function renderHistorySection(history: VehicleHistory | null, vehicleId: number 
     .reverse()
     .map((p, i) => {
       const isFirst = i === 0;
+      const sourceLink = p.sourceUrl
+        ? ` <a class="timeline-link" href="${esc(p.sourceUrl)}" target="_blank" rel="noreferrer" title="Ouvrir la fiche de ce passage">&#128279; fiche</a>`
+        : '';
       return `
         <div class="timeline-item ${isFirst ? 'timeline-item--current' : ''}">
           <div class="timeline-dot"></div>
           <div class="timeline-content">
             <div class="timeline-header">
-              <span class="timeline-date">${esc(formatDate(p.date))}</span>
+              <span class="timeline-date">${esc(formatDate(p.date))}${sourceLink}</span>
               <span class="timeline-status">${esc(formatStatus(p.status))}</span>
             </div>
             <div class="timeline-body">
@@ -1371,17 +1643,22 @@ function renderCrossAuction(data: CrossAuctionData | null | undefined, snapshot:
       priceHtml = `${formatPrice(p.startingPrice)}`;
     }
 
+    const linkOpen = p.sourceUrl
+      ? `<a class="cross-item cross-item--link ${isCurrent ? 'cross-item--current' : ''}" href="${esc(p.sourceUrl)}" target="_blank" rel="noreferrer" title="Ouvrir la fiche de ce passage">`
+      : `<div class="cross-item ${isCurrent ? 'cross-item--current' : ''}">`;
+    const linkClose = p.sourceUrl ? `</a>` : `</div>`;
+
     return `
-      <div class="cross-item ${isCurrent ? 'cross-item--current' : ''}">
+      ${linkOpen}
         <div class="cross-item__header">
-          <span class="cross-item__city">${esc(p.city)}</span>
+          <span class="cross-item__city">${esc(p.city)}${p.sourceUrl ? ' <span class="cross-item__link-hint">&#128279;</span>' : ''}</span>
           <span class="chip chip--${statusColor}" style="font-size:9px;padding:2px 6px;">${statusLabel}</span>
         </div>
         <div class="cross-item__detail">
           <span>${esc(formatDate(p.saleDate))}</span>
           <span>${priceHtml}</span>
         </div>
-      </div>
+      ${linkClose}
     `;
   }).join('');
 
@@ -1481,14 +1758,16 @@ function renderSimilarInAuction(vehicles: Partial<VehicleSnapshot>[], current: V
 
   const items = vehicles.map(v => {
     const isModelMatch = (v.model || '').toUpperCase().includes(modelFirst);
+    const nonRoulant = isNonRoulant(v);
     const statusLabel = v.status === 'sold' ? 'Vendu' : v.status === 'unsold' ? 'Invendu' : '';
     const statusColor = v.status === 'sold' ? 'green' : v.status === 'unsold' ? 'red' : '';
     return `
-      <div class="similar-item" data-vehicle-url="${esc(v.sourceUrl || '')}">
+      <div class="similar-item${nonRoulant ? ' similar-item--nr' : ''}" data-vehicle-url="${esc(v.sourceUrl || '')}">
         <div class="similar-item__info">
           <div class="similar-item__name">
             ${esc(v.brand || '')} ${esc(v.model || '')}
             ${isModelMatch ? '<span class="badge-match">Match</span>' : ''}
+            ${nonRoulant ? '<span class="badge-nr" title="Véhicule non roulant">NON ROULANT</span>' : ''}
           </div>
           <div class="similar-item__meta">${v.year || ''} \u2022 ${formatDistance(v.mileage || 0)} \u2022 ${esc(v.city || '')}</div>
         </div>
@@ -1576,6 +1855,7 @@ function renderSimilarElsewhere(matches: MatchResult[] | null | undefined, curre
       ? candidate.startingPrice - currentPrice
       : null;
     const kmDiff = candidate.mileage - current.mileage;
+    const nonRoulant = isNonRoulant(candidate);
     const statusLabel = candidate.status === 'auction_live'
       ? 'En cours'
       : candidate.status === 'unsold'
@@ -1588,11 +1868,12 @@ function renderSimilarElsewhere(matches: MatchResult[] | null | undefined, curre
       : 'green';
 
     return `
-      <div class="similar-item" data-vehicle-url="${esc(candidate.sourceUrl || '')}">
+      <div class="similar-item${nonRoulant ? ' similar-item--nr' : ''}" data-vehicle-url="${esc(candidate.sourceUrl || '')}">
         <div class="similar-item__info">
           <div class="similar-item__name">
             ${esc(candidate.brand)} ${esc(candidate.model)}
             ${match.level === 'same_model' ? '<span class="badge-match">Match</span>' : ''}
+            ${nonRoulant ? '<span class="badge-nr" title="Véhicule non roulant — explique un prix anormalement bas">NON ROULANT</span>' : ''}
           </div>
           <div class="similar-item__meta">
             ${candidate.year} \u2022 ${formatDistance(candidate.mileage)} \u2022 ${esc(candidate.city)}
@@ -1634,7 +1915,11 @@ function renderSimilarSold(data: SimilarSoldData | null | undefined, currentSnap
 
   const stats = data.stats;
 
-  // Price recommendation
+  // Price recommendation — only shown when we have at least one TRULY
+  // comparable sale (same model + year ± 2 + mileage ± 50 k km, drivable).
+  // When the sample is empty, we display an honest "insufficient sample"
+  // message instead of a misleading average pulled from a 5-year-older
+  // van with 4× the mileage.
   let recommendHtml = '';
   if (stats.avgSoldPrice && stats.count >= 1) {
     const currentPrice = currentSnapshot.startingPrice || currentSnapshot.soldPrice;
@@ -1642,7 +1927,7 @@ function renderSimilarSold(data: SimilarSoldData | null | undefined, currentSnap
       <div class="recommend-box">
         <div class="recommend-box__title">Estimation de prix</div>
         <div class="recommend-box__row">
-          <span>Prix moyen adjuge (${stats.count} ventes)</span>
+          <span>Prix moyen adjuge (${stats.count} vente${stats.count > 1 ? 's' : ''} comparable${stats.count > 1 ? 's' : ''})</span>
           <span class="recommend-box__value">${formatPrice(stats.avgSoldPrice)}</span>
         </div>
         <div class="recommend-box__row">
@@ -1665,17 +1950,41 @@ function renderSimilarSold(data: SimilarSoldData | null | undefined, currentSnap
         ` : ''}
       </div>
     `;
+  } else {
+    recommendHtml = `
+      <div class="recommend-box recommend-box--warn">
+        <div class="recommend-box__title">Estimation non disponible</div>
+        <div class="recommend-box__note">
+          Echantillon insuffisant : aucun vehicule vendu comparable
+          (meme modele, annee +/- 2, kilometrage +/- 50 000 km) n'est
+          presnet dans la base. Les ventes ci-dessous sont affichees
+          a titre indicatif mais ne sont pas assez proches pour une
+          estimation fiable.
+        </div>
+      </div>
+    `;
   }
 
-  // Similar vehicles list
+  // Similar vehicles list — the "Match" badge now only lights up when the
+  // vehicle is a TRUE comparable (model + year + mileage all within
+  // tolerance). Anything else is shown for context but tagged as such.
   const items = data.results.slice(0, 8).map(v => {
-    const exactMatch = v.modelMatch && v.yearMatch;
+    const isComparable = v.modelMatch && v.yearMatch && v.mileageMatch;
+    const nonRoulant = isNonRoulant(v);
+    const reasons: string[] = [];
+    if (!v.yearMatch) reasons.push('annee eloignee');
+    if (!v.mileageMatch) reasons.push('km eloigne');
+    const offBadge = !isComparable && !nonRoulant && reasons.length > 0
+      ? `<span class="badge-off" title="Exclu du prix moyen — ${esc(reasons.join(', '))}">hors echantillon</span>`
+      : '';
     return `
-      <div class="similar-item" data-vehicle-url="${esc(v.sourceUrl)}">
+      <div class="similar-item${nonRoulant ? ' similar-item--nr' : ''}" data-vehicle-url="${esc(v.sourceUrl)}">
         <div class="similar-item__info">
           <div class="similar-item__name">
             ${esc(v.brand)} ${esc(v.model)}
-            ${exactMatch ? '<span class="badge-match">Match</span>' : ''}
+            ${isComparable ? '<span class="badge-match">Match</span>' : ''}
+            ${offBadge}
+            ${nonRoulant ? '<span class="badge-nr" title="Exclu du prix moyen — véhicule non roulant">NON ROULANT</span>' : ''}
           </div>
           <div class="similar-item__meta">${v.year} \u2022 ${formatDistance(v.mileage)} \u2022 ${esc(v.city)}</div>
         </div>
@@ -2148,7 +2457,22 @@ function renderImportJobState(): string {
                 <strong>${esc(change.label)}</strong>
                 ${change.url ? `<button class="btn btn--ghost btn--small import-job__change-link" type="button" data-vehicle-url="${esc(change.url)}">Ouvrir</button>` : ''}
               </div>
-              <span>${esc(change.detail)}</span>
+              <span class="import-job__change-detail">${esc(change.detail)}</span>
+              ${change.updates && change.updates.length ? `
+                <ul class="import-job__updates">
+                  ${change.updates.map((u) => `
+                    <li class="import-job__update import-job__update--${u.direction}">
+                      <span class="import-job__update-label">${esc(u.label)}</span>
+                      <span class="import-job__update-values">
+                        <span class="import-job__update-before">${esc(u.before)}</span>
+                        <span class="import-job__update-arrow" aria-hidden="true">→</span>
+                        <span class="import-job__update-after">${esc(u.after)}</span>
+                        ${u.delta ? `<span class="import-job__update-delta import-job__update-delta--${u.direction}">${esc(u.delta)}</span>` : ''}
+                      </span>
+                    </li>
+                  `).join('')}
+                </ul>
+              ` : ''}
             </div>
           `).join('') : `
             <div class="import-job__empty">

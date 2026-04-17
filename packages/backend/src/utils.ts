@@ -1,6 +1,21 @@
 import type { Snapshot } from '@prisma/client';
 import type { VehicleSnapshot, VehicleStatus } from '@vpauto/shared';
 
+/**
+ * Decode a `photoUrls` column. The DB stores photos as a JSON array string
+ * (SQLite doesn't have a native array type). Returns [] for null, empty,
+ * or malformed values so callers never need a try/catch.
+ */
+export function parsePhotoUrls(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 export function snapshotToApi(s: Snapshot): VehicleSnapshot {
   return {
     id: s.id,
@@ -43,7 +58,7 @@ export function snapshotToApi(s: Snapshot): VehicleSnapshot {
     firstOwner: s.firstOwner ?? undefined,
     warranty: s.warranty ?? undefined,
     equipment: s.equipment ? JSON.parse(s.equipment) : undefined,
-    photoUrls: JSON.parse(s.photoUrls),
+    photoUrls: parsePhotoUrls(s.photoUrls),
     cdnHash: s.cdnHash ?? undefined,
     sourceUrl: s.sourceUrl,
     scrapedAt: s.scrapedAt.toISOString(),

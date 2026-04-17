@@ -111,6 +111,8 @@ export interface VehicleComparison {
 // ── History ──
 
 export interface VehiclePassage {
+  /** 1-based passage number, oldest first */
+  passageNumber: number;
   snapshotId: number;
   date: string;
   city: string;
@@ -121,19 +123,46 @@ export interface VehiclePassage {
   mileage: number;
   observations?: string;
   technicalCheckUrl?: string;
+  /** Link to the listing page of this specific passage */
   sourceUrl: string;
   photoUrl?: string;
+  /**
+   * Distinct MAP values observed during this passage's listing window,
+   * oldest first. Populated only when the seller changed the reserve
+   * before the auction (e.g. [3900, 3500] = reserve dropped from 3 900 €
+   * to 3 500 € before sale). Absent when the MAP was constant.
+   */
+  mapTrajectory?: number[];
+}
+
+export interface VehiclePriceEvolution {
+  /** Total unique passages (deduplicated by city+saleDate) */
+  totalPassages: number;
+  soldCount: number;
+  unsoldCount: number;
+  /** Starting price (MAP) of the very first passage */
+  firstStartingPrice: number | null;
+  /** Effective price of the latest passage: soldPrice if sold, else startingPrice */
+  lastEffectivePrice: number | null;
+  /** True if the latest passage was sold */
+  lastPassageSold: boolean;
+  /** lastEffectivePrice - firstStartingPrice (null if either missing) */
+  evolutionAmount: number | null;
+  evolutionDirection: 'up' | 'down' | 'stable' | 'unknown';
 }
 
 export interface VehicleHistory {
   vehicleId: number;
   identity: VehicleIdentity;
+  /** Deduplicated passages, chronological (oldest first) */
   passages: VehiclePassage[];
   totalPassages: number;
   firstSeen: string;
   lastSeen: string;
-  priceHistory: { date: string; price: number }[];
+  /** Combined MAP and Adjugé points so charts show real movement */
+  priceHistory: { date: string; price: number; label?: string }[];
   mileageHistory: { date: string; mileage: number }[];
+  evolution: VehiclePriceEvolution;
 }
 
 // ── Badge types ──

@@ -29,7 +29,10 @@ const probeCache = new Map<string, ProbeEntry>();
 // v2: switched from tentative-URL optimism to state-machine buttons.
 // v3: added Suivi d'Entretien (`hasSuiviEntretien` / `suiviEntretienUrl`).
 // v4: added Diagnostic batterie (`hasDiagnosticBatterie` / `diagnosticBatterieUrl`).
-const PROBE_STORAGE_KEY = 'vpautoDocProbe.v4';
+// v5: added text sections — Observations, Equipements/Options,
+//     Caractéristiques techniques (extracted from the detail-page HTML,
+//     no PDF involved). Old v4 entries don't carry those fields.
+const PROBE_STORAGE_KEY = 'vpautoDocProbe.v5';
 const PROBE_TTL_MS = 24 * 3600 * 1000; // 24 h
 const MAX_CONCURRENT_PROBES = 3;
 let activeProbes = 0;
@@ -47,6 +50,7 @@ async function hydrateProbeCache(): Promise<void> {
       'vpautoDocProbe',
       'vpautoDocProbe.v2',
       'vpautoDocProbe.v3',
+      'vpautoDocProbe.v4',
     ]).catch(() => {});
 
     const stored = await chrome.storage.local.get(PROBE_STORAGE_KEY);
@@ -266,18 +270,29 @@ function injectBadgeOverlay(card: HTMLElement, badges: VehicleBadge[]): void {
 
 // ── Document buttons (CT + Bilan Expert) ───────────────────────────────────
 
-type DocKind = 'ct' | 'be' | 'se' | 'db';
+type DocKind = 'ct' | 'be' | 'se' | 'db' | 'obs' | 'eq' | 'tech';
 type DocButtonState = 'checking' | 'confirmed' | 'missing' | 'fallback';
 
 type DocButtonConfig = {
   kind: DocKind;
   label: string;
   tooltip: string;
+  /** URL of the PDF to render in an iframe. `null` for text-only kinds. */
   confirmedUrl: string | null;
+  /**
+   * Raw text content (multi-line) extracted from the detail page, used by
+   * the three text-only kinds ('obs', 'eq', 'tech'). `null` for PDF kinds.
+   */
+  confirmedText: string | null;
   state: DocButtonState;
   /** Detail page URL — used as a fallback "open in new tab" target. */
   detailPageUrl: string;
 };
+
+/** True for kinds whose preview is text extracted from the detail page. */
+function isTextKind(kind: DocKind): boolean {
+  return kind === 'obs' || kind === 'eq' || kind === 'tech';
+}
 
 /** Close any open doc popup on other cards (or on this one if not excluded). */
 function closeAllDocPopups(exceptCard?: HTMLElement): void {
@@ -336,11 +351,52 @@ function addDocumentButtons(
     label: 'Voir le CT',
     tooltip: 'Afficher le contrôle technique',
     confirmedUrl: null,
+    confirmedText: null,
     state: 'checking',
     detailPageUrl,
   };
   const ctButton = createDocButton(card, dock, v, ctConfig);
   applyCheckingState(ctButton, ctConfig);
+
+  // Three text-only buttons (Observations, Équipements/Options,
+  // Caractéristiques techniques) — all start "checking", transition to
+  // "confirmed" with extracted text on success, or "missing" if the
+  // section wasn't found on the page.
+  const obsConfig: DocButtonConfig = {
+    kind: 'obs',
+    label: 'Observations',
+    tooltip: 'Afficher les observations de la fiche véhicule',
+    confirmedUrl: null,
+    confirmedText: null,
+    state: 'checking',
+    detailPageUrl,
+  };
+  const obsButton = createDocButton(card, dock, v, obsConfig);
+  applyCheckingState(obsButton, obsConfig);
+
+  const eqConfig: DocButtonConfig = {
+    kind: 'eq',
+    label: 'Équipements',
+    tooltip: 'Afficher les équipements et options',
+    confirmedUrl: null,
+    confirmedText: null,
+    state: 'checking',
+    detailPageUrl,
+  };
+  const eqButton = createDocButton(card, dock, v, eqConfig);
+  applyCheckingState(eqButton, eqConfig);
+
+  const techConfig: DocButtonConfig = {
+    kind: 'tech',
+    label: 'Caractéristiques',
+    tooltip: 'Afficher les caractéristiques techniques',
+    confirmedUrl: null,
+    confirmedText: null,
+    state: 'checking',
+    detailPageUrl,
+  };
+  const techButton = createDocButton(card, dock, v, techConfig);
+  applyCheckingState(techButton, techConfig);
 
   // Eagerly run the probe (rate-limited to MAX_CONCURRENT_PROBES).
   // We do not wait for the card to be in viewport: a vehicle in the list
@@ -353,6 +409,12 @@ function addDocumentButtons(
       // a "Voir la fiche ↗" link that opens the detail page in a new tab,
       // where the user can manually access whatever docs exist.
       applyFallbackState(ctButton, ctConfig);
+      // Same treatment for the three text-only buttons — without a probe
+      // we don't have the text to display, so "open the detail page" is
+      // the only safe fallback.
+      applyFallbackState(obsButton, obsConfig);
+      applyFallbackState(eqButton, eqConfig);
+      applyFallbackState(techButton, techConfig);
       return;
     }
 
@@ -366,6 +428,30 @@ function addDocumentButtons(
       applyMissingState(ctButton, ctConfig);
     }
 
+    // ── Observations handling (text, in-page) ──
+    if (result.hasObservationsText && result.observationsText) {
+      obsConfig.confirmedText = result.observationsText;
+      applyConfirmedState(obsButton, obsConfig);
+    } else {
+      applyMissingState(obsButton, obsConfig);
+    }
+
+    // ── Équipements/Options handling (text, in-page) ──
+    if (result.hasEquipmentText && result.equipmentText) {
+      eqConfig.confirmedText = result.equipmentText;
+      applyConfirmedState(eqButton, eqConfig);
+    } else {
+      applyMissingState(eqButton, eqConfig);
+    }
+
+    // ── Caractéristiques techniques handling (text, in-page) ──
+    if (result.hasTechnicalSpecsText && result.technicalSpecsText) {
+      techConfig.confirmedText = result.technicalSpecsText;
+      applyConfirmedState(techButton, techConfig);
+    } else {
+      applyMissingState(techButton, techConfig);
+    }
+
     // ── Bilan Expert handling ──
     // Only add a BE button if a `_BE.pdf` was positively found. We deliberately
     // do NOT render a "missing" BE button when absent — the absence of a Bilan
@@ -377,6 +463,7 @@ function addDocumentButtons(
         label: 'Voir bilan',
         tooltip: 'Afficher le Bilan Expert',
         confirmedUrl: result.bilanExpertUrl,
+        confirmedText: null,
         state: 'confirmed',
         detailPageUrl,
       };
@@ -394,6 +481,7 @@ function addDocumentButtons(
         label: 'Voir entretien',
         tooltip: 'Afficher le Suivi d\'Entretien',
         confirmedUrl: result.suiviEntretienUrl,
+        confirmedText: null,
         state: 'confirmed',
         detailPageUrl,
       };
@@ -411,6 +499,7 @@ function addDocumentButtons(
         label: 'Voir batterie',
         tooltip: 'Afficher le Diagnostic batterie',
         confirmedUrl: result.diagnosticBatterieUrl,
+        confirmedText: null,
         state: 'confirmed',
         detailPageUrl,
       };
@@ -458,7 +547,7 @@ function createDocButton(
     }
 
     // Only confirmed buttons open a popup. checking + missing → no-op.
-    if (config.state !== 'confirmed' || !config.confirmedUrl) return;
+    if (config.state !== 'confirmed') return;
 
     // Toggle: if a popup of this kind is already open, close it
     const existing = card.querySelector<HTMLElement>(`.vpauto-doc-popup[data-vpauto-doc-kind="${config.kind}"]`);
@@ -468,7 +557,14 @@ function createDocButton(
     }
 
     closeAllDocPopups(card);
-    openDocPopup(card, button, config, config.confirmedUrl, v);
+
+    if (isTextKind(config.kind)) {
+      if (!config.confirmedText) return;
+      openTextPopup(card, button, config, config.confirmedText, v);
+    } else {
+      if (!config.confirmedUrl) return;
+      openDocPopup(card, button, config, config.confirmedUrl, v);
+    }
   });
 
   return button;
@@ -478,13 +574,26 @@ function createDocButton(
 function applyCheckingState(button: HTMLButtonElement, config: DocButtonConfig): void {
   config.state = 'checking';
   button.disabled = true;
-  button.textContent = config.kind === 'be' ? 'Bilan…' : 'Vérification CT…';
+  button.textContent = checkingLabel(config.kind);
   button.title = 'Vérification du document sur la fiche véhicule';
   button.style.background = 'rgba(60,64,75,0.78)';
   button.style.opacity = '0.65';
   button.style.cursor = 'progress';
   button.dataset.vpautoCtState = 'checking';
   button.setAttribute('aria-disabled', 'true');
+}
+
+function checkingLabel(kind: DocKind): string {
+  switch (kind) {
+    case 'be': return 'Bilan…';
+    case 'se': return 'Entretien…';
+    case 'db': return 'Batterie…';
+    case 'obs': return 'Observations…';
+    case 'eq': return 'Équipements…';
+    case 'tech': return 'Caractéristiques…';
+    case 'ct':
+    default:   return 'Vérification CT…';
+  }
 }
 
 /** Apply "confirmed" visuals — coloured background, clickable. */
@@ -504,11 +613,14 @@ function applyConfirmedState(button: HTMLButtonElement, config: DocButtonConfig)
 /** Colour used for the confirmed state of each document kind. */
 function confirmedBackground(kind: DocKind): string {
   switch (kind) {
-    case 'be': return 'rgba(244,121,32,0.92)';  // orange — Bilan Expert
-    case 'se': return 'rgba(34,197,94,0.92)';   // green  — Suivi d'Entretien
-    case 'db': return 'rgba(59,130,246,0.92)';  // blue   — Diagnostic batterie
+    case 'be':   return 'rgba(244,121,32,0.92)';  // orange — Bilan Expert
+    case 'se':   return 'rgba(34,197,94,0.92)';   // green  — Suivi d'Entretien
+    case 'db':   return 'rgba(59,130,246,0.92)';  // blue   — Diagnostic batterie
+    case 'obs':  return 'rgba(236,72,153,0.92)';  // pink   — Observations (text)
+    case 'eq':   return 'rgba(139,92,246,0.92)';  // purple — Équipements/Options (text)
+    case 'tech': return 'rgba(14,165,233,0.92)';  // cyan   — Caractéristiques techniques (text)
     case 'ct':
-    default:   return 'rgba(15,17,23,0.85)';    // dark   — Contrôle Technique
+    default:     return 'rgba(15,17,23,0.85)';    // dark   — Contrôle Technique
   }
 }
 
@@ -516,16 +628,40 @@ function confirmedBackground(kind: DocKind): string {
 function applyMissingState(button: HTMLButtonElement, config: DocButtonConfig): void {
   config.state = 'missing';
   button.disabled = true;
-  button.textContent = config.kind === 'be' ? 'Bilan indisponible' : 'CT indisponible';
-  button.title = config.kind === 'be'
-    ? 'Aucun bilan expert disponible sur la fiche véhicule'
-    : 'Absence de contrôle technique confirmée sur la fiche véhicule';
+  button.textContent = missingLabel(config.kind);
+  button.title = missingTooltip(config.kind);
   button.style.background = 'rgba(60,64,75,0.78)';
   button.style.opacity = '0.55';
   button.style.filter = 'grayscale(0.8)';
   button.style.cursor = 'not-allowed';
   button.dataset.vpautoCtState = 'missing';
   button.setAttribute('aria-disabled', 'true');
+}
+
+function missingLabel(kind: DocKind): string {
+  switch (kind) {
+    case 'be':   return 'Bilan indisponible';
+    case 'se':   return 'Entretien indisponible';
+    case 'db':   return 'Batterie indisponible';
+    case 'obs':  return 'Observations indispo.';
+    case 'eq':   return 'Équipements indispo.';
+    case 'tech': return 'Caract. indisponibles';
+    case 'ct':
+    default:     return 'CT indisponible';
+  }
+}
+
+function missingTooltip(kind: DocKind): string {
+  switch (kind) {
+    case 'be':   return 'Aucun bilan expert disponible sur la fiche véhicule';
+    case 'se':   return 'Aucun suivi d\'entretien disponible sur la fiche véhicule';
+    case 'db':   return 'Aucun diagnostic batterie disponible sur la fiche véhicule';
+    case 'obs':  return 'Aucune observation trouvée sur la fiche véhicule';
+    case 'eq':   return 'Aucun équipement/option listé sur la fiche véhicule';
+    case 'tech': return 'Aucune caractéristique technique listée sur la fiche véhicule';
+    case 'ct':
+    default:     return 'Absence de contrôle technique confirmée sur la fiche véhicule';
+  }
 }
 
 /**
@@ -672,17 +808,213 @@ function openDocPopup(
   popup.innerHTML = headerHtml + docHtml;
   card.appendChild(popup);
   button.setAttribute('aria-expanded', 'true');
-  button.textContent =
-    config.kind === 'be' ? 'Masquer bilan'
-    : config.kind === 'se' ? 'Masquer entretien'
-    : config.kind === 'db' ? 'Masquer batterie'
-    : 'Masquer le CT';
+  button.textContent = hideLabel(config.kind);
 
   popup.querySelector<HTMLButtonElement>('.vpauto-doc-close')?.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
     removeDocPopup(button);
   });
+}
+
+/**
+ * Render a popup showing text content extracted from the detail page, used
+ * by the Observations / Équipements / Caractéristiques buttons. Unlike
+ * `openDocPopup` (which embeds a PDF via iframe), this renders a scrollable
+ * list. Each line from `text` (separated by `\n`) becomes one item.
+ */
+function openTextPopup(
+  card: HTMLElement,
+  button: HTMLButtonElement,
+  config: DocButtonConfig,
+  text: string,
+  v: Partial<VehicleSnapshot>,
+): void {
+  const popup = document.createElement('div');
+  popup.className = 'vpauto-doc-popup vpauto-doc-popup--text';
+  popup.dataset.vpautoDocKind = config.kind;
+  popup.style.cssText = `
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(12,16,24,0.97) 0%, rgba(15,17,23,0.99) 100%);
+    padding: 0;
+    z-index: 30;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 12px;
+    color: #f0f0f5;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    animation: vpauto-ct-fade-in 140ms ease-out;
+    backdrop-filter: blur(3px);
+  `;
+
+  const brand = v.brand || '';
+  const model = v.model || '';
+  const isSold = v.status === 'sold';
+  const isNonRoulant = /non\s*roulant/i.test(v.observations || '') || /non\s*roulant/i.test(v.model || '');
+
+  let priceHtml = '';
+  if (isSold && v.soldPrice) {
+    priceHtml += `<span style="color:#22c55e;font-weight:700;">Adjuge: ${v.soldPrice.toLocaleString('fr-FR')} €</span>`;
+    if (v.startingPrice) {
+      priceHtml += `<span style="color:#8b8fa3;text-decoration:line-through;margin-left:8px;">${v.startingPrice.toLocaleString('fr-FR')} €</span>`;
+    }
+  } else if (v.startingPrice) {
+    priceHtml = `<span style="color:#f47920;font-weight:700;">${v.startingPrice.toLocaleString('fr-FR')} €</span>`;
+  }
+
+  const km = v.mileage ? v.mileage.toLocaleString('fr-FR') + ' km' : '';
+  const city = v.city || '';
+  const year = v.year || '';
+
+  let tagsHtml = '';
+  if (isNonRoulant) {
+    tagsHtml += `<span style="background:rgba(239,68,68,0.15);color:#ef4444;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;">NON ROULANT</span>`;
+  }
+  if (isSold) {
+    tagsHtml += `<span style="background:rgba(34,197,94,0.15);color:#22c55e;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;">VENDU</span>`;
+  }
+
+  const headerHtml = `
+    <div style="padding:10px 12px; background:linear-gradient(135deg,rgba(30,42,58,0.96),rgba(15,21,32,0.98)); border-bottom:1px solid rgba(255,255,255,0.08); flex:0 0 auto;">
+      <div style="display:flex;justify-content:space-between;align-items:start;gap:8px;">
+        <div style="font-weight:700; color:#f0f0f5; font-size:13px; line-height:1.25;">${esc(brand)} ${esc(model)}</div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;">${tagsHtml}</div>
+      </div>
+      <div style="display:flex; gap:12px; margin-top:6px; color:#dbe4ee; font-size:11px; flex-wrap:wrap;">
+        ${priceHtml ? `<span>${priceHtml}</span>` : ''}
+      </div>
+      <div style="display:flex; gap:10px; margin-top:4px; color:#8b8fa3; font-size:10px; flex-wrap:wrap;">
+        ${year ? `<span>${year}</span>` : ''}
+        ${km ? `<span>${km}</span>` : ''}
+        ${city ? `<span>${city}</span>` : ''}
+      </div>
+    </div>
+  `;
+
+  const badgeLabel = textBadgeLabel(config.kind);
+  const accent = textAccentColor(config.kind);
+
+  // Split text into lines and turn each into a row. For "tech" (which has
+  // `Label : Value` items) we render a two-column key/value layout.
+  const lines = text.split('\n').map((s) => s.trim()).filter(Boolean);
+  const bodyRows = lines.map((line) => renderTextRow(line, config.kind)).join('');
+
+  const docHtml = `
+    <div style="position:relative; flex:1 1 auto; min-height:220px; background:#0f1117; display:flex; flex-direction:column;">
+      <div style="position:absolute; left:10px; top:10px; z-index:2; background:rgba(15,17,23,0.78); color:${accent};
+                  padding:6px 10px; border-radius:999px; font-size:10px; font-weight:700; letter-spacing:0.02em;
+                  backdrop-filter:blur(6px); border:1px solid ${accent}33;">
+        ${badgeLabel}
+      </div>
+      <div style="flex:1 1 auto; overflow-y:auto; padding:44px 14px 60px; font-size:12px; line-height:1.5; color:#e4e7ef;">
+        ${bodyRows || `<div style="color:#8b8fa3; font-style:italic;">Aucun contenu.</div>`}
+      </div>
+      <button type="button"
+              class="vpauto-doc-close"
+              style="position:absolute; right:10px; bottom:10px; z-index:3; border:none; border-radius:999px;
+                     background:rgba(15,17,23,0.85); color:#f8fafc; cursor:pointer; font-size:11px; font-weight:700;
+                     padding:7px 11px; letter-spacing:0.01em; box-shadow:0 6px 18px rgba(0,0,0,0.28); backdrop-filter:blur(8px);"
+              aria-label="Fermer l'aperçu">
+        Fermer
+      </button>
+      <a href="${esc(config.detailPageUrl)}" target="_blank" rel="noopener"
+         style="position:absolute; left:10px; bottom:10px; background:linear-gradient(135deg,${accent},${darken(accent)});
+                color:white; padding:7px 12px; border-radius:999px; font-size:11px; font-weight:700; text-decoration:none;
+                box-shadow:0 4px 14px ${accent}59; z-index:2;">
+        Ouvrir la fiche ↗
+      </a>
+    </div>
+  `;
+
+  popup.innerHTML = headerHtml + docHtml;
+  card.appendChild(popup);
+  button.setAttribute('aria-expanded', 'true');
+  button.textContent = hideLabel(config.kind);
+
+  popup.querySelector<HTMLButtonElement>('.vpauto-doc-close')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    removeDocPopup(button);
+  });
+}
+
+function textBadgeLabel(kind: DocKind): string {
+  switch (kind) {
+    case 'obs':  return 'Observations';
+    case 'eq':   return 'Équipements / Options';
+    case 'tech': return 'Caractéristiques techniques';
+    default:     return '';
+  }
+}
+
+function textAccentColor(kind: DocKind): string {
+  switch (kind) {
+    case 'obs':  return '#ec4899'; // pink
+    case 'eq':   return '#8b5cf6'; // purple
+    case 'tech': return '#0ea5e9'; // cyan
+    default:     return '#f47920';
+  }
+}
+
+/** Rough "darken" to build a gradient pair for the open-page button. */
+function darken(hex: string): string {
+  const m = hex.match(/^#([0-9a-f]{6})$/i);
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  const r = Math.max(0, ((n >> 16) & 0xff) - 30);
+  const g = Math.max(0, ((n >> 8) & 0xff) - 30);
+  const b = Math.max(0, (n & 0xff) - 30);
+  return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, '0')}`;
+}
+
+/**
+ * Render one text row. "tech" rows look like `Label : Value` — render a
+ * two-column key/value layout. Observations and Equipements are free text,
+ * render as a bullet list.
+ */
+function renderTextRow(line: string, kind: DocKind): string {
+  if (kind === 'tech') {
+    // Accept separators ` : `, `:`, or tab-wide gaps.
+    const m = line.match(/^(.*?)\s*:\s*(.+)$/);
+    if (m) {
+      const key = m[1].trim();
+      const val = m[2].trim();
+      return `
+        <div style="display:grid; grid-template-columns: minmax(0, 1fr) auto; gap:8px;
+                    padding:6px 0; border-bottom:1px dashed rgba(255,255,255,0.06);">
+          <span style="color:#94a3b8;">${esc(key)}</span>
+          <span style="color:#f1f5f9; font-weight:600; text-align:right;">${esc(val)}</span>
+        </div>
+      `;
+    }
+  }
+
+  // Strip a leading "- " or "• " bullet that VPauto sometimes includes in
+  // observations so we don't render "• - Export impossible".
+  const clean = line.replace(/^[-–—•·]\s*/, '').trim();
+
+  return `
+    <div style="display:flex; gap:8px; padding:5px 0; border-bottom:1px dashed rgba(255,255,255,0.05);">
+      <span style="color:#64748b; flex:0 0 auto;">•</span>
+      <span style="color:#e4e7ef; flex:1 1 auto;">${esc(clean)}</span>
+    </div>
+  `;
+}
+
+function hideLabel(kind: DocKind): string {
+  switch (kind) {
+    case 'be':   return 'Masquer bilan';
+    case 'se':   return 'Masquer entretien';
+    case 'db':   return 'Masquer batterie';
+    case 'obs':  return 'Masquer observations';
+    case 'eq':   return 'Masquer équipements';
+    case 'tech': return 'Masquer caract.';
+    case 'ct':
+    default:     return 'Masquer le CT';
+  }
 }
 
 function getBadgeColors(type: string): string {

@@ -1,9 +1,15 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { prisma } from '../db.js';
+import {
+  buildPassageFromGroup,
+  buildPriceHistory,
+  computeEvolution,
+  groupSnapshotsIntoPassages,
+} from '../history.js';
 import { findExactVehicle, findMatches } from '../matching.js';
-import { snapshotToApi } from '../utils.js';
-import type { VehicleSnapshot, VehicleHistory, VehiclePassage, VehicleBadge, BadgeType, ApiResponse } from '@vpauto/shared';
+import { parsePhotoUrls, snapshotToApi } from '../utils.js';
+import type { VehicleSnapshot, VehicleHistory, VehiclePassage, VehiclePriceEvolution, VehicleBadge, BadgeType, ApiResponse } from '@vpauto/shared';
 
 const app = new Hono();
 
@@ -57,6 +63,84 @@ function toSnapshotWriteData(vehicleId: number, data: VehicleSnapshot) {
   };
 }
 
+/**
+ * When enriching an existing snapshot, never let an incoming null/undefined/empty
+ * clobber an already-stored fact. Reason: a second scrape on a sold detail page
+ * no longer shows "Mise à prix", so the detail scraper returns startingPrice=undefined.
+ * Before this fix, the enrichment wrote null over the previously-saved 21 300 € and
+ * the MAP was lost forever. Facts (prices, CT/BE URLs, observations, maintenance,
+ * vehicle identity fields) are preserved; dynamic fields (status, soldPrice,
+ * saleDate, lotNumber, mileage, photos, sourceUrl, scrapedAt) are overwritten as before.
+ */
+function mergeSnapshotForEnrichment(
+  existing: {
+    reference: string | null;
+    hashId: string | null;
+    version: string;
+    startingPrice: number | null;
+    startingPriceHT: number | null;
+    marketValue: number | null;
+    newPrice: number | null;
+    technicalCheckUrl: string | null;
+    conditionImageUrl: string | null;
+    observations: string | null;
+    maintenanceStatus: string | null;
+    serviceHistory: boolean | null;
+    firstOwner: boolean | null;
+    warranty: string | null;
+    city: string;
+    center: string | null;
+    department: string | null;
+    color: string;
+    fuel: string;
+    transmission: string;
+    engineSize: number | null;
+    power: number | null;
+    fiscalPower: number | null;
+    photoUrls: string;
+    cdnHash: string | null;
+  },
+  vehicleId: number,
+  data: VehicleSnapshot,
+) {
+  const base = toSnapshotWriteData(vehicleId, data);
+  const pickFact = <T>(incoming: T | null | undefined, current: T | null | undefined): T | null =>
+    (incoming ?? null) !== null ? (incoming as T) : (current ?? null);
+  const pickString = (incoming: string | null | undefined, current: string | null | undefined) =>
+    incoming && incoming.length > 0 ? incoming : (current && current.length > 0 ? current : incoming ?? null);
+
+  // Preserve pre-existing photos when incoming has fewer/none
+  const incomingPhotos = data.photoUrls || [];
+  const existingPhotos = parsePhotoUrls(existing.photoUrls);
+  const mergedPhotos = existingPhotos.length > incomingPhotos.length ? existingPhotos : incomingPhotos;
+
+  return {
+    ...base,
+    reference: pickString(data.reference, existing.reference),
+    hashId: pickString(data.hashId, existing.hashId),
+    version: data.version && data.version.length > 0 ? data.version : existing.version,
+    startingPrice: pickFact(data.startingPrice, existing.startingPrice),
+    startingPriceHT: pickFact(data.startingPriceHT, existing.startingPriceHT),
+    marketValue: pickFact(data.marketValue, existing.marketValue),
+    newPrice: pickFact(data.newPrice, existing.newPrice),
+    technicalCheckUrl: pickString(data.technicalCheckUrl, existing.technicalCheckUrl),
+    conditionImageUrl: pickString(data.conditionImageUrl, existing.conditionImageUrl),
+    observations: pickString(data.observations, existing.observations),
+    maintenanceStatus: pickString(data.maintenanceStatus, existing.maintenanceStatus),
+    serviceHistory: pickFact(data.serviceHistory, existing.serviceHistory),
+    firstOwner: pickFact(data.firstOwner, existing.firstOwner),
+    warranty: pickString(data.warranty, existing.warranty),
+    color: data.color && data.color.length > 0 ? data.color : existing.color,
+    fuel: data.fuel && data.fuel.length > 0 ? data.fuel : existing.fuel,
+    transmission: data.transmission && data.transmission.length > 0 ? data.transmission : existing.transmission,
+    engineSize: pickFact(data.engineSize, existing.engineSize),
+    power: pickFact(data.power, existing.power),
+    fiscalPower: pickFact(data.fiscalPower, existing.fiscalPower),
+    cdnHash: pickString(data.cdnHash, existing.cdnHash),
+    photoUrls: JSON.stringify(mergedPhotos),
+  };
+}
+
 function shouldEnrichRecentSnapshot(
   recentSnapshot: {
     reference: string | null;
@@ -85,7 +169,7 @@ function shouldEnrichRecentSnapshot(
   },
   data: VehicleSnapshot,
 ): boolean {
-  const recentPhotoCount = JSON.parse(recentSnapshot.photoUrls || '[]').length as number;
+  const recentPhotoCount = parsePhotoUrls(recentSnapshot.photoUrls).length;
   const nextPhotoCount = data.photoUrls.length;
 
   return Boolean(
@@ -313,7 +397,7 @@ app.post('/snapshot', async (c) => {
       if (shouldEnrichRecentSnapshot(recentSnapshot, data)) {
         const enriched = await prisma.snapshot.update({
           where: { id: recentSnapshot.id },
-          data: toSnapshotWriteData(vehicleId, data),
+          data: mergeSnapshotForEnrichment(recentSnapshot, vehicleId, data),
         });
         console.log(`[VPauto] Snapshot: Enriched recent snapshot id=${enriched.id} for vehicle=${vehicleId}`);
 
@@ -360,32 +444,12 @@ app.get('/history/:vehicleId', async (c) => {
     return c.json<ApiResponse<null>>({ success: false, error: 'Vehicle not found' }, 404);
   }
 
-  const passages: VehiclePassage[] = vehicle.snapshots.map((s) => ({
-    snapshotId: s.id,
-    date: s.saleDate || s.scrapedAt.toISOString().split('T')[0],
-    city: s.city,
-    center: s.center ?? undefined,
-    status: s.status as VehiclePassage['status'],
-    startingPrice: s.startingPrice ?? undefined,
-    soldPrice: s.soldPrice ?? undefined,
-    mileage: s.mileage,
-    observations: s.observations ?? undefined,
-    technicalCheckUrl: s.technicalCheckUrl ?? undefined,
-    sourceUrl: s.sourceUrl,
-    photoUrl: JSON.parse(s.photoUrls)[0] ?? undefined,
-  }));
-
-  const priceHistory = vehicle.snapshots
-    .filter((s) => s.startingPrice != null)
-    .map((s) => ({
-      date: s.saleDate || s.scrapedAt.toISOString().split('T')[0],
-      price: s.startingPrice!,
-    }));
-
-  const mileageHistory = vehicle.snapshots.map((s) => ({
-    date: s.saleDate || s.scrapedAt.toISOString().split('T')[0],
-    mileage: s.mileage,
-  }));
+  // Delegate to pure helpers so the logic is unit-testable without a DB.
+  const sortedGroups = groupSnapshotsIntoPassages(vehicle.snapshots);
+  const passages: VehiclePassage[] = sortedGroups.map((g, idx) => buildPassageFromGroup(g, idx));
+  const priceHistory = buildPriceHistory(passages);
+  const mileageHistory = passages.map((p) => ({ date: p.date, mileage: p.mileage }));
+  const evolution = computeEvolution(passages);
 
   const history: VehicleHistory = {
     vehicleId: vehicle.id,
@@ -409,6 +473,7 @@ app.get('/history/:vehicleId', async (c) => {
     lastSeen: vehicle.lastSeenAt.toISOString(),
     priceHistory,
     mileageHistory,
+    evolution,
   };
 
   return c.json<ApiResponse<VehicleHistory>>({ success: true, data: history });
@@ -454,13 +519,22 @@ app.get('/badges/:vehicleId', async (c) => {
 
   const badges: VehicleBadge[] = [];
 
-  if (snapshots.length === 1) {
+  // Deduplicate by (city, saleDate) so "Vu X fois" counts real auction passages,
+  // not raw scrape events (one passage usually has 4-8 scrapes).
+  const passageKeys = new Set<string>();
+  for (const s of snapshots) {
+    const dateKey = s.saleDate || s.scrapedAt.toISOString().split('T')[0];
+    passageKeys.add(`${s.city || 'unknown'}|${dateKey}`);
+  }
+  const passageCount = passageKeys.size;
+
+  if (passageCount === 1) {
     badges.push({ type: 'new', label: 'Nouveau' });
-  } else if (snapshots.length > 1) {
+  } else if (passageCount > 1) {
     badges.push({
       type: 'seen',
-      label: `Vu ${snapshots.length} fois`,
-      detail: `${snapshots.length} passages`,
+      label: `Vu ${passageCount} fois`,
+      detail: `${passageCount} passages`,
     });
 
     // Check price changes
@@ -805,7 +879,14 @@ app.get('/similar-sold', async (c) => {
   const brand = c.req.query('brand');
   const model = c.req.query('model');
   const year = c.req.query('year') ? parseInt(c.req.query('year')!) : undefined;
+  const mileage = c.req.query('mileage') ? parseInt(c.req.query('mileage')!) : undefined;
   const excludeHashId = c.req.query('excludeHashId');
+
+  // Tolerance windows for "comparable" (used in the price-average sample).
+  // Loose enough to accumulate data, tight enough that a 2020/144 k km van
+  // can never be used as a comparable for a 2025/34 km van of the same model.
+  const YEAR_TOLERANCE = 2;   // ± years
+  const MILEAGE_TOLERANCE = 50_000; // ± km
 
   if (!brand) {
     return c.json<ApiResponse<null>>({ success: false, error: 'brand required' }, 400);
@@ -849,8 +930,10 @@ app.get('/similar-sold', async (c) => {
     soldPrice: number;
     saleDate: string | null;
     sourceUrl: string;
+    observations: string | null;
     yearMatch: boolean;
     modelMatch: boolean;
+    mileageMatch: boolean;
   }[] = [];
 
   for (const s of soldSnapshots) {
@@ -870,23 +953,38 @@ app.get('/similar-sold', async (c) => {
       soldPrice: s.soldPrice!,
       saleDate: s.saleDate,
       sourceUrl: s.sourceUrl,
-      yearMatch: year ? Math.abs(s.year - year) <= 2 : false,
+      observations: s.observations,
+      yearMatch: year !== undefined ? Math.abs(s.year - year) <= YEAR_TOLERANCE : false,
       modelMatch: model ? s.model.toLowerCase().includes(model.split(/\s+/)[0].toLowerCase()) : false,
+      mileageMatch: mileage !== undefined ? Math.abs(s.mileage - mileage) <= MILEAGE_TOLERANCE : false,
     });
   }
 
-  // Sort: exact model+year matches first, then same model, then same brand
+  // Sort: best overall match first (model + year + mileage), then degrade.
   results.sort((a, b) => {
-    const scoreA = (a.modelMatch ? 2 : 0) + (a.yearMatch ? 1 : 0);
-    const scoreB = (b.modelMatch ? 2 : 0) + (b.yearMatch ? 1 : 0);
+    const scoreA = (a.modelMatch ? 4 : 0) + (a.yearMatch ? 2 : 0) + (a.mileageMatch ? 1 : 0);
+    const scoreB = (b.modelMatch ? 4 : 0) + (b.yearMatch ? 2 : 0) + (b.mileageMatch ? 1 : 0);
     return scoreB - scoreA;
   });
 
-  // Stats — prefer model-matched prices, but fall back to all results
-  let soldPrices = results.filter(r => r.modelMatch).map(r => r.soldPrice);
-  if (soldPrices.length === 0) {
-    soldPrices = results.map(r => r.soldPrice);
-  }
+  // Stats: only include results that are TRULY comparable — same model,
+  // same year bracket, same mileage bracket, and drivable. No fallback to
+  // looser pools: a single "Transit Custom 2020 144 k km" adjugé at 19 000 €
+  // must not become the implied price target for a 2025 34 km Transit Custom
+  // (user-reported bug). When no comparable sample exists, we return
+  // count=0 / avg=null so the UI can tell the user the estimate is not
+  // available rather than show a misleading number.
+  const nonRoulantPattern = /non\s*roulant|hors\s*d[''\u2019]usage|[eé]pave|accident[eé]/i;
+  const isDrivable = (r: { observations: string | null; model: string }) =>
+    !nonRoulantPattern.test(r.observations || '') && !nonRoulantPattern.test(r.model || '');
+  const isComparable = (r: typeof results[number]) => {
+    if (!isDrivable(r)) return false;
+    if (!r.modelMatch) return false;
+    if (year !== undefined && !r.yearMatch) return false;
+    if (mileage !== undefined && !r.mileageMatch) return false;
+    return true;
+  };
+  const soldPrices = results.filter(isComparable).map((r) => r.soldPrice);
   const avgSoldPrice = soldPrices.length > 0
     ? Math.round(soldPrices.reduce((a, b) => a + b, 0) / soldPrices.length)
     : null;

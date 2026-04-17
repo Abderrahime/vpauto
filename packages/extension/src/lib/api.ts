@@ -355,8 +355,8 @@ export const api = {
   },
 
   /** Find similar vehicles that were sold recently (price intelligence) */
-  getSimilarSold(brand: string, model?: string, year?: number, excludeHashId?: string) {
-    const qs = toQueryString({ brand, model, year, excludeHashId });
+  getSimilarSold(brand: string, model?: string, year?: number, mileage?: number, excludeHashId?: string) {
+    const qs = toQueryString({ brand, model, year, mileage, excludeHashId });
     return request<{
       results: {
         hashId: string;
@@ -370,8 +370,10 @@ export const api = {
         soldPrice: number;
         saleDate: string | null;
         sourceUrl: string;
+        observations: string | null;
         yearMatch: boolean;
         modelMatch: boolean;
+        mileageMatch: boolean;
       }[];
       stats: {
         count: number;

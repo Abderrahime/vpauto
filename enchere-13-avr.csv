@@ -1,0 +1,167 @@
+id,brand,model,version,reference,city,mileage,startingPrice,soldPrice,status,sourceUrl
+878,AUDI,"A1 Sportback","A1 Sportback 25 TFSI 95 ch BVM5 Advanced Gris médium / Toit",11369925,LORIENT,16144,14200.0,,unsold,https://vpauto.fr/vehicule/83387444/audi-a1-sportback-25-tfsi-95-ch-bvm5-advanced
+1332,AUDI,"A4 2.0","A4 2.0 TDI 143 DPF Ambiente",11376479,LORIENT,249120,,3500.0,sold,https://vpauto.fr/vehicule/b57162b44/audi-a4-20-tdi-143-dpf-ambiente
+225,BMW,"X1 xDrive","X1 xDrive 25e 245ch DKG7 M Sport",11391015,LORIENT,93159,28700.0,,unsold,https://vpauto.fr/vehicule/91aba78b44/bmw-x1-xdrive-25e-245ch-dkg7-m-sport
+875,CITROEN,AMI,AMI,11399969,LORIENT,999999,,3300.0,sold,https://vpauto.fr/vehicule/aa762dc644/citroen-ami
+826,CITROEN,"BERLINGO 20","BERLINGO 20 L1 BlueHDi 100 S&S CLUB ETG6",11376176,LORIENT,102045,1900.0,,unsold,https://vpauto.fr/vehicule/e3ad173944/citroen-berlingo-20-l1-bluehdi-100-ss-club-etg6
+1933,CITROEN,"BERLINGO FOURGON","BERLINGO FOURGON BERLINGO M BLUEHDI 100 S&S ETG6 CLUB",,LORIENT,112822,,,available,https://vpauto.fr/vehicule/312e75f544/citroen-berlingo-fourgon-berlingo-m-bluehdi-100-ss-etg6-club
+1976,CITROEN,"BERLINGO FOURGON","BERLINGO FOURGON BERLINGO M BLUEHDI 100 S&S ETG6 CLUB",,LORIENT,150477,,,available,https://vpauto.fr/vehicule/833368b644/citroen-berlingo-fourgon-berlingo-m-bluehdi-100-ss-etg6-club
+1805,CITROEN,"BERLINGO M","BERLINGO M BLUEHDI 100 S&S ETG6 CLUB",,LORIENT,163396,1800.0,,available,https://vpauto.fr/vehicule/419d372044/citroen-berlingo-m-bluehdi-100-ss-etg6-club
+804,CITROEN,"BERLINGO M","BERLINGO M BLUEHDI 100 S&S ETG6 CLUB",11401003,LORIENT,133604,1600.0,1700.0,unsold,https://vpauto.fr/vehicule/9c70af4d44/citroen-berlingo-m-bluehdi-100-ss-etg6-club
+1455,CITROEN,"BERLINGO M","BERLINGO M BLUEHDI 100 S&S ETG6 CLUB",11406223,LORIENT,181318,1800.0,1500.0,sold,https://vpauto.fr/vehicule/51b06e3c44/citroen-berlingo-m-bluehdi-100-ss-etg6-club
+883,CITROEN,"BERLINGO M","BERLINGO M BLUEHDI 100 S&S ETG6 CLUB",11386373,LORIENT,123773,,,unsold,https://vpauto.fr/vehicule/a21aac4c44/citroen-berlingo-m-bluehdi-100-ss-etg6-club
+1327,CITROEN,"BERLINGO M","BERLINGO M BLUEHDI 75 CLUB",11386372,LORIENT,139740,,,unsold,https://vpauto.fr/vehicule/7a17705d44/citroen-berlingo-m-bluehdi-75-club
+614,CITROEN,"BERLINGO VAN","BERLINGO VAN XL 950 BLUEHDI 100 S&S BVM6",11397706,LORIENT,6625,,16500.0,sold,https://vpauto.fr/vehicule/3da9109744/citroen-berlingo-van-xl-950-bluehdi-100-ss-bvm6
+553,CITROEN,"C3 PureTech","C3 PureTech 83 S&S BVM5 Shine Pack Gris médium métal/toit",11400266,LORIENT,83031,4600.0,,unsold,https://vpauto.fr/vehicule/aa2529f544/citroen-c3-puretech-83-ss-bvm5-shine-pack
+796,CITROEN,"C3 PureTech","C3 PureTech 82 Feel",11400188,LORIENT,67674,,3200.0,sold,https://vpauto.fr/vehicule/d2a3e5c144/citroen-c3-puretech-82-feel
+797,CITROEN,"C3 SOCIETE","C3 SOCIETE PURE TECH 82 S&S FEEL BUSINESS R",11384254,LORIENT,97399,,3200.0,sold,https://vpauto.fr/vehicule/3c7cf2d44/citroen-c3-societe-pure-tech-82-ss-feel-business-r
+2333,CITROEN,"C4 Picasso","C4 Picasso HDi 110 FAP Airdream Exclusive BMP6",,LORIENT,123143,,,available,https://vpauto.fr/vehicule/7fccf34644/citroen-c4-picasso-hdi-110-fap-airdream-exclusive-bmp6
+1354,CITROEN,"C5 AIRCROSS","C5 Aircross Hybride Rechargeable 225 e-EAT8 Feel",11401933,LORIENT,134782,11800.0,,unsold,https://vpauto.fr/vehicule/d2e0d66444/citroen-c5-aircross-hybride-rechargeable-225-e-eat8-feel
+1296,CITROEN,"C5 AIRCROSS","C5 Aircross BlueHDi 130 S&S BVM6 Live",11402544,LORIENT,107284,,12300.0,sold,https://vpauto.fr/vehicule/e1356b2944/citroen-c5-aircross-bluehdi-130-ss-bvm6-live
+740,CITROEN,"C5 AIRCROSS","C5 Aircross BlueHDi 130 S&S EAT8 Business",11396446,LORIENT,144252,11300.0,,unsold,https://vpauto.fr/vehicule/61a1301844/citroen-c5-aircross-bluehdi-130-ss-eat8-business
+1842,CITROEN,"C5 Aircross","C5 Aircross BlueHDi 130 S&S EAT8 Feel",,LORIENT,151334,10800.0,,available,https://vpauto.fr/vehicule/18efbf0244/citroen-c5-aircross-bluehdi-130-ss-eat8-feel
+449,CITROEN,"C5 Aircross","C5 Aircross PureTech 130 S&S BVM6 Live",11393677,LORIENT,114488,8700.0,,unsold,https://vpauto.fr/vehicule/65ed1e5e44/citroen-c5-aircross-puretech-130-ss-bvm6-live
+1300,CITROEN,"C5 X","C5 X PureTech 130 S&S EAT8 Feel Business",11402545,LORIENT,139360,,10200.0,sold,https://vpauto.fr/vehicule/49e2f55944/citroen-c5-x-puretech-130-ss-eat8-feel-business
+1007,CITROEN,"E-JUMPY FGN","E-JUMPY FGN M 100 KW (136 CH) BATTERIE 75 KWH DRIVER",11394694,LORIENT,53219,,17800.0,sold,https://vpauto.fr/vehicule/dfa3787444/citroen-e-jumpy-fgn-m-100-kw-136-ch-batterie-75-kwh-driver
+1304,CITROEN,"E-JUMPY FGN","E-JUMPY FGN M 100 KW (136 CH) BATTERIE 75 KWH DRIVER",11392706,LORIENT,119997,,14100.0,sold,https://vpauto.fr/vehicule/292e8a2144/citroen-e-jumpy-fgn-m-100-kw-136-ch-batterie-75-kwh-driver
+888,CITROEN,"Grand C4","Grand C4 Picasso HDi 150 FAP 7 pl Exclusive",11402625,LORIENT,265159,,,available,https://vpauto.fr/vehicule/88dea18544/citroen-grand-c4-picasso-hdi-150-fap-7-pl-exclusive
+788,CITROEN,"JUMPER TOLE","JUMPER TOLE 35 L2H2 BLUEHDi 110 BVM6 BUSINESS",11393645,LORIENT,130154,,6900.0,sold,https://vpauto.fr/vehicule/c549242444/citroen-jumper-tole-35-l2h2-bluehdi-110-bvm6-business
+1122,CITROEN,"JUMPY FG","JUMPY FGN M BLUEHDI 115 S&S BVM6 BUSINESS",11405721,LORIENT,184122,,8000.0,sold,https://vpauto.fr/vehicule/86fb34d44/citroen-jumpy-fgn-m-bluehdi-115-ss-bvm6-business
+1048,CITROEN,"JUMPY FGN","JUMPY FGN XL BLUEHDI 180 S&S EAT8 DRIVER",11394779,LORIENT,114635,,22300.0,sold,https://vpauto.fr/vehicule/645793fa44/citroen-jumpy-fgn-xl-bluehdi-180-ss-eat8-driver
+527,CITROEN,"JUMPY FGN","JUMPY FGN TOLE 29 L2H1 2.0 HDI 160 FAP BUSINESS A",11382515,LORIENT,301985,3500.0,,unsold,https://vpauto.fr/vehicule/758e568544/citroen-jumpy-fgn-tole-29-l2h1-20-hdi-160-fap-business-a
+792,DACIA,"Duster Blue","Duster Blue dCi 115 4x2 Prestige",11397610,LORIENT,176712,7800.0,,unsold,https://vpauto.fr/vehicule/6e2679f44/dacia-duster-blue-dci-115-4x2-prestige
+1846,DACIA,"Duster TCe","Duster TCe 125 4x2 Lauréate Plus 2017",,LORIENT,20192,,,available,https://vpauto.fr/vehicule/529d872244/dacia-duster-tce-125-4x2-laureate-plus-2017
+431,DACIA,"Sandero ECO-G","Sandero ECO-G 100 Confort",11401776,LORIENT,87354,,9300.0,sold,https://vpauto.fr/vehicule/88934ba44/dacia-sandero-eco-g-100-confort
+280,DACIA,"Sandero TCe","Sandero TCe 90 CVT Expression",11403895,LORIENT,10819,,13700.0,sold,https://vpauto.fr/vehicule/d9c6c6ac44/dacia-sandero-tce-90-cvt-expression
+1446,DACIA,"Sandero TCe","Sandero TCe 90 Stepway Confort",11392021,LORIENT,30137,,11500.0,sold,https://vpauto.fr/vehicule/c5dfc3b344/dacia-sandero-tce-90-stepway-confort
+1953,DACIA,"Spring Achat","Spring Achat Intégral Confort",,LORIENT,22898,,,available,https://vpauto.fr/vehicule/c649cc9644/dacia-spring-achat-integral-confort
+702,DACIA,"Spring Achat","Spring Achat Intégral Confort Plus",11396474,LORIENT,11608,,7800.0,sold,https://vpauto.fr/vehicule/f3fb513944/dacia-spring-achat-integral-confort-plus
+285,DS,"DS7 Crossback","DS7 Crossback Hybride E-Tense 225 EAT8 Louvre",11389565,LORIENT,47056,,20300.0,sold,https://vpauto.fr/vehicule/aab3ad7d44/ds-ds7-crossback-hybride-e-tense-225-eat8-louvre
+356,DS,"DS7 Crossback","DS7 Crossback PureTech 225 EAT8 Performance Line+",11400967,LORIENT,94449,14800.0,,unsold,https://vpauto.fr/vehicule/4641161244/ds-ds7-crossback-puretech-225-eat8-performance-line
+247,DS,"DS7 Hybride","DS7 Hybride Rechargeable E-Tense 300 EAT8 4x4 Rivoli",11392696,LORIENT,71040,,23000.0,sold,https://vpauto.fr/vehicule/10bfcbd944/ds-ds7-hybride-rechargeable-e-tense-300-eat8-4x4-rivoli
+651,FIAT,"500C e","500C e 118 ch (RED) Gris foncé métal/Capote",11402233,LORIENT,53188,,13800.0,sold,https://vpauto.fr/vehicule/dab506844/fiat-500c-e-118-ch-red
+1303,FIAT,"DOBLO CARGO","DOBLO CARGO FT 1.6 MULTIJET 105 PRO LOUNGE",11399241,LORIENT,119876,6900.0,,unsold,https://vpauto.fr/vehicule/a347e6e044/fiat-doblo-cargo-ft-16-multijet-105-pro-lounge
+782,FIAT,"DUCATO FOURGON","DUCATO TOLE 3.5 M H2 2.0 MJT 115 EURO 6 PACK + HAYON",11406226,LORIENT,80250,9600.0,,unsold,https://vpauto.fr/vehicule/a3c7c5de44/fiat-ducato-tole-35-m-h2-20-mjt-115-euro-6-pack-hayon
+1144,FORD,"FIESTA Fiesta","Fiesta 1.5 TDCi 75 Edition",11406220,LORIENT,136284,,5900.0,sold,https://vpauto.fr/vehicule/46e3d02044/ford-fiesta-15-tdci-75-edition
+1313,FORD,"FOCUS SW","Focus SW 1.5 EcoBlue 120 S&S BVA8 Active",11400103,LORIENT,74074,,14100.0,sold,https://vpauto.fr/vehicule/d82e34544/ford-focus-sw-15-ecoblue-120-ss-bva8-active
+838,FORD,"Fiesta 1.0","Fiesta 1.0 EcoBoost 100 Trend",11389979,LORIENT,168604,,3200.0,sold,https://vpauto.fr/vehicule/ef62720a44/ford-fiesta-10-ecoboost-100-trend
+985,FORD,"Focus 1.5","Focus 1.5 EcoBlue 120 S&S BVA8 Titanium X Business",11404484,LORIENT,141368,9600.0,,unsold,https://vpauto.fr/vehicule/d913b39d44/ford-focus-15-ecoblue-120-ss-bva8-titanium-x-business
+1955,FORD,"KUGA 0921","Kuga 2.5 Duratec 190 ch FHEV Powershift ST-Line",,LORIENT,0,,,available,https://vpauto.fr/vehicule/603eb9d844/ford-kuga-0921
+442,FORD,"Kuga 2.0","Kuga 2.0 TDCi 150 S&S 4x4 Powershift Titanium Business",11359773,LORIENT,156469,,8800.0,sold,https://vpauto.fr/vehicule/eb7eb35844/ford-kuga-20-tdci-150-ss-4x4-powershift-titanium-business
+1214,FORD,"Mustang Mach-E","Mustang Mach-E Standard Range 76 kWh 269 ch",11387296,LORIENT,32400,,24200.0,sold,https://vpauto.fr/vehicule/27a973c44/ford-mustang-mach-e-standard-range-76-kwh-269-ch
+1741,FORD,"Puma 1.0","Puma 1.0 Flexifuel 125 ch S&S mHEV ST-Line X",,LORIENT,32209,16000.0,,available,https://vpauto.fr/vehicule/430d054044/ford-puma-10-flexifuel-125-ch-ss-mhev-st-line-x
+227,FORD,"Puma 1.0","Puma 1.0 Flexifuel 125 ch S&S mHEV ST-Line X",11395424,LORIENT,50496,,14900.0,sold,https://www.vpauto.fr/vehicule/244cc94344/ford-puma-10-flexifuel-125-ch-ss-mhev-st-line-x
+1047,FORD,"TRANSIT CHASSIS","TRANSIT CHASSIS CABINE TRANSIT CHC T350 L2 2.0 ECOBLUE 130 S&S AMBIENTE",11406228,LORIENT,114529,,,available,https://vpauto.fr/vehicule/f795caaa44/ford-transit-chassis-cabine-transit-chc-t350-l2-20-ecoblue-130-ss-ambiente
+770,FORD,"TRANSIT CUSTOM","Transit Custom 320 L2H1 2.0 EcoBlue 130 mHEV Trend Business 9 places",11399247,LORIENT,144249,19000.0,,unsold,https://vpauto.fr/vehicule/ce71943d44/ford-transit-custom-320-l2h1-20-ecoblue-130-mhev-trend-business-9-places
+482,FORD,"TRANSIT FGN","TRANSIT FGN T350 L3H2 2.0 ECOBLUE 130 S&S TREND BUSINESS",11399239,LORIENT,149756,9200.0,,unsold,https://vpauto.fr/vehicule/61bf280e44/ford-transit-fgn-t350-l3h2-20-ecoblue-130-ss-trend-business
+384,JEEP,"Grand Cherokee","Grand Cherokee V6 3.0 CRD 250 Overland A",11387353,LORIENT,186915,12600.0,,unsold,https://vpauto.fr/vehicule/e4009d5a44/jeep-grand-cherokee-v6-30-crd-250-overland-a
+811,KERENZO,"REMORQUE FOOD","REMORQUE FOOD TRUCK",11360589,LORIENT,0,,5000.0,sold,https://vpauto.fr/vehicule/bf3f5fce44/kerenzo-remorque-food-truck
+1294,KIA,"SPORTAGE Sportage","Sportage 1.6 CRDi 136ch MHEV DCT7 4x2 Active",11399675,LORIENT,111266,18700.0,,unsold,https://vpauto.fr/vehicule/9b8eb55944/kia-sportage-16-crdi-136ch-mhev-dct7-4x2-active
+1966,KIA,"e-Niro Electrique","e-Niro Electrique 204 ch Premium",,LORIENT,0,,,available,https://vpauto.fr/vehicule/c86f7c0f44/kia-e-niro-electrique-204-ch-premium
+528,"LAND ROVER","Discovery Mark","Discovery Mark III Sd6 3.0 306 ch HSE Luxury société",11376364,LORIENT,46831,35000.0,,unsold,https://vpauto.fr/vehicule/fff75e4744/land-rover-discovery-mark-iii-sd6-30-306-ch-hse-luxury-societe
+230,"LAND ROVER","Range Rover","Range Rover Velar 2.0L P400e PHEV 404ch HSE R-Dynamic",11396384,LORIENT,51448,,38000.0,sold,https://vpauto.fr/vehicule/12821d6044/land-rover-range-rover-velar-20l-p400e-phev-404ch-hse-r-dynamic
+2251,LIGIER,"PRO PULSE","PRO PULSE 3",,LORIENT,34407,,,available,https://vpauto.fr/vehicule/3129884e44/ligier-pro-pulse-3
+2249,LIGIER,"PRO PULSE","PRO PULSE 3",,LORIENT,39926,,,available,https://vpauto.fr/vehicule/3f6650b544/ligier-pro-pulse-3
+1937,LIGIER,"PRO PULSE","PRO PULSE 3",,LORIENT,40022,,,available,https://vpauto.fr/vehicule/1ce39df744/ligier-pro-pulse-3
+1901,LIGIER,"PRO PULSE","PRO PULSE 3",,LORIENT,46216,,,available,https://vpauto.fr/vehicule/887c94344/ligier-pro-pulse-3
+1693,LIGIER,"PRO PULSE","PRO PULSE 3",,LORIENT,29083,500.0,,available,https://vpauto.fr/vehicule/c9c646c244/ligier-pro-pulse-3
+820,LIGIER,"PRO PULSE","PRO PULSE 4",11388736,LORIENT,30381,,1200.0,sold,https://vpauto.fr/vehicule/75dcc15a44/ligier-pro-pulse-4
+822,LIGIER,"PRO PULSE","PRO PULSE 4",11365499,LORIENT,41651,,700.0,sold,https://vpauto.fr/vehicule/3ad76bca44/ligier-pro-pulse-4
+886,LIGIER,"PRO PULSE","PRO PULSE 4",11376175,LORIENT,46040,,600.0,sold,https://vpauto.fr/vehicule/ffc741f244/ligier-pro-pulse-4
+795,LIGIER,"PRO PULSE","PRO PULSE 3",11365514,LORIENT,17673,,300.0,sold,https://vpauto.fr/vehicule/7341d23944/ligier-pro-pulse-3
+882,LIGIER,"PRO PULSE","PRO PULSE 4",11370690,LORIENT,42000,,100.0,sold,https://vpauto.fr/vehicule/76b1215c44/ligier-pro-pulse-4
+1298,LYNK,"& CO","& CO 01 PHEV Bleu médium métal /toit",11399248,LORIENT,123627,16800.0,,unsold,https://vpauto.fr/vehicule/447ba72144/lynk-co-01-phev
+1427,MAZDA,"CX-5 2.2L","CX-5 2.2L Skyactiv-D 175 ch 4x4 BVA Selection",11361273,LORIENT,144414,,10800.0,sold,https://vpauto.fr/vehicule/7d5bd19e44/mazda-cx-5-22l-skyactiv-d-175-ch-4x4-bva-selection
+678,MAZDA,"MX-30 e-Skyactiv","MX-30 e-Skyactiv 145 ch First Edition Modern Confidence Gris clair métal/Toit",11394781,LORIENT,64928,11400.0,,unsold,https://vpauto.fr/vehicule/ea18e65f44/mazda-mx-30-e-skyactiv-145-ch-first-edition-modern-confidence
+1334,MERCEDES,"CLASSE C","CLASSE C W 203 C 180 Elegance",11403889,LORIENT,135953,100.0,,unsold,https://vpauto.fr/vehicule/f4598ddb44/mercedes-classe-c-w-203-c-180-elegance
+294,MERCEDES,"Classe A","Classe A 250 e 8G-DCT Business Line",11389944,LORIENT,24985,21700.0,21400.0,sold,https://www.vpauto.fr/vehicule/f3df36b544/mercedes-classe-a-250-e-8g-dct-business-line
+645,MG,"MG4 EV","MG4 EV 51kWh - 125 kW 2WD Standard",11395985,LORIENT,35706,,14600.0,sold,https://vpauto.fr/vehicule/1f78525944/mg-mg4-ev-51kwh-125-kw-2wd-standard
+205,MINI,"Countryman 102","Countryman 102 ch BVA7 One Longstone",11392024,LORIENT,100367,,10000.0,sold,https://vpauto.fr/vehicule/d5c5f8c444/mini-countryman-102-ch-bva7-one-longstone
+787,NISSAN,"QASHQAI 1.3","Qashqai 1.3 DIG-T 140 Tekna",11404529,LORIENT,129904,,9900.0,sold,https://vpauto.fr/vehicule/460b0d5f44/nissan-qashqai-13-dig-t-140-tekna
+1975,NISSAN,"Qashqai 1.5","Qashqai 1.5 dCi 115 Tekna",,LORIENT,0,,,available,https://vpauto.fr/vehicule/dd74c8eb44/nissan-qashqai-15-dci-115-tekna
+1424,OPEL,"Astra 1.5","Astra 1.5 Diesel 105 ch BVM6 Edition",11399240,LORIENT,34340,,,unsold,https://vpauto.fr/vehicule/6c2646cd44/opel-astra-15-diesel-105-ch-bvm6-edition
+1308,OPEL,"Astra Sports","Astra Sports Tourer 1.5 Diesel 122 ch BVA9 Ultimate",11397031,LORIENT,128019,8800.0,,unsold,https://vpauto.fr/vehicule/5ec994ef44/opel-astra-sports-tourer-15-diesel-122-ch-bva9-ultimate
+1959,OPEL,"Corsa 1.2","Corsa 1.2 Turbo 100 ch BVA8 GS Line",,LORIENT,30446,,,available,https://vpauto.fr/vehicule/75bf43b344/opel-corsa-12-turbo-100-ch-bva8-gs-line
+682,OPEL,"Corsa 1.2","Corsa 1.2 Turbo 100 ch BVM6 Elegance Business",11406161,LORIENT,78975,,8000.0,sold,https://vpauto.fr/vehicule/f58039c444/opel-corsa-12-turbo-100-ch-bvm6-elegance-business
+1042,OPEL,"Corsa Electrique","Corsa Electrique 136 ch & Batterie 50 kWh Edition Rouge medium métal / Toit",11404582,LORIENT,70347,,11100.0,sold,https://vpauto.fr/vehicule/d33f4d2944/opel-corsa-electrique-136-ch-batterie-50-kwh-edition
+617,OPEL,"Grandland 1.2","Grandland 1.2 Turbo Hybrid 136 ch e-DCT6 GS",11400402,LORIENT,19634,,20300.0,sold,https://vpauto.fr/vehicule/e9600e4044/opel-grandland-12-turbo-hybrid-136-ch-e-dct6-gs
+742,OPEL,"INSIGNIA SPORTS","Insignia Sports Tourer 1.5 Diesel 122 ch BVA8 Edition Business",11396439,LORIENT,149542,,7600.0,sold,https://vpauto.fr/vehicule/fadbda9544/opel-insignia-sports-tourer-15-diesel-122-ch-bva8-edition-business
+729,OPEL,"Mokka Electrique","Mokka Electrique 136 ch & Batterie 50 kWh Ultimate Vert médium métal / Toit",11404585,LORIENT,100011,,12600.0,sold,https://vpauto.fr/vehicule/4673df4644/opel-mokka-electrique-136-ch-batterie-50-kwh-ultimate
+504,OPEL,"VIVARO FGN","VIVARO FGN L2 2.0 DIESEL 145 CH PACK BUSINESS",11399242,LORIENT,91118,,,unsold,https://vpauto.fr/vehicule/46ad938e44/opel-vivaro-fgn-l2-20-diesel-145-ch-pack-business
+519,OPEL,"VIVARO FGN","VIVARO FGN L2 2.0 DIESEL 120 CH BVA8 PACK CLIM",11393673,LORIENT,162842,11000.0,,unsold,https://vpauto.fr/vehicule/8ecf803444/opel-vivaro-fgn-l2-20-diesel-120-ch-bva8-pack-clim
+716,PEUGEOT,"108 VTi","108 VTi 72ch S&S BVM5 Like",11401656,LORIENT,75589,,6700.0,sold,https://vpauto.fr/vehicule/63f5e58c44/peugeot-108-vti-72ch-ss-bvm5-like
+1307,PEUGEOT,"2008 2008","2008 PureTech 130 S&S BVM6 Active Pack",11400110,LORIENT,127812,,8700.0,sold,https://vpauto.fr/vehicule/658b518144/peugeot-2008-puretech-130-ss-bvm6-active-pack
+1838,PEUGEOT,"2008 BlueHDi","2008 BlueHDi 130 S&S EAT8 Active Business",,LORIENT,104410,,,available,https://vpauto.fr/vehicule/53249d1e44/peugeot-2008-bluehdi-130-ss-eat8-allure
+289,PEUGEOT,"2008 BlueHDi","2008 BlueHDi 130 S&S EAT8 Active Business",11395009,LORIENT,114168,11300.0,,unsold,https://vpauto.fr/vehicule/90112e9c44/peugeot-2008-bluehdi-130-ss-eat8-active-business
+345,PEUGEOT,"2008 BlueHDi","2008 BlueHDi 110 S&S BVM6 Allure",11393679,LORIENT,121678,,11700.0,sold,https://vpauto.fr/vehicule/33e4afe944/peugeot-2008-bluehdi-110-ss-bvm6-allure
+1635,PEUGEOT,"2008 BlueHDi","2008 BlueHDi 110 S&S BVM6 Active Pack",11395050,LORIENT,108047,,12100.0,sold,https://vpauto.fr/vehicule/ae5df50744/peugeot-2008-bluehdi-110-ss-bvm6-active-pack
+372,PEUGEOT,"2008 PureTech","2008 PureTech 130 S&S EAT8 Allure Pack",11401049,LORIENT,51415,,12900.0,sold,https://vpauto.fr/vehicule/f3bbdaf944/peugeot-2008-puretech-130-ss-eat8-allure-pack
+273,PEUGEOT,"2008 PureTech","2008 PureTech 130 S&S BVM6 Active Pack",11409184,LORIENT,134995,,8900.0,sold,https://vpauto.fr/vehicule/ecc25a6844/peugeot-2008-puretech-130-ss-bvm6-active-pack
+1333,PEUGEOT,"206 CC","206 CC 1.6i 16V Roland Garros",11403891,LORIENT,118000,100.0,,unsold,https://vpauto.fr/vehicule/926d70c144/peugeot-206-cc-16i-16v-roland-garros
+1130,PEUGEOT,"208 208","208 1.6 BlueHDi 75ch BVM5 Active",11403534,LORIENT,125113,,7000.0,sold,https://vpauto.fr/vehicule/ec74e6b44/peugeot-208-16-bluehdi-75ch-bvm5-active
+881,PEUGEOT,"208 208","208 1.2 PureTech 82ch BVM5 Active",11403533,LORIENT,109387,,3800.0,sold,https://vpauto.fr/vehicule/ced6716f44/peugeot-208-12-puretech-82ch-bvm5-active
+750,PEUGEOT,"208 Electrique","208 Electrique 50 kWh 136ch Allure",11401857,LORIENT,57366,,11600.0,sold,https://vpauto.fr/vehicule/11f53f8044/peugeot-208-electrique-50-kwh-136ch-allure
+1861,PEUGEOT,"208 PureTech","208 PureTech 75 S&S BVM5 Style",,LORIENT,0,4300.0,,available,https://vpauto.fr/vehicule/5591c81f44/peugeot-208-puretech-75-ss-bvm5-style
+2185,PEUGEOT,"208 PureTech","208 PureTech 100 S&S EAT8 Allure",,LORIENT,160840,8700.0,,available,https://vpauto.fr/vehicule/f979dcd944/peugeot-208-puretech-100-ss-eat8-allure
+1727,PEUGEOT,"208 PureTech","208 PureTech 100 S&S BVM6 Active Business",,LORIENT,58335,,,available,https://vpauto.fr/vehicule/9a87330844/peugeot-208-puretech-100-ss-bvm6-active-business
+755,PEUGEOT,"208 PureTech","208 PureTech 100 S&S BVM6 Active",11406241,LORIENT,67636,,7400.0,sold,https://vpauto.fr/vehicule/ac5b1744/peugeot-208-puretech-100-ss-bvm6-active
+749,PEUGEOT,"208 PureTech","208 PureTech 75 S&S BVM5 Active Business",11382519,LORIENT,42770,,6300.0,sold,https://vpauto.fr/vehicule/c89ea36744/peugeot-208-puretech-75-ss-bvm5-active-business
+692,PEUGEOT,"3008 3008","3008 Puretech 130ch S&S BVM6 GT Blanc nacré/toit",11397165,LORIENT,117397,,11600.0,sold,https://vpauto.fr/vehicule/d72771c044/peugeot-3008-puretech-130ch-ss-bvm6-gt
+1316,PEUGEOT,"3008 BUSINESS","3008 BlueHDi 130ch S&S BVM6 Allure Business",11401924,LORIENT,100031,11600.0,,unsold,https://vpauto.fr/vehicule/ab5fa6a44/peugeot-3008-bluehdi-130ch-ss-bvm6-allure-business
+411,PEUGEOT,"3008 BlueHDi","3008 BlueHDi 130ch S&S EAT8 Active Business",11404308,LORIENT,115701,13200.0,14000.0,sold,https://vpauto.fr/vehicule/9108d85444/peugeot-3008-bluehdi-130ch-ss-eat8-active-business
+1964,PEUGEOT,"3008 Puretech","3008 Puretech 130ch S&S EAT8",,LORIENT,0,,,available,https://vpauto.fr/vehicule/68c4153344/peugeot-3008-puretech-130ch-ss-eat8
+318,PEUGEOT,"308 PHEV","308 PHEV 180 e-EAT8 Active Pack",11399257,LORIENT,42810,15700.0,,unsold,https://vpauto.fr/vehicule/ef4abc7a44/peugeot-308-phev-180-e-eat8-active-pack
+653,PEUGEOT,"308 PureTech","308 PureTech 130ch S&S BVM6 Allure",11404207,LORIENT,54954,,12100.0,sold,https://vpauto.fr/vehicule/d36bb9a544/peugeot-308-puretech-130ch-ss-bvm6-allure
+450,PEUGEOT,"308 SW","308 SW BlueHDi 130ch S&S EAT8 Active Business",11397986,LORIENT,145313,7700.0,,unsold,https://vpauto.fr/vehicule/c7e097a744/peugeot-308-sw-bluehdi-130ch-ss-eat8-active-business
+319,PEUGEOT,"308 SW","308 SW BlueHDi 130ch S&S EAT8 Allure",11401659,LORIENT,104249,,14000.0,sold,https://vpauto.fr/vehicule/5b9c01e544/peugeot-308-sw-bluehdi-130ch-ss-eat8-allure
+1309,PEUGEOT,"308 SW","308 SW BlueHDi 130ch S&S BVM6 Active Business",11397167,LORIENT,139136,,6400.0,sold,https://vpauto.fr/vehicule/1288264344/peugeot-308-sw-bluehdi-130ch-ss-bvm6-active-business
+725,PEUGEOT,"5008 5008","5008 BlueHDi 130ch S&S BVM6 Allure 7 places",11396444,LORIENT,90505,,16000.0,sold,https://vpauto.fr/vehicule/44f498ba44/peugeot-5008-bluehdi-130ch-ss-bvm6-allure-7-places
+1017,PEUGEOT,"508 SW","508 SW Hybrid 225 e-EAT8 GT",11402196,LORIENT,144498,,,unsold,https://vpauto.fr/vehicule/8dd1cfbd44/peugeot-508-sw-hybrid-225-e-eat8-gt
+1756,PEUGEOT,"BOXER TOLE","BOXER TOLE 335 L3H2 BLUEHDI 140 S&S PREMIUM",,LORIENT,116692,,,available,https://vpauto.fr/vehicule/cf72c8d44/peugeot-boxer-tole-333-l3h2-bluehdi-120-ss-asphalt
+1306,PEUGEOT,"BOXER TOLE","BOXER TOLE 333 L2H2 BLUEHDI 120 S&S PREMIUM",11399244,LORIENT,127783,9900.0,8000.0,sold,https://vpauto.fr/vehicule/1087c91144/peugeot-boxer-tole-333-l2h2-bluehdi-120-ss-premium
+479,PEUGEOT,"BOXER TOLE","BOXER TOLE 335 L3H2 BLUEHDI 140 S&S PREMIUM",11399255,LORIENT,112504,,7900.0,sold,https://vpauto.fr/vehicule/51ddba3f44/peugeot-boxer-tole-335-l3h2-bluehdi-140-ss-premium
+488,PEUGEOT,"BOXER TOLE","BOXER TOLE 330 L1H2 BLUEHDI 130 PREMIUM PACK",11386356,LORIENT,208960,6200.0,,unsold,https://vpauto.fr/vehicule/f1fc97b144/peugeot-boxer-tole-330-l1h2-bluehdi-130-premium-pack
+1360,PEUGEOT,"EXPERT FGN","EXPERT FGN TOLE STANDARD 1.5 BLUEHDI 120 S&S BVM6 ASPHALT",11409230,LORIENT,117898,,9700.0,sold,https://vpauto.fr/vehicule/fedbc28b44/peugeot-expert-fgn-tole-standard-15-bluehdi-120-ss-bvm6-asphalt
+695,PEUGEOT,"EXPERT FGN","EXPERT FGN TOLE STANDARD BLUEHDI 145 S&S BVM6 PREMIUM",11399250,LORIENT,143658,10300.0,,unsold,https://vpauto.fr/vehicule/9e82c56a44/peugeot-expert-fgn-tole-standard-bluehdi-145-ss-bvm6-premium
+499,PEUGEOT,"EXPERT FOURGON","EXPERT FOURGON LONG BLUEHDI 180 S&S EAT8 ASPHALT",11396251,LORIENT,137597,14700.0,,unsold,https://vpauto.fr/vehicule/46a9dde044/peugeot-expert-fourgon-long-bluehdi-180-ss-eat8-asphalt
+760,PEUGEOT,"PARTNER FOURGON","PARTNER FOURGON STANDARD 1000 KG BLUEHDI 100 S&S BVM5 PREMIUM",11398794,LORIENT,102502,,9400.0,sold,https://vpauto.fr/vehicule/c79db17044/peugeot-partner-fourgon-standard-1000-kg-bluehdi-100-ss-bvm5-premium
+1746,RENAULT,"Austral E-Tech","Austral E-Tech hybrid 200 Iconic",,LORIENT,0,,,available,https://vpauto.fr/vehicule/d60d4b5544/renault-clio-e-tech-hybride-145-evolution
+976,RENAULT,"CAPTUR TECHNO","Captur E-Tech full hybrid 145 - 21 Techno Fast Track Donkergrijs metaal / zwart dak",11404606,LORIENT,87871,,11800.0,sold,https://vpauto.fr/vehicule/8bc5dd8b44/renault-captur-e-tech-full-hybrid-145-21-techno-fast-track
+512,RENAULT,"CLIO SOCIETE","Clio dCi 75 Energy Business",11389612,LORIENT,77615,,9500.0,sold,https://vpauto.fr/vehicule/df8f4c9144/renault-clio-dci-75-energy-business
+1050,RENAULT,"CLIO V","CLIO V Clio Blue dCi 100 - 21N Business",11399256,LORIENT,130625,,,available,https://vpauto.fr/vehicule/662a9ad144/renault-clio-v-clio-blue-dci-100-21n-business
+971,RENAULT,"Captur TCe","Captur TCe 90 Evolution Gris médium métal / Toit",11406188,LORIENT,56910,,12900.0,sold,https://vpauto.fr/vehicule/6a55f87244/renault-captur-tce-90-evolution
+1421,RENAULT,"Clio E-Tech","Clio E-Tech full hybrid 145 Techno",11401768,LORIENT,49375,,14400.0,sold,https://vpauto.fr/vehicule/ecc5c09044/renault-clio-e-tech-full-hybrid-145-techno
+603,RENAULT,"Clio TCe","Clio TCe 90 ch Generation",11406767,LORIENT,17878,,12700.0,sold,https://vpauto.fr/vehicule/98b36ab544/renault-clio-tce-90-ch-generation
+863,RENAULT,"Espace 2.0","Espace 2.0 dCi - 130 25 th 7pl",11386951,LORIENT,252459,2700.0,,unsold,https://vpauto.fr/vehicule/9f0f1a3c44/renault-espace-20-dci-130-25-th-7pl
+2200,RENAULT,"GRAND SCENIC","Grand Scenic TCe 160 FAP Intens",,LORIENT,0,,,available,https://vpauto.fr/vehicule/d9ce5c2044/renault-grand-scenic-tce-160-fap-intens
+1739,RENAULT,"KANGOO EXPRESS","KANGOO EXPRESS KANGOO EXPRESS 1.5 DCI 75 ENERGY E6 GENERIQUE",,LORIENT,151628,,,available,https://vpauto.fr/vehicule/7354335844/renault-kangoo-express-kangoo-express-15-dci-75-energy-e6-generique
+1320,RENAULT,"KANGOO EXPRESS","KANGOO EXPRESS GRAND VOLUME MAXI 1.5 DCI 110 E6 GRAND CONFORT",11401932,LORIENT,115554,,8100.0,sold,https://vpauto.fr/vehicule/f30a3a3544/renault-kangoo-express-grand-volume-maxi-15-dci-110-e6-grand-confort
+827,RENAULT,"KANGOO EXPRESS","KANGOO EXPRESS L1 1.5 DCI 75 GENERIQUE",11396282,LORIENT,140102,,1600.0,sold,https://vpauto.fr/vehicule/3238334844/renault-kangoo-express-l1-15-dci-75-generique
+1980,RENAULT,"KANGOO Z.E.","KANGOO Z.E.",,LORIENT,4895,,,available,https://vpauto.fr/vehicule/916f733544/renault-kangoo-ze
+891,RENAULT,"MASTER BENNE","MASTER BENNE BICABINE 2.2 DCI 90ch",11355627,LORIENT,185160,1000.0,,unsold,https://vpauto.fr/vehicule/64c66c044/renault-master-benne-bicabine-22-dci-90ch
+467,RENAULT,"MASTER FGN","MASTER FGN TRAC F3500 L3H2 BLUE DCI 150 CONFORT",11400341,LORIENT,112218,,12900.0,sold,https://vpauto.fr/vehicule/b584bdb044/renault-master-fgn-trac-f3500-l3h2-blue-dci-150-confort
+1326,RENAULT,"MASTER FOURGON","MASTER FOURGON L2H2 3.5t 2.3 dCi 110 E6 GRAND CONFORT",11396227,LORIENT,130427,,5300.0,sold,https://vpauto.fr/vehicule/9c89d8e044/renault-master-fourgon-l2h2-35t-23-dci-110-e6-grand-confort
+2259,RENAULT,"MASTER TO","MASTER BENNE PROP RJ3500 L3 BLUE DCI 145 EURO VI CONFORT PS",,LORIENT,0,,,available,https://vpauto.fr/vehicule/d5274a2544/renault-master-to-petit-bs-cf-pr-rj3500-l3-blue-dci-14
+606,RENAULT,"Megane E-Tech","MEGANE E-TECH 220 ch autonomie confort AC22 Techno Gris médium/toit",11402913,LORIENT,9510,,30800.0,sold,https://www.vpauto.fr/vehicule/46f5757244/renault-megane-e-tech-220-ch-autonomie-confort-ac22-techno
+1969,RENAULT,"Scenic Blue","Scenic Blue dCi 120 EDC SL Black Edition",,LORIENT,0,,,available,https://vpauto.fr/vehicule/cc54d35b44/renault-scenic-blue-dci-120-sl-black-edition
+1809,RENAULT,"Symbioz E-Tech","Symbioz E-Tech full hybrid 145 Esprit Alpine",,LORIENT,31999,,,available,https://vpauto.fr/vehicule/bc278a7644/renault-symbioz-e-tech-full-hybrid-145-esprit-alpine
+902,RENAULT,"TRAFIC FG","TRAFIC FG BLUE DCI 130 L2H1 3T GSR2 ADVANCE",11404480,LORIENT,27838,,22100.0,sold,https://vpauto.fr/vehicule/e88ecc9344/renault-trafic-fg-blue-dci-130-l2h1-3t-gsr2-advance
+518,RENAULT,"TRAFIC FGN","TRAFIC FGN L1H1 1000 KG DCI 95 E6 GRAND CONFORT",11382064,LORIENT,110083,,7000.0,sold,https://vpauto.fr/vehicule/5732019944/renault-trafic-fgn-l1h1-1000-kg-dci-95-e6-grand-confort
+870,RENAULT,"Trafic L1H1","Trafic L1H1 1000 1.9 dCi 80 9 places",11397397,LORIENT,230812,5900.0,,unsold,https://vpauto.fr/vehicule/5568640244/renault-trafic-l1h1-1000-19-dci-80-9-places
+1381,RENAULT,"Zoe Life","Zoe Life Gamme 2017 Achat intégral",11364458,LORIENT,55035,,7100.0,sold,https://vpauto.fr/vehicule/6f40bb4344/renault-zoe-life-gamme-2017-achat-integral
+707,RENAULT,"Zoe R135","Zoe R135 Achat Intégral - 21 Exception",11404314,LORIENT,36065,,13800.0,sold,https://vpauto.fr/vehicule/b0f9f0ca44/renault-zoe-r135-achat-integral-21-exception
+1331,SEAT,"IBIZA 1.6","IBIZA 1.6 Tdi 90 Fap Style",11381945,LORIENT,193664,900.0,,unsold,https://vpauto.fr/vehicule/9e283b1a44/seat-ibiza-16-tdi-90-fap-style
+1369,SEAT,"Tarraco 2.0","Tarraco 2.0 TDI 190 ch Start/Stop DSG7 4Drive 7 pl Xcellence",11409092,LORIENT,96360,,22700.0,sold,https://vpauto.fr/vehicule/50bd664144/seat-tarraco-20-tdi-190-ch-startstop-dsg7-4drive-7-pl-xcellence
+735,SKODA,"Fabia 1.0","Fabia 1.0 MPI 60 ch BVM5 Clever Midden blauw",11402100,LORIENT,119124,,7300.0,sold,https://vpauto.fr/vehicule/3df370f044/skoda-fabia-10-mpi-60-ch-bvm5-clever
+317,SKODA,"Karoq 2.0","Karoq 2.0 TDI 116 ch SCR DSG7 Style",11409192,LORIENT,133076,,17400.0,sold,https://vpauto.fr/vehicule/2052687b44/skoda-karoq-20-tdi-116-ch-scr-dsg7-style
+387,SKODA,"Octavia Combi","Octavia Combi 1.5 TSI mHEV e-TEC 150 ch ACT DSG7 Business",11386578,LORIENT,148180,11900.0,,unsold,https://vpauto.fr/vehicule/8776dec744/skoda-octavia-combi-15-tsi-mhev-e-tec-150-ch-act-dsg7-business
+270,TESLA,"MODEL 3","MODEL 3 Autonomie Standard Plus RWD",11397017,LORIENT,77936,,24100.0,sold,https://vpauto.fr/vehicule/15adc56d44/tesla-model-3-autonomie-standard-plus-rwd
+1297,TESLA,"MODEL 3","MODEL 3 Grande Autonomie AWD",11401660,LORIENT,120193,,23400.0,sold,https://vpauto.fr/vehicule/63f1b08544/tesla-model-3-grande-autonomie-awd
+708,TOYOTA,"Aygo 1.0","Aygo 1.0 VVT-i x-play",11403071,LORIENT,37344,,9600.0,sold,https://vpauto.fr/vehicule/ec853bc744/toyota-aygo-10-vvt-i-x-play
+785,TOYOTA,"Prius Pro","Prius Pro Hybride Rechargeable Dynamic Pack Premium Business",11398793,LORIENT,94225,18200.0,,unsold,https://vpauto.fr/vehicule/11fd909a44/toyota-prius-pro-hybride-rechargeable-dynamic-pack-premium-business
+1973,TOYOTA,"Yaris 70","Yaris 70 VVT-i France Connect",,LORIENT,0,,,available,https://vpauto.fr/vehicule/9538967c44/toyota-yaris-70-vvt-i-france-connect
+1961,TOYOTA,"Yaris Hybride","Yaris Hybride 116h",,LORIENT,0,,,available,https://vpauto.fr/vehicule/bf7a70d444/toyota-yaris-hybride-116h
+1428,VOLKSWAGEN,"Crafter Combi","Crafter Combi TPMR 30 L2H1 2.0 TDI 136 FAP BlueMotion Technology 9pl",11393788,LORIENT,92828,16400.0,,unsold,https://vpauto.fr/vehicule/17c1451c44/volkswagen-crafter-combi-tpmr-30-l2h1-20-tdi-136-fap-bluemotion-technology-9pl
+831,VOLKSWAGEN,"Passat SW","Passat SW 2.0 TDI 150 BMT DSG6 Confortline",11368567,LORIENT,175997,,6400.0,sold,https://vpauto.fr/vehicule/67e65dcc44/volkswagen-passat-sw-20-tdi-150-bmt-dsg6-confortline
+1179,VOLKSWAGEN,"Scirocco 1.4","Scirocco 1.4 Tsi 160 Sportline",11401890,LORIENT,127162,,7000.0,sold,https://vpauto.fr/vehicule/c766064244/volkswagen-scirocco-14-tsi-160-sportline
+256,VOLVO,"XC60 T6","XC60 T6 Recharge AWD 253 ch + 145 ch Geartronic 8 Start",11409161,LORIENT,123151,25600.0,,available,https://vpauto.fr/vehicule/6e7c8aa344/volvo-xc60-t6-recharge-awd-253-ch-145-ch-geartronic-8-start

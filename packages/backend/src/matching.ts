@@ -33,7 +33,7 @@ function tokenOverlap(a?: string | null, b?: string | null): number {
   return shared / Math.max(aTokens.size, bTokens.size);
 }
 
-function computeIdentityScore(
+export function computeIdentityScore(
   input: VehicleSnapshot,
   candidate: {
     id: number;
@@ -158,19 +158,66 @@ function computeIdentityScore(
     reasons.push('same_fiscal_power');
   }
 
-  if (input.technicalCheckUrl && lastSnapshot?.technicalCheckUrl && input.technicalCheckUrl === lastSnapshot.technicalCheckUrl) {
+  const sameCT = !!(
+    input.technicalCheckUrl && lastSnapshot?.technicalCheckUrl
+    && input.technicalCheckUrl === lastSnapshot.technicalCheckUrl
+  );
+  if (sameCT) {
     score += 35;
     reasons.push('same_technical_check');
   }
 
-  if (input.conditionImageUrl && lastSnapshot?.conditionImageUrl && input.conditionImageUrl === lastSnapshot.conditionImageUrl) {
+  const sameCondition = !!(
+    input.conditionImageUrl && lastSnapshot?.conditionImageUrl
+    && input.conditionImageUrl === lastSnapshot.conditionImageUrl
+  );
+  if (sameCondition) {
     score += 20;
     reasons.push('same_condition_sheet');
   }
 
-  if (input.cdnHash && lastSnapshot?.cdnHash && input.cdnHash === lastSnapshot.cdnHash) {
+  const sameCdnHash = !!(
+    input.cdnHash && lastSnapshot?.cdnHash && input.cdnHash === lastSnapshot.cdnHash
+  );
+  if (sameCdnHash) {
     score += 15;
     reasons.push('same_photo_hash');
+  }
+
+  // Hard gate: two listings with no strong per-vehicle fingerprint (CT URL,
+  // condition sheet, or photo cdnHash) and a mileage gap > 5 000 km cannot be
+  // the same car. Without this, the score for "same model + year + version +
+  // fuel + trans + color + engine" alone exceeds the 70-point threshold and
+  // merges distinct Ford Pumas 2023 with 50k vs 130k km into one vehicle.
+  const hasStrongFingerprint = sameCT || sameCondition || sameCdnHash;
+  if (
+    lastSnapshot
+    && Number.isFinite(mileageDiff)
+    && mileageDiff > 5000
+    && !hasStrongFingerprint
+  ) {
+    return { score: 0, reasons: [...reasons, 'mileage_gap_without_fingerprint'], mileageDiff };
+  }
+
+  // Cross-reference gate: VPauto does NOT reuse a vehicle's reference across
+  // re-listings (observed e.g. on a non-roulant Ford Transit Custom listed in
+  // Nantes on 07/04 as ref 11372975, then again on 20/04 as ref 11409453 —
+  // same VIN, same odometer 115 351 km, different ref). So differing refs
+  // alone cannot rule out identity. But we also don't want to bridge two
+  // genuinely distinct cars just because specs overlap. Accept a cross-ref
+  // match only when a strong fingerprint matches OR the odometer reading is
+  // nearly identical (≤ 500 km diff) — two distinct cars of the same model,
+  // year and trim virtually never report the same mileage to the kilometre.
+  if (
+    candidate.reference
+    && input.reference
+    && candidate.reference !== input.reference
+  ) {
+    const nearIdenticalMileage = Number.isFinite(mileageDiff) && mileageDiff <= 500;
+    if (!hasStrongFingerprint && !nearIdenticalMileage) {
+      return { score: 0, reasons: [...reasons, 'different_reference_without_proof'], mileageDiff };
+    }
+    reasons.push('cross_reference_accepted');
   }
 
   return { score, reasons, mileageDiff };
@@ -202,7 +249,16 @@ export async function findExactVehicle(data: VehicleSnapshot): Promise<ExactVehi
     }
   }
 
-  // 3. Try matching by detailed identity against prior vehicles/snapshots
+  // 3. Try matching by detailed identity against prior vehicles/snapshots.
+  //    We DO NOT filter candidates by reference here: VPauto was observed
+  //    reusing the same physical car under a fresh reference on re-listing
+  //    (e.g. non-roulant Ford Transit Custom Nantes — ref 11372975 then ref
+  //    11409453, same VIN, same odometer). Filtering at SQL level would hide
+  //    those re-listings from identity scoring. The cross-reference gate in
+  //    `computeIdentityScore` still requires a strong fingerprint (CT URL,
+  //    condition sheet, photo hash) or near-identical mileage (≤ 500 km) to
+  //    accept a cross-ref match, so distinct cars with the same trim/year
+  //    cannot be accidentally merged.
   const candidates = await prisma.vehicle.findMany({
     where: {
       brand: data.brand,
