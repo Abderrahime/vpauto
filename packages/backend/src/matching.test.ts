@@ -262,4 +262,89 @@ describe('computeIdentityScore', () => {
     expect(result.reasons).toContain('cross_reference_accepted');
     expect(result.reasons).toContain('same_technical_check');
   });
+
+  // ── Missing-reference safety gate (CITROEN BERLINGO VAN bug) ──
+  // VPauto's list-page flow used to create Vehicle rows with
+  // reference=null/power=null/transmission='' (no identity fingerprint).
+  // A later detail scrape of a DIFFERENT physical car of the same brand/
+  // model/year/version would bypass the cross-reference gate (which needs
+  // BOTH refs populated) and reach a 70+ score on spec overlap alone,
+  // merging two distinct cars. These tests pin down the fix: when neither
+  // side has a reference and no fingerprint matches, require at least one
+  // identity discriminator (power, engineSize, or transmission).
+  it('REJECTS attribute-only match when reference pair is missing and no discriminator agrees', () => {
+    // Simulate: list-only Vehicle (reference=null, power=null, transmission='')
+    // being scored against an incoming detail scrape that ALSO has no ref
+    // (network glitch, deleted element, mid-migration data). Without a ref
+    // pair and without any discriminator, the two cars could be completely
+    // different — the matcher must refuse to merge.
+    // A list-only Vehicle row has reference/power/transmission/engineSize
+    // all null or empty (the list card doesn't expose them in the old flow).
+    const listOnlyCandidate = candidate({
+      power: 0,   // sentinel → overridden below via direct mutation
+      transmission: '',
+    });
+    // ?? in the helper treats `null` as missing, so mutate post-facto.
+    (listOnlyCandidate as { reference: string | null }).reference = null;
+    (listOnlyCandidate as { power: number | null }).power = null;
+    (listOnlyCandidate as { engineSize: number | null }).engineSize = null;
+    listOnlyCandidate.snapshots[0].power = null;
+    listOnlyCandidate.snapshots[0].transmission = '';
+    listOnlyCandidate.snapshots[0].engineSize = null;
+
+    const inputWithoutRef = {
+      ...baseInput,
+      reference: '',   // detail scrape missed the Ref line too
+      power: 130,
+      engineSize: 1499,  // different block from the candidate
+      transmission: 'Automatique EAT8',
+    };
+    const result = computeIdentityScore(inputWithoutRef, listOnlyCandidate);
+    expect(result.score).toBe(0);
+    expect(result.reasons).toContain('no_reference_no_discriminator');
+  });
+
+  it('ACCEPTS attribute-only match when reference pair is missing but power agrees', () => {
+    // Power alone is strong enough: 75 ch vs 130 ch variants of the same
+    // model never overlap. When power matches, the list-only candidate is
+    // likely the same car seen earlier from the list page.
+    const listOnlyCandidate = candidate({
+      power: 125,             // same as input
+      transmission: '',
+    });
+    (listOnlyCandidate as { reference: string | null }).reference = null;
+
+    const inputWithoutRef = {
+      ...baseInput,
+      reference: '',
+      power: 125,
+      transmission: '',
+    };
+    const result = computeIdentityScore(inputWithoutRef, listOnlyCandidate);
+    expect(result.score).toBeGreaterThan(0);
+    expect(result.reasons).toContain('same_power');
+    expect(result.reasons).not.toContain('no_reference_no_discriminator');
+  });
+
+  it('ACCEPTS cross-reference match via CT fingerprint even when discriminators disagree', () => {
+    // A strong fingerprint (CT URL) bypasses the missing-ref gate — the
+    // cross-ref branch already lets this through, and the new gate must
+    // not undo that.
+    const input = {
+      ...baseInput,
+      reference: '',
+      power: 999,
+      technicalCheckUrl: 'https://ct.example/strong-match.pdf',
+    };
+    const listOnlyCandidate = candidate({
+      power: 125,
+      technicalCheckUrl: 'https://ct.example/strong-match.pdf',
+    });
+    (listOnlyCandidate as { reference: string | null }).reference = null;
+
+    const result = computeIdentityScore(input, listOnlyCandidate);
+    expect(result.score).toBeGreaterThanOrEqual(55);
+    expect(result.reasons).toContain('same_technical_check');
+    expect(result.reasons).not.toContain('no_reference_no_discriminator');
+  });
 });

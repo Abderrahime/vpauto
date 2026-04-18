@@ -40,6 +40,7 @@ function toSnapshotWriteData(vehicleId: number, data: VehicleSnapshot) {
     marketValue: data.marketValue,
     newPrice: data.newPrice,
     vatRecoverable: data.vatRecoverable,
+    currentAuctionPrice: data.currentAuctionPrice,
     city: data.city,
     center: data.center,
     department: data.department,
@@ -81,6 +82,7 @@ function mergeSnapshotForEnrichment(
     startingPriceHT: number | null;
     marketValue: number | null;
     newPrice: number | null;
+    currentAuctionPrice: number | null;
     technicalCheckUrl: string | null;
     conditionImageUrl: string | null;
     observations: string | null;
@@ -123,6 +125,9 @@ function mergeSnapshotForEnrichment(
     startingPriceHT: pickFact(data.startingPriceHT, existing.startingPriceHT),
     marketValue: pickFact(data.marketValue, existing.marketValue),
     newPrice: pickFact(data.newPrice, existing.newPrice),
+    // currentAuctionPrice is dynamic (live bidding) — overwrite with the
+    // latest scrape, don't preserve a stale value the way we do for the MAP.
+    currentAuctionPrice: data.currentAuctionPrice ?? existing.currentAuctionPrice ?? null,
     technicalCheckUrl: pickString(data.technicalCheckUrl, existing.technicalCheckUrl),
     conditionImageUrl: pickString(data.conditionImageUrl, existing.conditionImageUrl),
     observations: pickString(data.observations, existing.observations),
@@ -150,6 +155,7 @@ function shouldEnrichRecentSnapshot(
     startingPriceHT: number | null;
     marketValue: number | null;
     newPrice: number | null;
+    currentAuctionPrice: number | null;
     city: string;
     center: string | null;
     department: string | null;
@@ -180,6 +186,7 @@ function shouldEnrichRecentSnapshot(
     recentSnapshot.startingPriceHT !== (data.startingPriceHT ?? null) ||
     recentSnapshot.marketValue !== (data.marketValue ?? null) ||
     recentSnapshot.newPrice !== (data.newPrice ?? null) ||
+    recentSnapshot.currentAuctionPrice !== (data.currentAuctionPrice ?? null) ||
     recentSnapshot.city !== data.city ||
     recentSnapshot.center !== (data.center ?? null) ||
     recentSnapshot.department !== (data.department ?? null) ||
@@ -292,6 +299,7 @@ const snapshotSchema = z.object({
   startingPriceHT: z.number().optional(),
   marketValue: z.number().optional(),
   newPrice: z.number().optional(),
+  currentAuctionPrice: z.number().optional(),
   vatRecoverable: z.boolean().default(false),
   city: z.string().default(''),
   center: z.string().optional(),
@@ -612,15 +620,25 @@ app.get('/same-model', async (c) => {
 });
 
 // ── Batch save snapshots from list page (lightweight, for tracking) ──
+// List cards expose a few extra identity signals when present: the VPauto
+// reference (7+ digit number), motor power (ch), and transmission code
+// (BVA/BVM/EAT/DSG…). We accept them optionally so that a newly-created
+// Vehicle row from a list scrape carries enough identity to prevent the
+// Bug #3 pollution (list-only Vehicle with reference=null was getting
+// merged with the wrong detail-page car).
 const listItemSchema = z.object({
   hashId: z.string(),
+  reference: z.string().nullable().optional().transform(v => v ?? undefined),
   brand: z.string().default(''),
   model: z.string().default(''),
   version: z.string().default(''),
   year: z.coerce.number().default(0),
   mileage: z.coerce.number().default(0),
+  power: z.number().nullable().optional().transform(v => v ?? undefined),
+  transmission: z.string().nullable().optional().transform(v => v ?? undefined),
   city: z.string().default(''),
   startingPrice: z.number().nullable().optional().transform(v => v ?? undefined),
+  currentAuctionPrice: z.number().nullable().optional().transform(v => v ?? undefined),
   soldPrice: z.number().nullable().optional().transform(v => v ?? undefined),
   status: z.string().default('available'),
   observations: z.string().nullable().optional().transform(v => v ?? undefined),
@@ -667,27 +685,48 @@ app.post('/batch-snapshot', async (c) => {
     // Process in a transaction for much faster SQLite performance
     await prisma.$transaction(async (tx) => {
       for (const { hashId, data: v } of validItems) {
-        // Find or create vehicle
+        // Find or create vehicle. We try BOTH by hashId and by reference (when
+        // present on the list card) so that a detail-page-created Vehicle
+        // (reference set, hashId set) is reused rather than duplicated when
+        // the same car shows up on a list scrape.
         let vehicle = await tx.vehicle.findFirst({ where: { hashId } });
+        if (!vehicle && v.reference) {
+          vehicle = await tx.vehicle.findFirst({ where: { reference: v.reference } });
+        }
         const isNew = !vehicle;
 
         if (!vehicle) {
           vehicle = await tx.vehicle.create({
             data: {
               hashId,
+              reference: v.reference || null,
               brand: v.brand,
               model: v.model,
               version: v.version,
               year: v.year,
               color: '',
               fuel: '',
-              transmission: '',
+              // Keep transmission from the list card when the discriminator
+              // regex caught something (e.g. "BVA8"). Empty string otherwise
+              // (the detail scrape will populate it later).
+              transmission: v.transmission || '',
+              power: v.power ?? null,
             },
           });
         } else {
+          // Fill gaps on the existing Vehicle row without overwriting facts
+          // the detail scrape may have captured earlier.
           await tx.vehicle.update({
             where: { id: vehicle.id },
-            data: { lastSeenAt: now },
+            data: {
+              lastSeenAt: now,
+              reference: vehicle.reference ?? v.reference ?? null,
+              hashId: vehicle.hashId ?? hashId,
+              power: vehicle.power ?? v.power ?? null,
+              transmission: vehicle.transmission && vehicle.transmission.length > 0
+                ? vehicle.transmission
+                : (v.transmission || ''),
+            },
           });
         }
 
@@ -718,6 +757,7 @@ app.post('/batch-snapshot', async (c) => {
             data: {
               vehicleId: vehicle.id,
               hashId,
+              reference: v.reference || null,
               brand: v.brand,
               model: v.model,
               version: v.version,
@@ -725,9 +765,11 @@ app.post('/batch-snapshot', async (c) => {
               mileage: v.mileage,
               color: '',
               fuel: '',
-              transmission: '',
+              transmission: v.transmission || '',
+              power: v.power ?? null,
               city: v.city,
               startingPrice: v.startingPrice,
+              currentAuctionPrice: v.currentAuctionPrice,
               soldPrice: v.soldPrice,
               lotNumber: v.lotNumber,
               sourceUrl: v.sourceUrl,

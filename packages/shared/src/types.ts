@@ -39,11 +39,17 @@ export interface VehicleSnapshot {
   bodyType?: string;
 
   // Pricing
-  startingPrice?: number;
+  startingPrice?: number;       // "Mise à prix" — seller-defined initial price
   startingPriceHT?: number;
   marketValue?: number;
   newPrice?: number;
   vatRecoverable: boolean;
+  /** "Enchère en cours" — live auction price during bidding.
+   *  Distinct from startingPrice: the MAP is the reserve set by the seller,
+   *  while currentAuctionPrice is the current highest bid during a live
+   *  auction. Displayed in the sidepanel as a secondary metric, never as
+   *  the MAP. */
+  currentAuctionPrice?: number;
 
   // Sale info
   city: string;

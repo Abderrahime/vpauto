@@ -44,6 +44,7 @@ export function snapshotToApi(s: Snapshot): VehicleSnapshot {
     marketValue: s.marketValue ?? undefined,
     newPrice: s.newPrice ?? undefined,
     vatRecoverable: s.vatRecoverable,
+    currentAuctionPrice: s.currentAuctionPrice ?? undefined,
     city: s.city,
     center: s.center ?? undefined,
     department: s.department ?? undefined,

@@ -1300,6 +1300,14 @@ function renderVehicleState(input: {
   // Build metrics dynamically — only show metrics with real data
   const metrics: string[] = [];
   if (startingPrice) metrics.push(metricCard('Mise a prix', formatPrice(startingPrice), 'price'));
+  // "Enchère en cours" — distinct from MAP, shown when a live bid is active.
+  // Bug #1 fix: previously VPauto's live bid (e.g. 28 000 €) was being
+  // stored as startingPrice and labelled "Mise à prix", misleading the user
+  // about the seller's reserve. We now display it as its own metric so the
+  // two values never get confused.
+  if (snapshot.currentAuctionPrice) {
+    metrics.push(metricCard('Enchere en cours', formatPrice(snapshot.currentAuctionPrice), 'price'));
+  }
   if (snapshot.soldPrice) metrics.push(metricCard('Prix adjuge', formatPrice(snapshot.soldPrice), 'sold'));
   if (snapshot.marketValue) metrics.push(metricCard('Cote', formatPrice(snapshot.marketValue), 'price'));
   if (snapshot.newPrice) metrics.push(metricCard('Prix neuf', formatPrice(snapshot.newPrice), 'price'));
@@ -2260,11 +2268,20 @@ function renderVehicleList(list: Partial<VehicleSnapshot>[]): string {
     const statusClass = isSold ? ' vehicle-card--sold' : isUnsold ? ' vehicle-card--unsold' : '';
     const nrClass = nonRoulant ? ' vehicle-card--nr' : '';
 
+    // Live bid ("Enchère en cours") is displayed distinctly from the MAP.
+    // When an auction is currently running, VPauto's list card shows the
+    // bid value without a "Mise à prix" label — we now capture it as
+    // `currentAuctionPrice` and surface it here so the user can tell at a
+    // glance "this is a live auction, current bid is X" vs "this is the
+    // seller's reserve price".
+    const liveBidHtml = v.currentAuctionPrice
+      ? `<div class="vehicle-card__live-bid">Enchere ${formatPrice(v.currentAuctionPrice)}</div>`
+      : '';
     const priceDisplay = isSold && v.soldPrice
-      ? `<div class="vehicle-card__sold-price">Adjuge ${formatPrice(v.soldPrice)}</div><div class="vehicle-card__start-price">${formatPrice(v.startingPrice)}</div>`
+      ? `<div class="vehicle-card__sold-price">Adjuge ${formatPrice(v.soldPrice)}</div>${v.startingPrice ? `<div class="vehicle-card__start-price">${formatPrice(v.startingPrice)}</div>` : ''}`
       : isUnsold
-      ? `<div class="vehicle-card__unsold">Invendu</div><div class="vehicle-card__start-price">${formatPrice(v.startingPrice)}</div>`
-      : `<div class="vehicle-card__price">${formatPrice(v.startingPrice)}</div>`;
+      ? `<div class="vehicle-card__unsold">Invendu</div>${v.startingPrice ? `<div class="vehicle-card__start-price">${formatPrice(v.startingPrice)}</div>` : ''}`
+      : `${liveBidHtml}${v.startingPrice ? `<div class="vehicle-card__price">${formatPrice(v.startingPrice)}</div>` : ''}`;
 
     return `
       <div class="vehicle-card${statusClass}${nrClass}" ${url ? `data-vehicle-url="${esc(url)}"` : ''}>

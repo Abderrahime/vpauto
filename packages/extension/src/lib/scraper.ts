@@ -3,6 +3,34 @@ import { VPAUTO_BASE_URL, VPAUTO_VEHICLE_URL_PATTERN } from '@vpauto/shared';
 
 const UNSOLD_TEXT_RE = /n[''\u2019]a\s*pas\s*[eé]t[eé]\s*adjug[eé]|pas\s*[eé]t[eé]\s*adjug[eé]|pas\s*adjug[eé]|non\s*adjug[eé]|invendu|apr[eè]s[\s-]*vente|ordre\s+d[''\u2019]achat\s+d[''\u2019]apr[eè]s[\s-]*vente/i;
 
+/**
+ * Strict "véhicule non roulant" detector.
+ *
+ * Previous regex `/non\s*roulant|hors\s*d'usage|[eé]pave|accident[eé]/i`
+ * was too permissive: phrases like "véhicule non accidenté", "pas d'épave
+ * déclarée", or a legal disclaimer mentioning "épave" would falsely flag
+ * a healthy car. We require VPauto's canonical phrasing (a "véhicule"
+ * qualifier before the state descriptor, or the explicit "NON ROULANT"
+ * status label) to avoid the false positive that was sending thousands
+ * of normal cars down the 100 € non-roulant branch.
+ */
+const NON_ROULANT_RE = /v[ée]hicule\s+non\s*roulant\b|v[ée]hicule\s+hors\s+d['\u2019]\s*usage\b|v[ée]hicule\s+[eé]pave\b|v[ée]hicule\s+accident[eé]\b|(?:^|\s)NON\s+ROULANT\b|mention\s+[eé]pave\b|\bstatut\s*:\s*[eé]pave\b/;
+function isVehiculeNonRoulant(bodyText: string): boolean {
+  return NON_ROULANT_RE.test(bodyText);
+}
+
+/**
+ * "Mise à prix" call-to-action buttons (not actual prices).
+ *
+ * When VPauto hasn't published the MAP yet for an upcoming auction, the
+ * page/card shows a CTA button like "RECEVOIR LA MISE À PRIX" instead of
+ * the value. We must NOT match this as a price label — or we'd latch onto
+ * whatever € amount is nearest (typically the Cote or Prix neuf rendered
+ * on the same card) and store it as the MAP. Used by both the detail-page
+ * `parsePriceFromPage` and the list-card last-resort fallback.
+ */
+const MAP_CTA_RE = /\b(?:recevoir|demander|obtenir|voir|consulter|acc[eé]der(?:\s+[aà])?)\s+(?:la\s+)?mise\s*(?:à|a)\s*prix/i;
+
 // ── List page scraper ──────────────────────────────────────────────────────
 
 /**
@@ -413,8 +441,9 @@ export function scrapeVehicleListFromDocument(doc: Document): Partial<VehicleSna
         if (km) mileage = parseInt(km[1]);
       }
 
-      // ── Starting price: specifically from "Mise à prix" text ──
-      // IMPORTANT: Don't just take the first price — that could be the ADJUGÉ sold price
+      // ── Starting price (Mise à prix) ──
+      // Explicitly pattern-matched on the "Mise à prix" label to avoid
+      // accidentally capturing the ADJUGÉ sold price or the live bid.
       let startingPrice: number | undefined;
       for (const text of childTexts) {
         const miseAPrix = text.replace(/\s/g, '').match(/[Mm]ise\s*(?:à|a)\s*prix\s*([\d]+)\s*€?/i)
@@ -431,10 +460,42 @@ export function scrapeVehicleListFromDocument(doc: Document): Partial<VehicleSna
           startingPrice = parseInt(miseMatch[1]);
         }
       }
-      // Last resort: take a price that is NOT from ADJUGÉ section
-      if (startingPrice === undefined) {
+
+      // ── Live auction bid ("Enchère en cours") ──
+      // Bug #1 fix: list cards for live auctions show "Enchère en cours
+      // 28 000 €" instead of (or next to) "Mise à prix". Before this fix,
+      // the fallback below captured that live-bid value as `startingPrice`,
+      // which the sidepanel then displayed as "MISE A PRIX 28 000 €" even
+      // though the true MAP was different. Route it to currentAuctionPrice.
+      let currentAuctionPrice: number | undefined;
+      for (const text of childTexts) {
+        const live = text.replace(/\s/g, '').match(/[Ee]nch[eè]reencours([\d]+)€?/);
+        if (live) {
+          currentAuctionPrice = parseInt(live[1]);
+          break;
+        }
+      }
+      if (currentAuctionPrice === undefined) {
+        const live = fullText.replace(/\s/g, '').match(/[Ee]nch[eè]reencours([\d]+)€/);
+        if (live) currentAuctionPrice = parseInt(live[1]);
+      }
+
+      // Last resort for startingPrice: take a price that is NOT from an
+      // ADJUGÉ, "Enchère en cours", Cote, Prix neuf, or Estimation section.
+      //
+      // BUG FIX (Qashqai-like cards): when the MAP hasn't been published,
+      // VPauto shows a CTA "RECEVOIR LA MISE À PRIX" and the only € amounts
+      // on the card are the Cote / Prix neuf / Estimation. Without these
+      // guards, the fallback used to latch onto the Cote (e.g. 28 500 €)
+      // and store it as startingPrice — completely wrong. If we detect a
+      // "recevoir la mise à prix" CTA anywhere on the card, we refuse to
+      // guess a MAP and leave startingPrice undefined.
+      const hasMapCta = childTexts.some((t) => MAP_CTA_RE.test(t)) || MAP_CTA_RE.test(fullText);
+      if (startingPrice === undefined && !hasMapCta) {
         for (const text of childTexts) {
-          if (/adjug[eé]/i.test(text)) continue; // Skip ADJUGÉ line
+          if (/adjug[eé]/i.test(text)) continue;
+          if (/ench[eè]re\s+en\s+cours/i.test(text)) continue;
+          if (/cote\b|prix\s+neuf|estimation/i.test(text)) continue;
           const priceMatch = text.replace(/\s/g, '').match(/([\d]+)\s*€/);
           if (priceMatch) {
             startingPrice = parseInt(priceMatch[1]);
@@ -482,19 +543,43 @@ export function scrapeVehicleListFromDocument(doc: Document): Partial<VehicleSna
       }
 
       // ── Detect "véhicule non roulant" ──
-      const isNonRoulant = /non\s*roulant|hors\s*d[''\u2019]usage|[eé]pave|accident[eé]/i.test(fullText);
+      // Uses the strict detector so FAQ/legal blurb or "non accidenté"
+      // phrasing no longer triggers a false positive (Bug: 1449 vehicles
+      // had been falsely tagged non-roulant with 100 € MAP).
+      const isNonRoulant = isVehiculeNonRoulant(fullText);
       const observations = isNonRoulant ? 'Véhicule non roulant' : '';
+
+      // ── Extract identity discriminators from the card ──
+      // When the list page exposes the VPauto reference (e.g. "Ref. : 11404642")
+      // or the engine power ("75 ch") or the transmission code ("BVA8"),
+      // persisting them alongside the hashId prevents the Bug #3 pollution
+      // where a list-only Vehicle row with reference=null was later merged
+      // with a different detail-page car by the attribute-only matcher.
+      const refMatch = fullText.match(/Ref\.?\s*:?\s*(\d{7,})/i);
+      const reference = refMatch?.[1] || undefined;
+
+      const powerMatch = fullText.match(/(\d{2,4})\s*ch\b/i);
+      const power = powerMatch ? parseInt(powerMatch[1]) : undefined;
+
+      // Recognise VPauto transmission abbreviations. We keep the matched
+      // string as-is (e.g. "BVA8", "DCT7") so downstream equality checks
+      // stay consistent with the detail scraper's `kv['boîte']` values.
+      const transMatch = fullText.match(/\b(BVA\d?|BVM\d?|EAT\d|DCT\d?|DSG\d?|CVT|PDK\d?|TCT\d?|BVR\d?)\b/i);
+      const transmission = transMatch ? transMatch[1].toUpperCase() : '';
 
       const vehicle: Partial<VehicleSnapshot> = {
         hashId, brand, model, version: model,
         year, mileage, city, lotNumber, startingPrice,
         photoUrls: img ? [img] : [], cdnHash,
         sourceUrl: `${VPAUTO_BASE_URL}${href}`,
-        fuel: '', transmission: '', color: '',
+        fuel: '', transmission, color: '',
         vatRecoverable: false,
         scrapedAt: new Date().toISOString(),
         status,
       };
+      if (reference) vehicle.reference = reference;
+      if (power) vehicle.power = power;
+      if (currentAuctionPrice) vehicle.currentAuctionPrice = currentAuctionPrice;
       if (soldPrice) vehicle.soldPrice = soldPrice;
       if (observations) vehicle.observations = observations;
 
@@ -594,7 +679,9 @@ export function scrapeVehicleDetailFromDocument(doc: Document, pageUrl: string):
     // ── Pricing ──
     // VPauto shows "Mise à prix¹" with a footnote superscript, then "19400 €" on next line
     // Use a targeted approach: find the price amount near "Mise à prix"
-    const startingPrice  = parsePriceFromPage(bodyText);
+    const startingPrice        = parsePriceFromPage(bodyText);
+    // Live auction: "Enchère en cours 5 400 €" — distinct from MAP.
+    const currentAuctionPrice  = parseCurrentAuctionPrice(bodyText);
     const startingPriceHT = parsePrice(bodyText, /(?:[\d\s]+),?\d*\s*€\s*HT|(\d[\d\s]*)\s*€\s*HT/i)
       || parsePrice(bodyText, /([\d\s]+),?\d*\s*€\s*HT/i);
     const marketValue    = parseLabelledPrice(bodyText, 'cote');
@@ -611,7 +698,7 @@ export function scrapeVehicleDetailFromDocument(doc: Document, pageUrl: string):
     // ── Condition ──
     const technicalCheckUrl = (doc.querySelector('a[href*="_CT.pdf"]') as HTMLAnchorElement)?.href;
     const conditionImageUrl = (doc.querySelector('img[src*="_ET."]') as HTMLImageElement)?.src;
-    const isNonRoulant      = /non\s*roulant|hors\s*d[''\u2019]usage|[eé]pave|accident[eé]/i.test(bodyText);
+    const isNonRoulant      = isVehiculeNonRoulant(bodyText);
     const baseObservations  = extractObservations(doc.body);
     const observations      = isNonRoulant
       ? (baseObservations ? `Véhicule non roulant | ${baseObservations}` : 'Véhicule non roulant')
@@ -675,6 +762,7 @@ export function scrapeVehicleDetailFromDocument(doc: Document, pageUrl: string):
     if (euroStandard) snapshot.euroStandard = euroStandard;
     if (bodyType) snapshot.bodyType = bodyType;
     if (startingPrice) snapshot.startingPrice = startingPrice;
+    if (currentAuctionPrice) snapshot.currentAuctionPrice = currentAuctionPrice;
     if (startingPriceHT) snapshot.startingPriceHT = startingPriceHT;
     if (marketValue) snapshot.marketValue = marketValue;
     if (newPrice) snapshot.newPrice = newPrice;
@@ -808,32 +896,96 @@ function parseLabelledPrice(bodyText: string, label: string): number | undefined
  *
  * Using a line-by-line approach to avoid the footnote "1" being
  * concatenated with the price digits (e.g. "16500" instead of "6500").
+ *
+ * BUG FIX (100 € anomaly): We now collect ALL candidates and return the
+ * MAX. VPauto pages sometimes include a FAQ/legal blurb with a phrase like
+ * "la mise à prix démarre à 100 €" before the real MAP block. The previous
+ * version picked the first match and returned 100 € for thousands of
+ * healthy cars. The real MAP is always the higher of the two (a legal
+ * minimum is, by definition, lower than the actual seller's reserve).
+ * When there's only one match, we return it as-is so genuinely cheap
+ * lots (scooter, épave) retain their legitimate 100 € MAP.
+ *
+ * BUG FIX (CTA button): when the MAP hasn't been published yet (upcoming
+ * auction), VPauto shows a CTA button "RECEVOIR LA MISE À PRIX" instead
+ * of the price. Our regex used to match that button text, then grab the
+ * next nearby € amount — which was actually the Cote or Prix neuf on the
+ * rendered card. We now skip any line whose "mise à prix" appears inside
+ * a call-to-action verb (recevoir / demander / obtenir / voir / consulter).
+ * See MAP_CTA_RE at the top of the file.
  */
 function parsePriceFromPage(bodyText: string): number | undefined {
   const lines = bodyText.split('\n');
+  const candidates: number[] = [];
 
   for (let i = 0; i < lines.length; i++) {
-    if (/mise\s*(?:à|a)\s*prix/i.test(lines[i])) {
-      // Found "Mise à prix" line. The actual price is on a SUBSEQUENT line.
-      // The current line may end with a footnote digit like "Mise à prix1"
-      for (let j = i + 1; j <= i + 4 && j < lines.length; j++) {
-        const line = lines[j].trim();
-        if (!line) continue;
-        // Match "6500 €" or "6 500 €" or "19400€"
-        const m = line.match(/^([\d][\d\s]*)\s*€/);
-        if (m) {
-          return parseInt(m[1].replace(/\s/g, ''));
+    if (!/mise\s*(?:à|a)\s*prix/i.test(lines[i])) continue;
+    // Skip CTA button "RECEVOIR LA MISE À PRIX" (unpublished MAP — would
+    // otherwise latch onto the Cote/Prix-neuf € amount nearby on the card).
+    if (MAP_CTA_RE.test(lines[i])) continue;
+
+    let found = false;
+    // Price on a subsequent line (most common VPauto layout)
+    for (let j = i + 1; j <= i + 4 && j < lines.length; j++) {
+      const line = lines[j].trim();
+      if (!line) continue;
+      const m = line.match(/^([\d][\d\s]*)\s*€/);
+      if (m) {
+        const val = parseInt(m[1].replace(/\s/g, ''));
+        if (val > 0) {
+          candidates.push(val);
+          found = true;
+          break;
         }
       }
+    }
+    if (found) continue;
 
-      // Fallback: price on the SAME line as "Mise à prix", e.g. "Mise à prix 6500€"
-      const sameLine = lines[i].match(/mise\s*(?:à|a)\s*prix\s+([\d][\d\s]*)\s*€/i);
-      if (sameLine) {
-        return parseInt(sameLine[1].replace(/\s/g, ''));
-      }
+    // Fallback: price on the SAME line, e.g. "Mise à prix 6500€"
+    const sameLine = lines[i].match(/mise\s*(?:à|a)\s*prix[^\d\n]{0,40}?([\d][\d\s]*)\s*€/i);
+    if (sameLine) {
+      const val = parseInt(sameLine[1].replace(/\s/g, ''));
+      if (val > 0) candidates.push(val);
     }
   }
 
+  if (candidates.length === 0) return undefined;
+  return Math.max(...candidates);
+}
+
+/**
+ * Extract the "Enchère en cours" amount from VPauto detail page.
+ *
+ * Distinct from "Mise à prix": during a live auction, VPauto shows the
+ * current highest bid as "Enchère en cours¹ 5 400 €" above or next to the
+ * "Mise à prix¹" block. Before this was extracted, the MAP parser would
+ * sometimes pick up the live bid as the MAP — polluting the price history
+ * chart and displaying a misleading "MISE À PRIX: 5 400 €" in the sidepanel
+ * for a car whose real MAP was 6 000 €.
+ */
+function parseCurrentAuctionPrice(bodyText: string): number | undefined {
+  const lines = bodyText.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (!/ench[eè]re\s+en\s+cours/i.test(lines[i])) continue;
+
+    // Price on a subsequent line
+    for (let j = i + 1; j <= i + 4 && j < lines.length; j++) {
+      const line = lines[j].trim();
+      if (!line) continue;
+      const m = line.match(/^([\d][\d\s]*)\s*€/);
+      if (m) {
+        const val = parseInt(m[1].replace(/\s/g, ''));
+        if (val > 0) return val;
+      }
+    }
+
+    // Fallback: same line, e.g. "Enchère en cours 5400 €"
+    const sameLine = lines[i].match(/ench[eè]re\s+en\s+cours[^\d\n]{0,40}?([\d][\d\s]*)\s*€/i);
+    if (sameLine) {
+      const val = parseInt(sameLine[1].replace(/\s/g, ''));
+      if (val > 0) return val;
+    }
+  }
   return undefined;
 }
 

@@ -63,11 +63,16 @@ model Snapshot {
   bodyType        String?
 
   // Pricing
-  startingPrice     Float?
+  startingPrice     Float?    // "Mise à prix" — initial auction price set by seller
   startingPriceHT   Float?
   marketValue       Float?
   newPrice          Float?
   vatRecoverable    Boolean @default(false)
+  /// "Enchère en cours" — live auction price distinct from the starting price.
+  /// Bug #1 fix: VPauto shows "Enchère en cours 5 400 €" during live bidding,
+  /// which is NOT the "Mise à prix". Storing it separately avoids overwriting
+  /// the true MAP and polluting the price history chart.
+  currentAuctionPrice Float?
 
   // Sale info
   city            String

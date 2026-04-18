@@ -39,6 +39,7 @@ export interface VehicleSnapshot {
     marketValue?: number;
     newPrice?: number;
     vatRecoverable: boolean;
+    currentAuctionPrice?: number;
     city: string;
     center?: string;
     department?: string;

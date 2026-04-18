@@ -220,6 +220,35 @@ export function computeIdentityScore(
     reasons.push('cross_reference_accepted');
   }
 
+  // Missing-reference safety gate (Bug #3 — CITROEN BERLINGO VAN pollution).
+  //
+  // Problem observed: the list-page scraper used to create Vehicle rows with
+  // reference=null/power=null/transmission='' (no identity fingerprint).
+  // When a detail-page scrape of a DIFFERENT physical car with the same
+  // brand/model/year/version later reached the attribute matcher, the
+  // cross-reference gate above (which requires BOTH refs populated) was
+  // bypassed, and the same-model/year/version/fuel signal alone was enough
+  // to exceed the 70-point threshold — merging two distinct cars (e.g.
+  // 11404642 75 ch BVM5 with 11406227 130 ch EAT8).
+  //
+  // Fix: when neither side has a reference AND there is no strong
+  // fingerprint (CT URL / condition sheet / cdnHash), require at least one
+  // discriminator (same power OR same engineSize OR same transmission) to
+  // accept the match. This lets genuine re-listings match while keeping
+  // list-only stubs from colliding with unrelated detail scrapes.
+  const hasReferencePair = !!(candidate.reference && input.reference);
+  if (!hasReferencePair && !hasStrongFingerprint) {
+    const powerAgrees = !!(input.power && candidatePower && input.power === candidatePower);
+    const transmissionAgrees = !!(
+      input.transmission && candidateTransmission
+      && candidateTransmission === normalize(input.transmission)
+    );
+    const engineAgrees = !!(input.engineSize && candidateEngineSize && input.engineSize === candidateEngineSize);
+    if (!powerAgrees && !transmissionAgrees && !engineAgrees) {
+      return { score: 0, reasons: [...reasons, 'no_reference_no_discriminator'], mileageDiff };
+    }
+  }
+
   return { score, reasons, mileageDiff };
 }
 
