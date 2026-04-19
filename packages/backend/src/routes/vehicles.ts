@@ -9,7 +9,12 @@ import {
   groupSnapshotsIntoPassages,
 } from '../history.js';
 import { findExactVehicle, findMatches } from '../matching.js';
-import { parsePhotoUrls, snapshotToApi } from '../utils.js';
+import {
+  isSpuriousStartingPrice,
+  parsePhotoUrls,
+  scrubStartingPriceForWrite,
+  snapshotToApi,
+} from '../utils.js';
 import type {
   VehicleSnapshot,
   VehicleHistory,
@@ -75,6 +80,17 @@ async function loadHistorySnapshotsForIdentity(input: {
 }
 
 function toSnapshotWriteData(vehicleId: number, data: VehicleSnapshot) {
+  // Defense-in-depth: scrub the spurious 100 € VPauto placeholder before
+  // persisting. The extension's scraper already filters it out, but a stale
+  // extension version or a direct API caller could still push the polluted
+  // value here. Same thresholds as the scraper and Phase C-2 cleanup.
+  const cleanStartingPrice = scrubStartingPriceForWrite(data.startingPrice, {
+    currentAuctionPrice: data.currentAuctionPrice,
+    soldPrice: data.soldPrice,
+    marketValue: data.marketValue,
+    newPrice: data.newPrice,
+  });
+
   return {
     vehicleId,
     reference: data.reference || null,
@@ -96,7 +112,7 @@ function toSnapshotWriteData(vehicleId: number, data: VehicleSnapshot) {
     critair: data.critair,
     euroStandard: data.euroStandard,
     bodyType: data.bodyType,
-    startingPrice: data.startingPrice,
+    startingPrice: cleanStartingPrice,
     startingPriceHT: data.startingPriceHT,
     marketValue: data.marketValue,
     newPrice: data.newPrice,
@@ -177,12 +193,40 @@ function mergeSnapshotForEnrichment(
   const existingPhotos = parsePhotoUrls(existing.photoUrls);
   const mergedPhotos = existingPhotos.length > incomingPhotos.length ? existingPhotos : incomingPhotos;
 
+  // MAP fact preservation + placeholder scrub.
+  //
+  // Normal rule: keep the already-stored MAP when incoming scrape brought
+  // none (sold detail pages no longer expose "Mise à prix" — see pickFact).
+  //
+  // Exception (Nantes 20/04/26 regression): if the EXISTING stored MAP is
+  // the 100 € VPauto placeholder AND the CURRENT incoming scrape shows a
+  // live bid / sold price that proves 100 € can't be real, reset to null.
+  // This auto-heals rows polluted by older scraper versions without
+  // requiring a manual DB migration run.
+  const incomingStartingPrice = scrubStartingPriceForWrite(data.startingPrice, {
+    currentAuctionPrice: data.currentAuctionPrice ?? existing.currentAuctionPrice,
+    soldPrice: data.soldPrice,
+    marketValue: data.marketValue ?? existing.marketValue,
+    newPrice: data.newPrice ?? existing.newPrice,
+  });
+  let mergedStartingPrice = pickFact(incomingStartingPrice, existing.startingPrice);
+  if (
+    isSpuriousStartingPrice(mergedStartingPrice, {
+      currentAuctionPrice: data.currentAuctionPrice ?? existing.currentAuctionPrice,
+      soldPrice: data.soldPrice,
+      marketValue: data.marketValue ?? existing.marketValue,
+      newPrice: data.newPrice ?? existing.newPrice,
+    })
+  ) {
+    mergedStartingPrice = null;
+  }
+
   return {
     ...base,
     reference: pickString(data.reference, existing.reference),
     hashId: pickString(data.hashId, existing.hashId),
     version: data.version && data.version.length > 0 ? data.version : existing.version,
-    startingPrice: pickFact(data.startingPrice, existing.startingPrice),
+    startingPrice: mergedStartingPrice,
     startingPriceHT: pickFact(data.startingPriceHT, existing.startingPriceHT),
     marketValue: pickFact(data.marketValue, existing.marketValue),
     newPrice: pickFact(data.newPrice, existing.newPrice),
@@ -867,6 +911,14 @@ app.post('/batch-snapshot', async (c) => {
             if (diff !== 0) priceChanged = diff;
           }
 
+          // Defense-in-depth: scrub the 100 € VPauto placeholder even on
+          // batch writes. The extension already filters it out, but an older
+          // extension or manual API caller could still push it in.
+          const batchCleanStartingPrice = scrubStartingPriceForWrite(v.startingPrice, {
+            currentAuctionPrice: v.currentAuctionPrice,
+            soldPrice: v.soldPrice,
+          });
+
           await tx.snapshot.create({
             data: {
               vehicleId: vehicle.id,
@@ -882,7 +934,7 @@ app.post('/batch-snapshot', async (c) => {
               transmission: v.transmission || '',
               power: v.power ?? null,
               city: v.city,
-              startingPrice: v.startingPrice,
+              startingPrice: batchCleanStartingPrice,
               currentAuctionPrice: v.currentAuctionPrice,
               soldPrice: v.soldPrice,
               lotNumber: v.lotNumber,

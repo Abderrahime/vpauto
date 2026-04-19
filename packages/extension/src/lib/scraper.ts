@@ -31,6 +31,55 @@ function isVehiculeNonRoulant(bodyText: string): boolean {
  */
 const MAP_CTA_RE = /\b(?:recevoir|demander|obtenir|voir|consulter|acc[eé]der(?:\s+[aà])?)\s+(?:la\s+)?mise\s*(?:à|a)\s*prix/i;
 
+/**
+ * Reject VPauto's "Mise à prix: 100 €" placeholder.
+ *
+ * Observed in Nantes 20/04/26 auction (ref 11402222 Kodiaq, 11406192 Ioniq 5,
+ * and 64 others): when a seller has not published a real MAP before the
+ * auction goes live, VPauto's list card starts displaying "Mise à prix 100 €"
+ * (the legal minimum) as a placeholder, next to the real "Enchère en cours
+ * 35 500 €". The scraper had no way to tell this 100 € apart from a real
+ * scooter/épave MAP, so it was stored as the lot's starting price — wildly
+ * misleading the user.
+ *
+ * Rule (matches the Phase C-2 DB cleanup thresholds so scraper and DB agree):
+ * if `startingPrice === 100` AND any of the same-card discriminators shows
+ * the lot is clearly above that level, we treat the 100 as a placeholder
+ * and drop it. The user then sees "Mise à prix : Inconnue" with the real
+ * live bid rendered separately as "Enchère en cours".
+ *
+ *   currentAuctionPrice ≥ 500   — live bid past a 100 € scooter ceiling
+ *   soldPrice           ≥ 500   — final hammer past a 100 € scooter ceiling
+ *   marketValue         ≥ 1000  — Cote betrays a valuable car
+ *   newPrice            ≥ 1000  — Prix neuf betrays a valuable car
+ *
+ * Conservative: a real 100 € scooter/épave MAP (currentAuctionPrice < 500
+ * and no cote) is preserved intact.
+ */
+const MAP_PLACEHOLDER_VALUE = 100;
+const MAP_LIVE_BID_FLOOR = 500;
+const MAP_VALUATION_FLOOR = 1000;
+
+function isSpuriousStartingPrice(
+  startingPrice: number | undefined,
+  signals: {
+    currentAuctionPrice?: number;
+    soldPrice?: number;
+    marketValue?: number;
+    newPrice?: number;
+  },
+): boolean {
+  if (startingPrice !== MAP_PLACEHOLDER_VALUE) return false;
+  if ((signals.currentAuctionPrice ?? 0) >= MAP_LIVE_BID_FLOOR) return true;
+  if ((signals.soldPrice ?? 0) >= MAP_LIVE_BID_FLOOR) return true;
+  if ((signals.marketValue ?? 0) >= MAP_VALUATION_FLOOR) return true;
+  if ((signals.newPrice ?? 0) >= MAP_VALUATION_FLOOR) return true;
+  return false;
+}
+
+// Re-exported for the backend's write-path defense-in-depth and for unit tests.
+export { isSpuriousStartingPrice };
+
 // ── List page scraper ──────────────────────────────────────────────────────
 
 /**
@@ -567,9 +616,22 @@ export function scrapeVehicleListFromDocument(doc: Document): Partial<VehicleSna
       const transMatch = fullText.match(/\b(BVA\d?|BVM\d?|EAT\d|DCT\d?|DSG\d?|CVT|PDK\d?|TCT\d?|BVR\d?)\b/i);
       const transmission = transMatch ? transMatch[1].toUpperCase() : '';
 
+      // Nantes 20/04/26 regression: VPauto started showing "Mise à prix 100 €"
+      // as a placeholder when the seller never published a real MAP and the
+      // auction is live. Reject the 100 € MAP whenever the same card's
+      // `currentAuctionPrice`/`soldPrice` proves it can't be a real scooter-
+      // level MAP. See isSpuriousStartingPrice() for the full rule set.
+      const scrubbedStartingPrice = isSpuriousStartingPrice(startingPrice, {
+        currentAuctionPrice,
+        soldPrice,
+      })
+        ? undefined
+        : startingPrice;
+
       const vehicle: Partial<VehicleSnapshot> = {
         hashId, brand, model, version: model,
-        year, mileage, city, lotNumber, startingPrice,
+        year, mileage, city, lotNumber,
+        startingPrice: scrubbedStartingPrice,
         photoUrls: img ? [img] : [], cdnHash,
         sourceUrl: `${VPAUTO_BASE_URL}${href}`,
         fuel: '', transmission, color: '',
@@ -679,7 +741,7 @@ export function scrapeVehicleDetailFromDocument(doc: Document, pageUrl: string):
     // ── Pricing ──
     // VPauto shows "Mise à prix¹" with a footnote superscript, then "19400 €" on next line
     // Use a targeted approach: find the price amount near "Mise à prix"
-    const startingPrice        = parsePriceFromPage(bodyText);
+    const rawStartingPrice     = parsePriceFromPage(bodyText);
     // Live auction: "Enchère en cours 5 400 €" — distinct from MAP.
     const currentAuctionPrice  = parseCurrentAuctionPrice(bodyText);
     const startingPriceHT = parsePrice(bodyText, /(?:[\d\s]+),?\d*\s*€\s*HT|(\d[\d\s]*)\s*€\s*HT/i)
@@ -687,6 +749,19 @@ export function scrapeVehicleDetailFromDocument(doc: Document, pageUrl: string):
     const marketValue    = parseLabelledPrice(bodyText, 'cote');
     const newPrice       = parseLabelledPrice(bodyText, 'prix neuf');
     const vatRecoverable = /tva\s*:\s*oui|tva\s+récupérable|tva\s+recuperable/i.test(bodyText);
+
+    // Reject VPauto's "Mise à prix 100 €" placeholder that appears on live
+    // auction pages when the seller never published a real MAP. See the
+    // isSpuriousStartingPrice() helper for the full rule set. We compute
+    // soldPrice below; pre-check only the signals already resolved here,
+    // then re-check after soldPrice is known and drop again if needed.
+    let startingPrice = isSpuriousStartingPrice(rawStartingPrice, {
+      currentAuctionPrice,
+      marketValue,
+      newPrice,
+    })
+      ? undefined
+      : rawStartingPrice;
 
     // ── Sale info ──
     const city       = extractCity(kv, bodyText);
@@ -740,6 +815,19 @@ export function scrapeVehicleDetailFromDocument(doc: Document, pageUrl: string):
       }
     } else if (/vente\s+en\s+cours|ench[eè]re\s+en\s+cours/i.test(bodyText)) {
       status = 'auction_live';
+    }
+
+    // Second-pass MAP scrub once soldPrice is resolved: reject a lingering
+    // 100 € placeholder when the final hammer price is above the scooter
+    // ceiling. We already dropped the MAP on the first pass for live bids
+    // and cote/prix-neuf evidence; this pass catches sold-page cases.
+    if (isSpuriousStartingPrice(startingPrice, {
+      currentAuctionPrice,
+      soldPrice,
+      marketValue,
+      newPrice,
+    })) {
+      startingPrice = undefined;
     }
 
     // Build snapshot, stripping undefined/null optional fields to avoid Zod issues

@@ -1457,18 +1457,36 @@ function renderVehicleState(input: {
   // We deliberately do NOT fall back to crossAuction.firstStartingPrice because that's the
   // OLDEST MAP ever recorded; using it would mix prices from different listings and has
   // caused "-300 € vs mise à prix" when the current passage was actually +100 € vs its MAP.
-  let startingPrice = snapshot.startingPrice;
+  //
+  // Placeholder guard: if ANY candidate resolves to 100 € AND the current snapshot
+  // shows a live bid / sold price that dwarfs it, reject the 100 € as VPauto's
+  // default placeholder rather than a real scooter-level MAP. Same thresholds as
+  // the scraper / backend / DB cleanup (500 € live-bid floor, 1000 € valuation).
+  const isMapPlaceholder = (sp: number | null | undefined): boolean => {
+    if (sp !== 100) return false;
+    if ((snapshot.currentAuctionPrice ?? 0) >= 500) return true;
+    if ((snapshot.soldPrice ?? 0) >= 500) return true;
+    if ((snapshot.marketValue ?? 0) >= 1000) return true;
+    if ((snapshot.newPrice ?? 0) >= 1000) return true;
+    return false;
+  };
+  const acceptMap = (sp: number | null | undefined): boolean =>
+    Boolean(sp) && !isMapPlaceholder(sp);
+
+  let startingPrice: number | undefined = acceptMap(snapshot.startingPrice)
+    ? (snapshot.startingPrice as number)
+    : undefined;
   if (!startingPrice && snapshot.hashId && currentList.length > 0) {
     const fromList = currentList.find(v => v.hashId === snapshot.hashId);
-    if (fromList?.startingPrice) {
-      startingPrice = fromList.startingPrice;
+    if (acceptMap(fromList?.startingPrice)) {
+      startingPrice = fromList!.startingPrice as number;
     }
   }
   if (!startingPrice && history && history.passages.length > 0) {
     // passages are oldest-first; walk backwards to find the most recent passage with a MAP
     for (let i = history.passages.length - 1; i >= 0; i--) {
       const sp = history.passages[i].startingPrice;
-      if (sp) { startingPrice = sp; break; }
+      if (acceptMap(sp)) { startingPrice = sp as number; break; }
     }
   }
 
@@ -1481,7 +1499,11 @@ function renderVehicleState(input: {
 
   // Build metrics dynamically — only show metrics with real data
   const metrics: string[] = [];
-  if (startingPrice) metrics.push(metricCard('Mise a prix', formatPrice(startingPrice), 'price'));
+  if (startingPrice) {
+    metrics.push(metricCard('Mise a prix', formatPrice(startingPrice), 'price'));
+  } else if (snapshot.currentAuctionPrice || snapshot.soldPrice) {
+    metrics.push(metricCard('Mise a prix', 'Inconnue', 'price'));
+  }
   // "Enchère en cours" — distinct from MAP, shown when a live bid is active.
   // Bug #1 fix: previously VPauto's live bid (e.g. 28 000 €) was being
   // stored as startingPrice and labelled "Mise à prix", misleading the user
@@ -1510,28 +1532,30 @@ function renderVehicleState(input: {
   return `
     <div class="panel">
       ${renderHeader(title, subtitle, isApiOnline, { showTitle: false })}
-      ${renderTicker(snapshot)}
-      ${renderVehicleHero(snapshot, startingPrice, similarSold ?? null, vehicleId, isNew)}
+      <div class="panel-scroll">
+        ${renderTicker(snapshot)}
+        ${renderVehicleHero(snapshot, startingPrice, similarSold ?? null, vehicleId, isNew)}
 
-      ${renderSoldBanner(snapshot, startingPrice)}
+        ${renderSoldBanner(snapshot, startingPrice)}
 
-      <div class="metrics-grid">
-        ${metrics.join('')}
+        <div class="metrics-grid">
+          ${metrics.join('')}
+        </div>
+
+        ${profitLine}
+        ${renderPersistenceWarning(vehicleId, scrapeDebug)}
+
+        ${renderBadgesSection(badges)}
+        ${renderCrossAuction(crossAuction, snapshot)}
+        ${renderSimilarInAuction(similarInAuction, snapshot, currentList.length)}
+        ${renderSimilarElsewhere(similarAvailable, snapshot)}
+        ${renderSimilarSold(similarSold, snapshot)}
+        ${renderHistorySection(enrichedHistory, vehicleId, snapshot)}
+        ${renderPriceChart(enrichedHistory)}
+        ${showDebug ? renderDebugCard(isApiOnline, input.currentVehicleList, scrapeDebug, input.backgroundDebug) : ''}
       </div>
-
-      ${profitLine}
-      ${renderPersistenceWarning(vehicleId, scrapeDebug)}
-
-      ${renderBadgesSection(badges)}
-      ${renderCrossAuction(crossAuction, snapshot)}
-      ${renderSimilarInAuction(similarInAuction, snapshot, currentList.length)}
-      ${renderSimilarElsewhere(similarAvailable, snapshot)}
-      ${renderSimilarSold(similarSold, snapshot)}
-      ${renderHistorySection(enrichedHistory, vehicleId, snapshot)}
-      ${renderPriceChart(enrichedHistory)}
       ${renderActionsBar(true)}
       ${renderTweaksPanel()}
-      ${showDebug ? renderDebugCard(isApiOnline, input.currentVehicleList, scrapeDebug, input.backgroundDebug) : ''}
     </div>
   `;
 }
@@ -1552,16 +1576,16 @@ function renderListState(state: StoredPanelState, isApiOnline: boolean): string 
   return `
     <div class="panel">
       ${renderHeader(title, subtitle, isApiOnline)}
-
-      ${hasVehicles ? renderAuctionSummary(list) : ''}
-      ${tracking ? renderTrackingAlerts(tracking) : ''}
-      ${hasVehicles ? renderTrackingSummary(tracking) : ''}
-      ${hasVehicles ? renderImportSection(state, isApiOnline) : ''}
-      ${hasVehicles ? renderVehicleList(list) : renderEmptyState(isApiOnline)}
-
+      <div class="panel-scroll">
+        ${hasVehicles ? renderAuctionSummary(list) : ''}
+        ${tracking ? renderTrackingAlerts(tracking) : ''}
+        ${hasVehicles ? renderTrackingSummary(tracking) : ''}
+        ${hasVehicles ? renderImportSection(state, isApiOnline) : ''}
+        ${hasVehicles ? renderVehicleList(list) : renderEmptyState(isApiOnline)}
+        ${showDebug ? renderDebugCard(isApiOnline, list, debug, state.backgroundDebug) : ''}
+      </div>
       ${renderActionsBar(false)}
       ${renderTweaksPanel()}
-      ${showDebug ? renderDebugCard(isApiOnline, list, debug, state.backgroundDebug) : ''}
     </div>
   `;
 }
@@ -1851,7 +1875,7 @@ function renderHistorySection(history: VehicleHistory | null, vehicleId: number 
   if (!history || historicalPassages.length === 0) {
     return `
       <section class="card">
-        <h2 class="card__title"><span class="card__icon">&#128203;</span> Historique</h2>
+        <h2 class="card__title"><span class="card__icon">&#128203;</span> Historique de passages</h2>
         <div class="card__empty">
           ${vehicleId
             ? "Aucun passage connu pour ce vehicule dans la base locale."
@@ -1920,7 +1944,7 @@ function renderHistorySection(history: VehicleHistory | null, vehicleId: number 
 
   return `
     <section class="card">
-      <h2 class="card__title"><span class="card__icon">&#128203;</span> Historique</h2>
+      <h2 class="card__title"><span class="card__icon">&#128203;</span> Historique de passages</h2>
       <div class="timeline">${items}</div>
     </section>
   `;
@@ -1932,7 +1956,7 @@ function renderCrossAuction(data: CrossAuctionData | null | undefined, snapshot:
   if (!data || previousPassages.length === 0) {
     return `
       <section class="card">
-        <h2 class="card__title"><span class="card__icon">&#127758;</span> Parcours multi-encheres</h2>
+        <h2 class="card__title"><span class="card__icon">&#127758;</span> Parcours multi-enchères</h2>
         <div class="card__empty">
           Aucun passage connu pour ce vehicule dans la base locale pour le moment.
         </div>
@@ -1980,7 +2004,7 @@ function renderCrossAuction(data: CrossAuctionData | null | undefined, snapshot:
 
   return `
     <section class="card">
-      <h2 class="card__title"><span class="card__icon">&#127758;</span> Parcours multi-encheres</h2>
+      <h2 class="card__title"><span class="card__icon">&#127758;</span> Parcours multi-enchères</h2>
       <div class="cross-list">${items}</div>
     </section>
   `;
@@ -2145,23 +2169,18 @@ function renderSimilarElsewhere(matches: MatchResult[] | null | undefined, curre
     : 0;
   const sameModelCount = filtered.filter((match) => match.level === 'same_model').length;
 
+  const summaryBits = [
+    `${sameModelCount} mêmes modèles`,
+    currentPrice != null ? `${cheaperCount} moins chers` : '',
+  ].filter(Boolean).join(' · ');
+
   const summary = `
-    <div class="recommend-box">
-      <div class="recommend-box__title">Opportunites ailleurs</div>
-      <div class="recommend-box__row">
-        <span>Vehicules disponibles trouves</span>
-        <span class="recommend-box__value">${filtered.length}</span>
+    <div class="opp-banner">
+      <div class="n">${filtered.length}</div>
+      <div class="t">
+        Véhicules disponibles trouvés ailleurs
+        <small>${esc(summaryBits || 'Même marque · analyse locale')}</small>
       </div>
-      <div class="recommend-box__row">
-        <span>Memes modeles</span>
-        <span class="recommend-box__value">${sameModelCount}</span>
-      </div>
-      ${currentPrice != null ? `
-        <div class="recommend-box__row">
-          <span>Moins chers que ce vehicule</span>
-          <span class="recommend-box__value">${cheaperCount}</span>
-        </div>
-      ` : ''}
     </div>
   `;
 
@@ -2240,36 +2259,45 @@ function renderSimilarSold(data: SimilarSoldData | null | undefined, currentSnap
   if (stats.avgSoldPrice && stats.count >= 1) {
     const currentPrice = currentSnapshot.startingPrice || currentSnapshot.soldPrice;
     recommendHtml = `
-      <div class="recommend-box">
-        <div class="recommend-box__title">Estimation de prix</div>
-        <div class="recommend-box__row">
-          <span>Prix moyen adjuge (${stats.count} vente${stats.count > 1 ? 's' : ''} comparable${stats.count > 1 ? 's' : ''})</span>
-          <span class="recommend-box__value">${formatPrice(stats.avgSoldPrice)}</span>
+      <div class="estim-block">
+        <div class="estim-row hero">
+          <div class="k">Prix moyen adjugé</div>
+          <div class="v">${formatPrice(stats.avgSoldPrice)}</div>
         </div>
-        <div class="recommend-box__row">
-          <span>Fourchette</span>
-          <span class="recommend-box__value">${formatPrice(stats.minSoldPrice || 0)} - ${formatPrice(stats.maxSoldPrice || 0)}</span>
+        <div class="estim-row">
+          <div class="k">Fourchette</div>
+          <div class="v">${formatPrice(stats.minSoldPrice || 0)} - ${formatPrice(stats.maxSoldPrice || 0)}</div>
+        </div>
+        <div class="estim-row">
+          <div class="k">Échantillon</div>
+          <div class="v">${stats.count} vente${stats.count > 1 ? 's' : ''} comparable${stats.count > 1 ? 's' : ''}</div>
         </div>
         ${currentPrice ? `
-          <div class="recommend-box__row">
-            <span>Ce vehicule (mise a prix)</span>
-            <span class="recommend-box__value">${formatPrice(currentPrice)}</span>
+          <div class="estim-row">
+            <div class="k">Ce véhicule</div>
+            <div class="v">${formatPrice(currentPrice)}</div>
           </div>
-          <div class="recommend-box__verdict ${currentPrice < stats.avgSoldPrice ? 'recommend-box__verdict--good' : 'recommend-box__verdict--high'}">
-            ${currentPrice < stats.avgSoldPrice
-              ? `Mise a prix inferieure de ${formatPrice(stats.avgSoldPrice - currentPrice)} au prix moyen adjuge`
-              : currentPrice === stats.avgSoldPrice
-              ? 'Prix aligne avec le marche'
-              : `Mise a prix superieure de ${formatPrice(currentPrice - stats.avgSoldPrice)} au prix moyen adjuge`
-            }
+          <div class="estim-row">
+            <div class="k">Verdict</div>
+            <div class="v ${currentPrice <= stats.avgSoldPrice ? 'price-down' : 'price-up'}">
+              ${currentPrice < stats.avgSoldPrice
+                ? `-${formatPrice(stats.avgSoldPrice - currentPrice)} vs marché`
+                : currentPrice === stats.avgSoldPrice
+                ? 'Aligné marché'
+                : `+${formatPrice(currentPrice - stats.avgSoldPrice)} vs marché`
+              }
+            </div>
           </div>
         ` : ''}
       </div>
     `;
   } else {
     recommendHtml = `
-      <div class="recommend-box recommend-box--warn">
-        <div class="recommend-box__title">Estimation non disponible</div>
+      <div class="estim-block estim-block--warn">
+        <div class="estim-row hero">
+          <div class="k">Estimation</div>
+          <div class="v">Non disponible</div>
+        </div>
         <div class="recommend-box__note">
           Echantillon insuffisant : aucun vehicule vendu comparable
           (meme modele, annee +/- 2, kilometrage +/- 50 000 km) n'est
@@ -2894,11 +2922,10 @@ function renderVehicleHero(
   const brand = (snapshot.brand || '').trim();
   const model = (snapshot.model || '').trim();
   const version = (snapshot.version || '').trim();
-  const serifTitle = [brand, model, version].filter(Boolean).join(' ') || 'Véhicule VPauto';
+  const vehicleTitle = [brand, model, version].filter(Boolean).join(' ') || 'Véhicule VPauto';
   const refPart = snapshot.reference ? `Réf. ${snapshot.reference}` : '';
   const vehiclePart = vehicleId ? `#${vehicleId}` : '';
-  const refLine = [vehiclePart, refPart].filter(Boolean).join(' · ');
-  const metaParts: string[] = [];
+  const metaParts: string[] = [vehiclePart, refPart].filter(Boolean);
   if (snapshot.year) metaParts.push(String(snapshot.year));
   if (snapshot.mileage) metaParts.push(formatDistance(snapshot.mileage));
   if (snapshot.city) metaParts.push(snapshot.city);
@@ -2906,7 +2933,7 @@ function renderVehicleHero(
 
   const badges: string[] = [];
   const nonRoulant = isNonRoulant(snapshot);
-  badges.push(`<span class="badge ${nonRoulant ? 'bad' : 'good'}">● ${nonRoulant ? 'Non roulant' : 'Roulant'}</span>`);
+  badges.push(`<span class="badge ${nonRoulant ? 'bad' : 'good'}">${nonRoulant ? 'Non roulant' : 'Roulant'}</span>`);
   if (isNew) badges.push('<span class="badge ink">Nouveau</span>');
   if (snapshot.mileage && snapshot.year) {
     const age = Math.max(1, new Date().getFullYear() - snapshot.year);
@@ -2916,27 +2943,39 @@ function renderVehicleHero(
     else badges.push('<span class="badge warn">Km moyen</span>');
   }
   if (snapshot.lotNumber) badges.push(`<span class="badge">Lot ${snapshot.lotNumber}</span>`);
+  const heroImage = snapshot.photoUrls?.[0];
 
   return `
-    <div class="veh">
-      ${refLine ? `<div class="veh-ref">${esc(refLine)}</div>` : ''}
-      <div class="veh-title">${esc(serifTitle)}</div>
-      ${metaParts.length ? `<div class="veh-meta">${metaParts.map((p, i) =>
-        `<span>${esc(p)}</span>${i < metaParts.length - 1 ? '<span class="sep">/</span>' : ''}`
-      ).join('')}</div>` : ''}
-      ${badges.length ? `<div class="veh-badges">${badges.join('')}</div>` : ''}
+    <div class="veh-card">
+      <div class="veh-thumb">
+        ${heroImage
+          ? `<img src="${esc(heroImage)}" alt="${esc(vehicleTitle)}" loading="lazy">`
+          : `<svg viewBox="0 0 200 100" fill="none" aria-hidden="true">
+              <path d="M20 70 L35 50 Q50 40 80 40 L130 40 Q155 40 170 55 L180 70 Z" fill="currentColor" opacity=".68"/>
+              <circle cx="55" cy="72" r="10" fill="currentColor"/>
+              <circle cx="145" cy="72" r="10" fill="currentColor"/>
+              <rect x="60" y="42" width="54" height="15" rx="5" fill="currentColor" opacity=".86"/>
+            </svg>`
+        }
+      </div>
+      <div class="veh-info">
+        <div class="veh-name">${esc(vehicleTitle)}</div>
+        ${metaParts.length ? `<div class="veh-meta">${metaParts.map((part, index) => `
+          <span>${esc(part)}</span>${index < metaParts.length - 1 ? '<span class="dot">•</span>' : ''}
+        `).join('')}</div>` : ''}
+        ${badges.length ? `<div class="badge-row veh-badges">${badges.join('')}</div>` : ''}
+      </div>
     </div>
     ${renderVerdict(snapshot, startingPrice, similarSold)}
   `;
 }
 
 /**
- * Verdict panel with linear gauge. Only emitted when we have at least a
- * MAP and either a Cote (marketValue) or a similar-sold average — without
- * a market reference, there's no verdict to render. The gauge range spans
- * a "reasonable" € window centered on the marché value, with the MAP and
- * marché markers positioned on the same axis so the user can eyeball the
- * bargain at a glance.
+ * Verdict panel with explicit price-source separation.
+ * We never label the live bid (`currentAuctionPrice`) as "Mise à prix":
+ * the marker/cells say "Mise à prix" only when `startingPrice` is known.
+ * If the MAP is missing, we keep the verdict but mark the live bid as
+ * "Enchère live" (or "Adjugé" on sold vehicles) and show "MAP inconnue".
  */
 function renderVerdict(
   snapshot: VehicleSnapshot,
@@ -2948,7 +2987,11 @@ function renderVerdict(
   const market = avgSold || marketValue;
   if (!market) return '';
 
-  const map = startingPrice ?? snapshot.currentAuctionPrice ?? snapshot.soldPrice;
+  const map = startingPrice;
+  const liveBid = snapshot.currentAuctionPrice ?? undefined;
+  const soldPrice = snapshot.soldPrice ?? undefined;
+  const focalValue = soldPrice ?? liveBid ?? map;
+  const focalLabel = soldPrice ? 'ADJUGÉ' : liveBid ? 'ENCHÈRE LIVE' : map ? 'MISE À PRIX' : '';
   // Range: min/max from comparables when available, else ±40% of market.
   const minSold = similarSold?.stats?.minSoldPrice ?? undefined;
   const maxSold = similarSold?.stats?.maxSoldPrice ?? undefined;
@@ -2957,16 +3000,16 @@ function renderVerdict(
 
   // Axis: wider than the range so MAP + extremes fit even when the MAP is
   // far below the market (typical VPauto case).
-  const axisLo = Math.min(map ?? market, rangeMin) * 0.9;
-  const axisHi = Math.max(map ?? market, rangeMax) * 1.05;
+  const axisLo = Math.min(focalValue ?? market, rangeMin) * 0.9;
+  const axisHi = Math.max(focalValue ?? market, rangeMax) * 1.05;
   const axisSpan = Math.max(axisHi - axisLo, 1);
   const pct = (v: number) => Math.max(0, Math.min(100, ((v - axisLo) / axisSpan) * 100));
 
   const rangeLeftPct = pct(rangeMin);
   const rangeWidthPct = Math.max(2, pct(rangeMax) - rangeLeftPct);
 
-  // Verdict: compare MAP (or sold) against market average. Tunable thresholds.
-  const reference = snapshot.soldPrice ?? map ?? market;
+  // Verdict anchor: sold price first, then live bid, then MAP.
+  const reference = soldPrice ?? liveBid ?? map ?? market;
   const diffPct = ((reference - market) / market) * 100;
   let tag = 'DANS LE MARCHÉ';
   let toneClass = 'warn';
@@ -2976,76 +3019,93 @@ function renderVerdict(
   else { title = diffPct === 0 ? 'Aligné marché' : `${diffPct > 0 ? '+' : ''}${Math.round(diffPct)} % vs cote`; }
 
   const score = Math.max(5, Math.min(95, Math.round(50 - diffPct * 2)));
+  const verdictTone = toneClass || 'good';
   const comparableCount = similarSold?.stats?.count ?? 0;
   const rangeLabel = `${formatShortPrice(rangeMin)} – ${formatShortPrice(rangeMax)}`;
   const compLabel = comparableCount
     ? `${comparableCount} comparable${comparableCount > 1 ? 's' : ''}`
     : 'base locale';
+  const gaugeRadius = 30;
+  const gaugeCircumference = 2 * Math.PI * gaugeRadius;
+  const gaugeOffset = gaugeCircumference * (1 - score / 100);
 
   // Tick marks at 5 evenly spaced values along the axis.
   const ticks: number[] = [];
   for (let i = 0; i < 5; i++) ticks.push(Math.round(axisLo + (axisSpan * i) / 4));
-
-  const ledger: string[] = [];
-  ledger.push(`
-    <div class="ledger-row">
-      <span class="k">Prix moyen adjugé</span>
-      <span class="v">${formatPrice(market)}</span>
-      <span class="d ${diffPct < 0 ? 'down' : diffPct > 0 ? 'up' : ''}">${diffPct === 0 ? 'réf.' : `${diffPct > 0 ? '+' : ''}${Math.round(diffPct)}%`}</span>
+  const quickCells: string[] = [];
+  quickCells.push(`
+    <div class="quick-cell">
+      <div class="k">Marché</div>
+      <div class="v">${formatPrice(market)}</div>
     </div>
   `);
-  if (marketValue) {
-    const diffVsCote = ((reference - marketValue) / marketValue) * 100;
-    ledger.push(`
-      <div class="ledger-row">
-        <span class="k">Cote Argus</span>
-        <span class="v">${formatPrice(marketValue)}</span>
-        <span class="d ${diffVsCote < 0 ? 'down' : diffVsCote > 0 ? 'up' : ''}">${marketValue === market ? 'réf.' : `${diffVsCote > 0 ? '+' : ''}${Math.round(diffVsCote)}%`}</span>
+  quickCells.push(`
+    <div class="quick-cell">
+      <div class="k">Mise à prix</div>
+      <div class="v">${map ? formatPrice(map) : 'Inconnue'}</div>
+    </div>
+  `);
+  if (liveBid) {
+    quickCells.push(`
+      <div class="quick-cell">
+        <div class="k">Enchère live</div>
+        <div class="v">${formatPrice(liveBid)}</div>
+      </div>
+    `);
+  } else if (soldPrice) {
+    quickCells.push(`
+      <div class="quick-cell">
+        <div class="k">Adjugé</div>
+        <div class="v">${formatPrice(soldPrice)}</div>
       </div>
     `);
   }
-  if (snapshot.newPrice) {
-    const diffVsNew = ((reference - snapshot.newPrice) / snapshot.newPrice) * 100;
-    ledger.push(`
-      <div class="ledger-row">
-        <span class="k">Prix neuf constructeur</span>
-        <span class="v">${formatPrice(snapshot.newPrice)}</span>
-        <span class="d down">${Math.round(diffVsNew)}%</span>
-      </div>
-    `);
-  }
-  if (snapshot.mileage && snapshot.year) {
-    const age = Math.max(1, new Date().getFullYear() - snapshot.year);
-    const perYear = Math.round(snapshot.mileage / age);
-    ledger.push(`
-      <div class="ledger-row">
-        <span class="k">Km / an</span>
-        <span class="v">${numberFormatter.format(perYear)}</span>
-        <span class="d">moy. 14k</span>
-      </div>
-    `);
-  }
+  quickCells.push(`
+    <div class="quick-cell">
+      <div class="k">Écart</div>
+      <div class="v">${diffPct > 0 ? '+' : ''}${Math.round(diffPct)}%<span class="trend ${diffPct <= 0 ? 'down' : 'up'}">${diffPct <= 0 ? '↓' : '↑'}</span></div>
+    </div>
+  `);
 
   return `
-    <div class="verdict${toneClass ? ` ${toneClass}` : ''}">
-      <div class="verdict-head">
-        <span class="verdict-tag">${esc(tag)}</span>
-        <span class="verdict-score">Score <b>${score}</b>/100</span>
+    <div class="verdict ${verdictTone}">
+      <div class="verdict-top">
+        <div class="gauge" aria-hidden="true">
+          <svg viewBox="0 0 76 76">
+            <circle class="bg" cx="38" cy="38" r="${gaugeRadius}"></circle>
+            <circle
+              class="fg"
+              cx="38"
+              cy="38"
+              r="${gaugeRadius}"
+              stroke-dasharray="${gaugeCircumference.toFixed(2)}"
+              stroke-dashoffset="${gaugeOffset.toFixed(2)}"
+            ></circle>
+          </svg>
+          <div class="score">
+            <b>${score}</b>
+            <span class="u">/100</span>
+          </div>
+        </div>
+        <div class="verdict-label">
+          <span class="tag">${esc(tag)}</span>
+          <h2>${esc(title)}</h2>
+          <p>Prix moyen adjugé <b class="mono">${formatPrice(market)}</b> · Fourchette <b class="mono">${esc(rangeLabel)}</b> · ${esc(compLabel)}</p>
+        </div>
       </div>
-      <div class="verdict-title">${esc(title)}</div>
-      <div class="verdict-sub">Prix moyen adjugé <b class="mono">${formatPrice(market)}</b> · Fourchette <b class="mono">${esc(rangeLabel)}</b> · ${esc(compLabel)}</div>
 
-      <div class="lgauge">
-        <div class="lgauge-track"></div>
-        <div class="lgauge-range" style="left:${rangeLeftPct.toFixed(1)}%; width:${rangeWidthPct.toFixed(1)}%;"></div>
-        <div class="lgauge-mkt" style="left:${pct(market).toFixed(1)}%" data-label="MARCHÉ"></div>
-        ${map ? `<div class="lgauge-mp" style="left:${pct(map).toFixed(1)}%" data-label="MISE À PRIX"></div>` : ''}
-        <div class="lgauge-ticks">
+      <div class="distribution">
+        <div class="dist-scale"></div>
+        <div class="dist-range" style="left:${rangeLeftPct.toFixed(1)}%; width:${rangeWidthPct.toFixed(1)}%;"></div>
+        <div class="dist-marker" style="left:${pct(market).toFixed(1)}%" data-label="MARCHÉ"></div>
+        ${map ? `<div class="dist-marker dist-marker--map" style="left:${pct(map).toFixed(1)}%" data-label="MISE À PRIX"></div>` : ''}
+        ${!map && focalValue && focalLabel ? `<div class="dist-marker dist-marker--live" style="left:${pct(focalValue).toFixed(1)}%" data-label="${esc(focalLabel)}"></div>` : ''}
+        <div class="dist-ticks">
           ${ticks.map((t) => `<span>${numberFormatter.format(t)}</span>`).join('')}
         </div>
       </div>
 
-      <div class="ledger">${ledger.join('')}</div>
+      <div class="quick-row">${quickCells.join('')}</div>
     </div>
   `;
 }
@@ -3065,14 +3125,14 @@ function formatShortPrice(v: number): string {
 function renderTweaksPanel(): string {
   return `
     <div class="tweaks" id="tweaks" role="dialog" aria-label="Tweaks">
-      <h3>Tweaks</h3>
+      <h3>Apparence</h3>
       <div class="tweak">
         <span>Accent</span>
         <div class="swatches" data-swatches>
-          <button class="sw on" type="button" style="background:#D64000" data-accent="#D64000" aria-label="Vermillon"></button>
-          <button class="sw" type="button" style="background:#0F3D91" data-accent="#0F3D91" aria-label="Bleu"></button>
-          <button class="sw" type="button" style="background:#1C6E4C" data-accent="#1C6E4C" aria-label="Vert"></button>
-          <button class="sw" type="button" style="background:#14151A" data-accent="#14151A" aria-label="Encre"></button>
+          <button class="sw on" type="button" style="background:#EA7A3C" data-accent="#EA7A3C" aria-label="Orange"></button>
+          <button class="sw" type="button" style="background:#5F87FF" data-accent="#5F87FF" aria-label="Bleu"></button>
+          <button class="sw" type="button" style="background:#3CCB87" data-accent="#3CCB87" aria-label="Vert"></button>
+          <button class="sw" type="button" style="background:#E85D75" data-accent="#E85D75" aria-label="Rose"></button>
         </div>
       </div>
       <div class="tweak">
@@ -3083,11 +3143,11 @@ function renderTweaksPanel(): string {
         </select>
       </div>
       <div class="tweak">
-        <span>Papier</span>
+        <span>Thème</span>
         <select data-tweak="paper">
-          <option value="warm">Warm paper</option>
-          <option value="cool">Cool gray</option>
-          <option value="pure">Pure white</option>
+          <option value="warm">Obsidienne</option>
+          <option value="cool">Ardoise</option>
+          <option value="pure">Nuit</option>
         </select>
       </div>
     </div>

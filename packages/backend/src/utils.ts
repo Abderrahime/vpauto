@@ -16,6 +16,55 @@ export function parsePhotoUrls(raw: string | null | undefined): string[] {
   }
 }
 
+// ── Spurious "Mise à prix 100 €" placeholder detection ────────────────────
+//
+// Keep these thresholds IN SYNC with the scraper's isSpuriousStartingPrice
+// (packages/extension/src/lib/scraper.ts) and the DB cleanup Rule C in
+// scripts/clean-bogus-starting-prices.ts. The backend enforces the same
+// rule on every write path so that even an older/compromised extension
+// can't insert a polluted 100 € MAP.
+//
+// See scraper.ts for the full rationale (Nantes 20/04/26 regression).
+export const MAP_PLACEHOLDER_VALUE = 100;
+export const MAP_LIVE_BID_FLOOR = 500;
+export const MAP_VALUATION_FLOOR = 1000;
+
+export function isSpuriousStartingPrice(
+  startingPrice: number | null | undefined,
+  signals: {
+    currentAuctionPrice?: number | null;
+    soldPrice?: number | null;
+    marketValue?: number | null;
+    newPrice?: number | null;
+  },
+): boolean {
+  if (startingPrice !== MAP_PLACEHOLDER_VALUE) return false;
+  if ((signals.currentAuctionPrice ?? 0) >= MAP_LIVE_BID_FLOOR) return true;
+  if ((signals.soldPrice ?? 0) >= MAP_LIVE_BID_FLOOR) return true;
+  if ((signals.marketValue ?? 0) >= MAP_VALUATION_FLOOR) return true;
+  if ((signals.newPrice ?? 0) >= MAP_VALUATION_FLOOR) return true;
+  return false;
+}
+
+/**
+ * Convenience wrapper: returns the startingPrice to persist, substituting
+ * null when the value is the spurious 100 € VPauto placeholder. Use this
+ * at every DB write site so the scrubbing logic stays consistent.
+ */
+export function scrubStartingPriceForWrite(
+  startingPrice: number | null | undefined,
+  signals: {
+    currentAuctionPrice?: number | null;
+    soldPrice?: number | null;
+    marketValue?: number | null;
+    newPrice?: number | null;
+  },
+): number | null {
+  if (startingPrice == null) return null;
+  if (isSpuriousStartingPrice(startingPrice, signals)) return null;
+  return startingPrice;
+}
+
 export function snapshotToApi(s: Snapshot): VehicleSnapshot {
   return {
     id: s.id,
