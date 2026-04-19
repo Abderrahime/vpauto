@@ -288,9 +288,9 @@ describe('computeIdentityScore', () => {
     (listOnlyCandidate as { reference: string | null }).reference = null;
     (listOnlyCandidate as { power: number | null }).power = null;
     (listOnlyCandidate as { engineSize: number | null }).engineSize = null;
-    listOnlyCandidate.snapshots[0].power = null;
+    (listOnlyCandidate.snapshots[0] as { power: number | null }).power = null;
     listOnlyCandidate.snapshots[0].transmission = '';
-    listOnlyCandidate.snapshots[0].engineSize = null;
+    (listOnlyCandidate.snapshots[0] as { engineSize: number | null }).engineSize = null;
 
     const inputWithoutRef = {
       ...baseInput,

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyPassageNavigation,
   buildMapTrajectory,
+  buildPassageEvents,
   buildPassageFromGroup,
   buildPriceHistory,
   computeEvolution,
@@ -31,10 +33,12 @@ function snap(overrides: Partial<SnapshotForHistory>): SnapshotForHistory {
     center: null,
     status: 'available',
     saleDate: '2026-04-13',
+    saleTime: null,
     scrapedAt: new Date('2026-04-10T10:00:00Z'),
     startingPrice: null,
     soldPrice: null,
     mileage: 50000,
+    lotNumber: null,
     observations: null,
     technicalCheckUrl: null,
     sourceUrl: 'https://vpauto.fr/v/x',
@@ -130,6 +134,181 @@ describe('groupSnapshotsIntoPassages', () => {
     const groups = groupSnapshotsIntoPassages(snaps);
     expect(groups[0].canonical.id).toBe(1);
     expect(groups[1].canonical.id).toBe(2);
+  });
+
+  it('splits a same-hashId relist (sold then re-auctioned) into TWO passages (Symbioz regression)', () => {
+    // Real case: RENAULT Symbioz ref 11404337, hashId 333f8ad378 reused by
+    // VPauto across two successive Rouen sales — adjugé 24 000 € on 15 avr,
+    // then relisted and adjugé again 24 000 € on 18 avr. The old grouping
+    // collapsed both into one passage, hiding the 15-apr sale from history.
+    const snaps = [
+      snap({
+        id: 1,
+        hashId: '333f8ad378',
+        saleDate: '2026-04-15',
+        scrapedAt: new Date('2026-04-14T08:00:00Z'),
+        startingPrice: 22000,
+        status: 'available',
+      }),
+      snap({
+        id: 2,
+        hashId: '333f8ad378',
+        saleDate: '2026-04-15',
+        scrapedAt: new Date('2026-04-15T18:00:00Z'),
+        startingPrice: 22000,
+        soldPrice: 24000,
+        status: 'sold',
+      }),
+      snap({
+        id: 3,
+        hashId: '333f8ad378',
+        saleDate: '2026-04-18',
+        scrapedAt: new Date('2026-04-16T09:00:00Z'),
+        startingPrice: 22500,
+        status: 'available',
+      }),
+      snap({
+        id: 4,
+        hashId: '333f8ad378',
+        saleDate: '2026-04-18',
+        scrapedAt: new Date('2026-04-18T18:00:00Z'),
+        startingPrice: 22500,
+        soldPrice: 24000,
+        status: 'sold',
+      }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    expect(groups).toHaveLength(2);
+    // Passage 1 = 15 avr
+    expect(groups[0].canonical.saleDate).toBe('2026-04-15');
+    expect(groups[0].canonical.soldPrice).toBe(24000);
+    expect(groups[0].snapshots.map((s) => s.id).sort()).toEqual([1, 2]);
+    // Passage 2 = 18 avr
+    expect(groups[1].canonical.saleDate).toBe('2026-04-18');
+    expect(groups[1].canonical.soldPrice).toBe(24000);
+    expect(groups[1].snapshots.map((s) => s.id).sort()).toEqual([3, 4]);
+  });
+
+  it('splits an unsold-then-relisted car into TWO passages', () => {
+    // Vehicle went unsold on 10 jan, then relisted and sold on 14 feb.
+    const snaps = [
+      snap({
+        id: 1,
+        hashId: 'abc',
+        saleDate: '2026-01-10',
+        scrapedAt: new Date('2026-01-10T18:00:00Z'),
+        startingPrice: 8000,
+        status: 'unsold',
+      }),
+      snap({
+        id: 2,
+        hashId: 'abc',
+        saleDate: '2026-02-14',
+        scrapedAt: new Date('2026-02-12T10:00:00Z'),
+        startingPrice: 7500,
+        status: 'available',
+      }),
+      snap({
+        id: 3,
+        hashId: 'abc',
+        saleDate: '2026-02-14',
+        scrapedAt: new Date('2026-02-14T18:00:00Z'),
+        startingPrice: 7500,
+        soldPrice: 8200,
+        status: 'sold',
+      }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    expect(groups).toHaveLength(2);
+    expect(groups[0].canonical.status).toBe('unsold');
+    expect(groups[1].canonical.status).toBe('sold');
+  });
+
+  it('orders by saleDate before scrapedAt when late-ingested rows would otherwise mix two passages', () => {
+    const snaps = [
+      snap({
+        id: 1,
+        hashId: 'abc',
+        saleDate: '2026-04-17',
+        scrapedAt: new Date('2026-04-10T10:00:00Z'),
+        status: 'available',
+      }),
+      snap({
+        id: 2,
+        hashId: 'abc',
+        saleDate: '2026-04-14',
+        scrapedAt: new Date('2026-04-11T10:00:00Z'),
+        status: 'unsold',
+      }),
+      snap({
+        id: 3,
+        hashId: 'abc',
+        saleDate: '2026-04-17',
+        scrapedAt: new Date('2026-04-12T10:00:00Z'),
+        status: 'unsold',
+      }),
+    ];
+
+    const groups = groupSnapshotsIntoPassages(snaps);
+
+    expect(groups).toHaveLength(2);
+    expect(groups[0].canonical.saleDate).toBe('2026-04-14');
+    expect(groups[1].canonical.saleDate).toBe('2026-04-17');
+    expect(groups[0].snapshots.map((snapshot) => snapshot.id)).toEqual([2]);
+    expect(groups[1].snapshots.map((snapshot) => snapshot.id)).toEqual([1, 3]);
+  });
+
+  it('keeps post-sale linger (same saleDate, same hashId) in the sold passage', () => {
+    // After the sold snap, VPauto may still show the listing as "available"
+    // for a short window before purging. That linger must not fork a passage.
+    const snaps = [
+      snap({
+        id: 1,
+        hashId: 'abc',
+        saleDate: '2026-04-13',
+        scrapedAt: new Date('2026-04-13T18:00:00Z'),
+        startingPrice: 14300,
+        soldPrice: 14900,
+        status: 'sold',
+      }),
+      snap({
+        id: 2,
+        hashId: 'abc',
+        saleDate: '2026-04-13',
+        scrapedAt: new Date('2026-04-13T21:00:00Z'),
+        startingPrice: 14300,
+        status: 'available',
+      }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].canonical.id).toBe(1); // sold stays canonical
+    expect(groups[0].snapshots).toHaveLength(2);
+  });
+
+  it('splits two sold snapshots with distinct saleDates (double-sale)', () => {
+    const snaps = [
+      snap({
+        id: 1,
+        hashId: 'abc',
+        saleDate: '2026-04-13',
+        scrapedAt: new Date('2026-04-13T18:00:00Z'),
+        soldPrice: 10000,
+        status: 'sold',
+      }),
+      snap({
+        id: 2,
+        hashId: 'abc',
+        saleDate: '2026-04-20',
+        scrapedAt: new Date('2026-04-20T18:00:00Z'),
+        soldPrice: 10500,
+        status: 'sold',
+      }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    expect(groups).toHaveLength(2);
+    expect(groups[0].canonical.saleDate).toBe('2026-04-13');
+    expect(groups[1].canonical.saleDate).toBe('2026-04-20');
   });
 });
 
@@ -256,6 +435,202 @@ describe('buildPassageFromGroup', () => {
     const groups = groupSnapshotsIntoPassages(snaps);
     const p = buildPassageFromGroup(groups[0], 0);
     expect(p.photoUrl).toBeUndefined();
+  });
+});
+
+describe('buildPassageEvents', () => {
+  it('compresses identical snapshots inside the same passage into one business event', () => {
+    const snaps = [
+      snap({ id: 1, scrapedAt: new Date('2026-04-03T08:00:00Z'), startingPrice: 8300, status: 'available' }),
+      snap({ id: 2, scrapedAt: new Date('2026-04-03T10:00:00Z'), startingPrice: 8300, status: 'available' }),
+      snap({ id: 3, scrapedAt: new Date('2026-04-03T12:00:00Z'), startingPrice: 8300, status: 'available' }),
+    ];
+
+    const events = buildPassageEvents(snaps);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].snapshotId).toBe(1);
+    expect(events[0].startingPrice).toBe(8300);
+  });
+
+  it('emits an additional event when the MAP changes inside one passage', () => {
+    const snaps = [
+      snap({ id: 1, scrapedAt: new Date('2026-04-03T08:00:00Z'), startingPrice: 8300, status: 'available' }),
+      snap({ id: 2, scrapedAt: new Date('2026-04-03T12:00:00Z'), startingPrice: 7900, status: 'available' }),
+    ];
+
+    const events = buildPassageEvents(snaps);
+
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => event.startingPrice)).toEqual([8300, 7900]);
+  });
+
+  it('emits an additional event when the status changes inside one passage', () => {
+    const snaps = [
+      snap({ id: 1, scrapedAt: new Date('2026-04-14T08:00:00Z'), startingPrice: 7400, status: 'available' }),
+      snap({ id: 2, scrapedAt: new Date('2026-04-14T18:00:00Z'), startingPrice: 7400, status: 'unsold' }),
+    ];
+
+    const events = buildPassageEvents(snaps);
+
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => event.status)).toEqual(['available', 'unsold']);
+  });
+});
+
+describe('historical passage reconstruction', () => {
+  it('keeps 03/04, 14/04 and 17/04 as three distinct passages with their own canonical snapshots', () => {
+    const snaps = [
+      snap({ id: 101, hashId: 'b301f0d194', saleDate: '2026-04-03', scrapedAt: new Date('2026-04-03T18:00:00Z'), startingPrice: 8300, status: 'unsold' }),
+      snap({ id: 201, hashId: '290fa1ed6a', saleDate: '2026-04-14', scrapedAt: new Date('2026-04-14T18:00:00Z'), startingPrice: 7400, status: 'unsold' }),
+      snap({ id: 301, hashId: '290fa1ed6a', saleDate: '2026-04-17', scrapedAt: new Date('2026-04-16T09:00:00Z'), startingPrice: 7400, status: 'available' }),
+      snap({ id: 302, hashId: '290fa1ed6a', saleDate: '2026-04-17', scrapedAt: new Date('2026-04-17T18:00:00Z'), startingPrice: 7400, status: 'unsold' }),
+    ];
+
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = groups.map((group, index) => buildPassageFromGroup(group, index));
+
+    expect(groups).toHaveLength(3);
+    expect(passages.map((passage) => passage.date)).toEqual(['2026-04-03', '2026-04-14', '2026-04-17']);
+    expect(passages.map((passage) => passage.snapshotId)).toEqual([101, 201, 302]);
+  });
+});
+
+describe('applyPassageNavigation', () => {
+  it('opens an older canonical passage in VPauto when its historical URL stays unique', () => {
+    const snaps = [
+      snap({
+        id: 101,
+        hashId: 'b301f0d194',
+        saleDate: '2026-04-03',
+        scrapedAt: new Date('2026-04-03T18:00:00Z'),
+        status: 'unsold',
+        sourceUrl: 'https://vpauto.fr/vehicule/b301f0d194/polo',
+      }),
+      snap({
+        id: 201,
+        hashId: '290fa1ed6a',
+        saleDate: '2026-04-14',
+        scrapedAt: new Date('2026-04-14T18:00:00Z'),
+        status: 'unsold',
+        sourceUrl: 'https://vpauto.fr/vehicule/290fa1ed6a/polo',
+      }),
+      snap({
+        id: 301,
+        hashId: '290fa1ed6a',
+        saleDate: '2026-04-17',
+        scrapedAt: new Date('2026-04-17T18:00:00Z'),
+        status: 'unsold',
+        sourceUrl: 'https://www.vpauto.fr/vehicule/290fa1ed6a/polo',
+      }),
+    ];
+
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = applyPassageNavigation(
+      groups,
+      groups.map((group, index) => buildPassageFromGroup(group, index)),
+    );
+
+    expect(passages[0].openMode).toBe('vpauto');
+    expect(passages[0].isSourceUrlStable).toBe(true);
+    expect(passages[0].events[0].openMode).toBe('vpauto');
+  });
+
+  it('falls back to the local fiche when a canonical passage URL is reused later', () => {
+    const snaps = [
+      snap({
+        id: 201,
+        hashId: '290fa1ed6a',
+        saleDate: '2026-04-14',
+        scrapedAt: new Date('2026-04-14T18:00:00Z'),
+        status: 'unsold',
+        sourceUrl: 'https://vpauto.fr/vehicule/290fa1ed6a/polo',
+      }),
+      snap({
+        id: 301,
+        hashId: '290fa1ed6a',
+        saleDate: '2026-04-17',
+        scrapedAt: new Date('2026-04-17T18:00:00Z'),
+        status: 'unsold',
+        sourceUrl: 'https://www.vpauto.fr/vehicule/290fa1ed6a/polo',
+      }),
+    ];
+
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = applyPassageNavigation(
+      groups,
+      groups.map((group, index) => buildPassageFromGroup(group, index)),
+    );
+
+    expect(passages[0].openMode).toBe('local');
+    expect(passages[0].isSourceUrlStable).toBe(false);
+    expect(passages[0].openReason).toContain('réutilisée');
+  });
+
+  it('keeps intermediate snapshots local even when the canonical passage can open in VPauto', () => {
+    const snaps = [
+      snap({
+        id: 401,
+        hashId: 'stable-hash',
+        saleDate: '2026-04-17',
+        scrapedAt: new Date('2026-04-16T08:00:00Z'),
+        status: 'available',
+        sourceUrl: 'https://vpauto.fr/vehicule/stable-hash/polo',
+      }),
+      snap({
+        id: 402,
+        hashId: 'stable-hash',
+        saleDate: '2026-04-17',
+        scrapedAt: new Date('2026-04-17T18:00:00Z'),
+        status: 'unsold',
+        sourceUrl: 'https://vpauto.fr/vehicule/stable-hash/polo',
+      }),
+    ];
+
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = applyPassageNavigation(
+      groups,
+      groups.map((group, index) => buildPassageFromGroup(group, index)),
+    );
+
+    expect(passages[0].openMode).toBe('vpauto');
+    expect(passages[0].events).toHaveLength(2);
+    expect(passages[0].events[0].snapshotId).toBe(401);
+    expect(passages[0].events[0].openMode).toBe('local');
+    expect(passages[0].events[0].openReason).toContain('intermédiaire');
+    expect(passages[0].events[1].snapshotId).toBe(402);
+    expect(passages[0].events[1].openMode).toBe('vpauto');
+  });
+
+  it('allows the latest canonical passage to open in VPauto even if the same hash was reused earlier', () => {
+    const snaps = [
+      snap({
+        id: 201,
+        hashId: '290fa1ed6a',
+        saleDate: '2026-04-14',
+        scrapedAt: new Date('2026-04-14T18:00:00Z'),
+        status: 'unsold',
+        sourceUrl: 'https://vpauto.fr/vehicule/290fa1ed6a/polo',
+      }),
+      snap({
+        id: 301,
+        hashId: '290fa1ed6a',
+        saleDate: '2026-04-17',
+        scrapedAt: new Date('2026-04-17T18:00:00Z'),
+        status: 'unsold',
+        sourceUrl: 'https://www.vpauto.fr/vehicule/290fa1ed6a/polo',
+      }),
+    ];
+
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = applyPassageNavigation(
+      groups,
+      groups.map((group, index) => buildPassageFromGroup(group, index)),
+    );
+
+    expect(passages[1].openMode).toBe('vpauto');
+    expect(passages[1].isSourceUrlStable).toBe(true);
+    expect(passages[1].events.at(-1)?.openMode).toBe('vpauto');
   });
 });
 

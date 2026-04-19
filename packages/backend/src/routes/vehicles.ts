@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { prisma } from '../db.js';
 import {
+  applyPassageNavigation,
   buildPassageFromGroup,
   buildPriceHistory,
   computeEvolution,
@@ -9,9 +10,69 @@ import {
 } from '../history.js';
 import { findExactVehicle, findMatches } from '../matching.js';
 import { parsePhotoUrls, snapshotToApi } from '../utils.js';
-import type { VehicleSnapshot, VehicleHistory, VehiclePassage, VehiclePriceEvolution, VehicleBadge, BadgeType, ApiResponse } from '@vpauto/shared';
+import type {
+  VehicleSnapshot,
+  VehicleHistory,
+  VehiclePassage,
+  VehiclePriceEvolution,
+  VehicleBadge,
+  BadgeType,
+  ApiResponse,
+  VehicleHistorySnapshotResponse,
+} from '@vpauto/shared';
 
 const app = new Hono();
+
+function buildVehicleIdentity(vehicle: {
+  reference: string | null;
+  hashId: string | null;
+  brand: string;
+  model: string;
+  version: string;
+  year: number;
+  color: string;
+  fuel: string;
+  transmission: string;
+  engineSize: number | null;
+  power: number | null;
+  fiscalPower: number | null;
+}, overrides?: { reference?: string | null; hashId?: string | null }) {
+  return {
+    reference: overrides?.reference ?? vehicle.reference ?? '',
+    hashId: overrides?.hashId ?? vehicle.hashId ?? '',
+    brand: vehicle.brand,
+    model: vehicle.model,
+    version: vehicle.version,
+    year: vehicle.year,
+    color: vehicle.color,
+    fuel: vehicle.fuel,
+    transmission: vehicle.transmission,
+    engineSize: vehicle.engineSize ?? undefined,
+    power: vehicle.power ?? undefined,
+    fiscalPower: vehicle.fiscalPower ?? undefined,
+  };
+}
+
+async function loadHistorySnapshotsForIdentity(input: {
+  vehicleId: number;
+  reference?: string | null;
+  hashId?: string | null;
+}) {
+  const or = [{ vehicleId: input.vehicleId }] as { vehicleId?: number; reference?: string; hashId?: string }[];
+
+  if (input.reference) {
+    or.push({ reference: input.reference });
+  }
+
+  if (input.hashId) {
+    or.push({ hashId: input.hashId });
+  }
+
+  return prisma.snapshot.findMany({
+    where: { OR: or },
+    orderBy: { scrapedAt: 'asc' },
+  });
+}
 
 function toSnapshotWriteData(vehicleId: number, data: VehicleSnapshot) {
   return {
@@ -452,29 +513,24 @@ app.get('/history/:vehicleId', async (c) => {
     return c.json<ApiResponse<null>>({ success: false, error: 'Vehicle not found' }, 404);
   }
 
+  const historyReference = vehicle.reference || vehicle.snapshots.find((item) => item.reference)?.reference || null;
+
   // Delegate to pure helpers so the logic is unit-testable without a DB.
-  const sortedGroups = groupSnapshotsIntoPassages(vehicle.snapshots);
-  const passages: VehiclePassage[] = sortedGroups.map((g, idx) => buildPassageFromGroup(g, idx));
+  const historySnapshots = await loadHistorySnapshotsForIdentity({
+    vehicleId: vehicle.id,
+    reference: historyReference,
+    hashId: vehicle.hashId,
+  });
+  const sortedGroups = groupSnapshotsIntoPassages(historySnapshots);
+  const rawPassages: VehiclePassage[] = sortedGroups.map((g, idx) => buildPassageFromGroup(g, idx));
+  const passages = applyPassageNavigation(sortedGroups, rawPassages);
   const priceHistory = buildPriceHistory(passages);
   const mileageHistory = passages.map((p) => ({ date: p.date, mileage: p.mileage }));
   const evolution = computeEvolution(passages);
 
   const history: VehicleHistory = {
     vehicleId: vehicle.id,
-    identity: {
-      reference: vehicle.reference ?? '',
-      hashId: vehicle.hashId ?? '',
-      brand: vehicle.brand,
-      model: vehicle.model,
-      version: vehicle.version,
-      year: vehicle.year,
-      color: vehicle.color,
-      fuel: vehicle.fuel,
-      transmission: vehicle.transmission,
-      engineSize: vehicle.engineSize ?? undefined,
-      power: vehicle.power ?? undefined,
-      fiscalPower: vehicle.fiscalPower ?? undefined,
-    },
+    identity: buildVehicleIdentity(vehicle, { reference: historyReference, hashId: vehicle.hashId }),
     passages,
     totalPassages: passages.length,
     firstSeen: vehicle.firstSeenAt.toISOString(),
@@ -485,6 +541,64 @@ app.get('/history/:vehicleId', async (c) => {
   };
 
   return c.json<ApiResponse<VehicleHistory>>({ success: true, data: history });
+});
+
+// ── Get one exact historical snapshot, reconstructed from the local DB ──
+app.get('/history-snapshot/:snapshotId', async (c) => {
+  const snapshotId = parseInt(c.req.param('snapshotId'));
+
+  if (!Number.isFinite(snapshotId)) {
+    return c.json<ApiResponse<null>>({ success: false, error: 'Invalid snapshotId' }, 400);
+  }
+
+  const snapshot = await prisma.snapshot.findUnique({
+    where: { id: snapshotId },
+    include: { vehicle: true },
+  });
+
+  if (!snapshot || !snapshot.vehicle) {
+    return c.json<ApiResponse<null>>({ success: false, error: 'Snapshot not found' }, 404);
+  }
+
+  const relatedSnapshots = await prisma.snapshot.findMany({
+    where: {
+      OR: [
+        { vehicleId: snapshot.vehicleId },
+        ...(snapshot.reference ? [{ reference: snapshot.reference }] : []),
+        ...(snapshot.hashId ? [{ hashId: snapshot.hashId }] : []),
+      ],
+    },
+    orderBy: { scrapedAt: 'asc' },
+  });
+
+  const groups = groupSnapshotsIntoPassages(relatedSnapshots);
+  const passageIndex = groups.findIndex((group) =>
+    group.snapshots.some((item) => item.id === snapshot.id),
+  );
+
+  if (passageIndex < 0) {
+    return c.json<ApiResponse<null>>({ success: false, error: 'Snapshot passage not found' }, 404);
+  }
+
+  const response: VehicleHistorySnapshotResponse = {
+    vehicleId: snapshot.vehicle.id,
+    identity: buildVehicleIdentity(snapshot.vehicle, {
+      reference: snapshot.reference ?? snapshot.vehicle.reference,
+      hashId: snapshot.hashId ?? snapshot.vehicle.hashId,
+    }),
+    snapshot: snapshotToApi(snapshot),
+    passageNumber: passageIndex + 1,
+    totalPassages: groups.length,
+    meta: {
+      city: snapshot.city,
+      center: snapshot.center ?? undefined,
+      status: snapshot.status as VehicleHistorySnapshotResponse['meta']['status'],
+      saleDate: snapshot.saleDate ?? undefined,
+      saleTime: snapshot.saleTime ?? undefined,
+    },
+  };
+
+  return c.json<ApiResponse<VehicleHistorySnapshotResponse>>({ success: true, data: response });
 });
 
 // ── Get vehicle by reference or hashId ──
@@ -862,10 +976,22 @@ app.get('/cross-auction/:hashId', async (c) => {
     return c.json<ApiResponse<null>>({ success: true, data: null });
   }
 
-  // Group snapshots by city+saleDate to represent each auction passage
+  const historyReference = vehicle.reference || vehicle.snapshots.find((item) => item.reference)?.reference || null;
+  const historySnapshots = await loadHistorySnapshotsForIdentity({
+    vehicleId: vehicle.id,
+    reference: historyReference,
+    hashId: vehicle.hashId,
+  });
+  const groups = groupSnapshotsIntoPassages(historySnapshots);
+  const rawPassages = groups.map((group, index) => buildPassageFromGroup(group, index));
+  const resolvedPassages = applyPassageNavigation(groups, rawPassages);
+
   const passages: {
+    snapshotId: number;
+    canonicalSnapshotId: number;
     city: string;
     saleDate: string;
+    saleTime: string | null;
     status: string;
     startingPrice: number | null;
     soldPrice: number | null;
@@ -873,23 +999,30 @@ app.get('/cross-auction/:hashId', async (c) => {
     mileage: number;
     scrapedAt: string;
     sourceUrl: string;
+    isSourceUrlStable: boolean;
+    openMode: VehiclePassage['openMode'];
+    openReason: string;
   }[] = [];
 
-  const seen = new Set<string>();
-  for (const s of vehicle.snapshots) {
-    const key = `${s.city}-${s.saleDate || s.scrapedAt.toISOString().split('T')[0]}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+  for (const [index, group] of groups.entries()) {
+    const passage = resolvedPassages[index];
+    const s = group.canonical;
     passages.push({
-      city: s.city,
-      saleDate: s.saleDate || s.scrapedAt.toISOString().split('T')[0],
-      status: s.status,
-      startingPrice: s.startingPrice,
-      soldPrice: s.soldPrice,
-      lotNumber: s.lotNumber,
-      mileage: s.mileage,
+      snapshotId: passage.snapshotId,
+      canonicalSnapshotId: passage.canonicalSnapshotId,
+      city: passage.city,
+      saleDate: passage.date,
+      saleTime: passage.saleTime ?? null,
+      status: passage.status,
+      startingPrice: passage.startingPrice ?? null,
+      soldPrice: passage.soldPrice ?? null,
+      lotNumber: passage.lotNumber ?? null,
+      mileage: passage.mileage,
       scrapedAt: s.scrapedAt.toISOString(),
-      sourceUrl: s.sourceUrl,
+      sourceUrl: passage.sourceUrl,
+      isSourceUrlStable: passage.isSourceUrlStable,
+      openMode: passage.openMode,
+      openReason: passage.openReason,
     });
   }
 
@@ -909,7 +1042,7 @@ app.get('/cross-auction/:hashId', async (c) => {
       year: vehicle.year,
       passages,
       // The first ever starting price we recorded
-      firstStartingPrice: vehicle.snapshots
+      firstStartingPrice: historySnapshots
         .filter(s => s.startingPrice != null)
         .sort((a, b) => a.scrapedAt.getTime() - b.scrapedAt.getTime())[0]?.startingPrice || null,
     },

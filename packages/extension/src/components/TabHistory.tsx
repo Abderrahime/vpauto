@@ -1,4 +1,5 @@
 import React from 'react';
+import { browser } from 'wxt/browser';
 import type { VehicleHistory, VehicleSnapshot, VehiclePassage } from '@vpauto/shared';
 import PriceChart from './PriceChart';
 
@@ -54,13 +55,13 @@ export default function TabHistory({ history, snapshot, vehicleId }: Props) {
                 <strong>Passage {p.passageNumber}</strong> – {formatDate(p.date)}, {p.city} :{' '}
                 <PassagePriceSummary p={p} />{' '}
                 <a
-                  href={p.sourceUrl}
+                  href={historyPassageHref(p)}
                   target="_blank"
                   rel="noreferrer"
                   className="vpa-history-banner-link"
-                  title="Voir la fiche de ce passage"
+                  title={p.openMode === 'vpauto' ? 'Voir la fiche VPauto de ce passage' : 'Voir la fiche historique de ce passage'}
                 >
-                  🔗 lien
+                  {p.openMode === 'vpauto' ? '🔗 fiche VPauto' : '🔗 fiche locale'}
                 </a>
               </li>
             ))}
@@ -146,10 +147,15 @@ export default function TabHistory({ history, snapshot, vehicleId }: Props) {
               )}
             </div>
             {p.observations && <div className="vpa-passage-obs">{p.observations}</div>}
-            {p.sourceUrl && (
+            {p.snapshotId && (
               <div style={{ marginTop: 5 }}>
-                <a href={p.sourceUrl} target="_blank" rel="noreferrer" className="vpa-passage-link">
-                  🔗 Voir la fiche de ce passage
+                <a
+                  href={historyPassageHref(p)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="vpa-passage-link"
+                >
+                  {p.openMode === 'vpauto' ? '🔗 Voir la fiche VPauto' : '🔗 Voir la fiche historique'}
                 </a>
               </div>
             )}
@@ -201,4 +207,12 @@ function statusLabel(s: string) {
     case 'auction_live': return '🔴 En cours';
     default: return s;
   }
+}
+
+function historyPassageHref(p: VehiclePassage): string {
+  if (p.openMode === 'vpauto' && p.sourceUrl) {
+    return p.sourceUrl;
+  }
+
+  return browser.runtime.getURL(`/history-snapshot.html?snapshotId=${p.snapshotId}`);
 }

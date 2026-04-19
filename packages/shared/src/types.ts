@@ -116,22 +116,46 @@ export interface VehicleComparison {
 
 // ── History ──
 
+export type VehicleHistoryOpenMode = 'vpauto' | 'local';
+
+export interface VehiclePassageEvent {
+  snapshotId: number;
+  scrapedAt: string;
+  saleDate?: string;
+  saleTime?: string;
+  status: VehicleStatus;
+  startingPrice?: number;
+  soldPrice?: number;
+  mileage: number;
+  sourceUrl: string;
+  openMode: VehicleHistoryOpenMode;
+  openReason: string;
+}
+
 export interface VehiclePassage {
   /** 1-based passage number, oldest first */
   passageNumber: number;
   snapshotId: number;
+  canonicalSnapshotId: number;
   date: string;
+  saleTime?: string;
   city: string;
   center?: string;
   status: VehicleStatus;
   startingPrice?: number;
   soldPrice?: number;
   mileage: number;
+  lotNumber?: number;
   observations?: string;
   technicalCheckUrl?: string;
   /** Link to the listing page of this specific passage */
   sourceUrl: string;
+  isSourceUrlStable: boolean;
+  openMode: VehicleHistoryOpenMode;
+  openReason: string;
   photoUrl?: string;
+  /** Distinct business-level changes observed within the same auction passage. */
+  events: VehiclePassageEvent[];
   /**
    * Distinct MAP values observed during this passage's listing window,
    * oldest first. Populated only when the seller changed the reserve
@@ -169,6 +193,21 @@ export interface VehicleHistory {
   priceHistory: { date: string; price: number; label?: string }[];
   mileageHistory: { date: string; mileage: number }[];
   evolution: VehiclePriceEvolution;
+}
+
+export interface VehicleHistorySnapshotResponse {
+  vehicleId: number;
+  identity: VehicleIdentity;
+  snapshot: VehicleSnapshot;
+  passageNumber: number;
+  totalPassages: number;
+  meta: {
+    city: string;
+    center?: string;
+    status: VehicleStatus;
+    saleDate?: string;
+    saleTime?: string;
+  };
 }
 
 // ── Badge types ──

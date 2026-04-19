@@ -1,5 +1,12 @@
 import { DEFAULT_API_URL } from '@vpauto/shared';
-import type { ApiResponse, VehicleSnapshot, VehicleHistory, VehicleBadge, MatchResult } from '@vpauto/shared';
+import type {
+  ApiResponse,
+  VehicleSnapshot,
+  VehicleHistory,
+  VehicleBadge,
+  MatchResult,
+  VehicleHistorySnapshotResponse,
+} from '@vpauto/shared';
 
 const API_URL = DEFAULT_API_URL;
 
@@ -230,6 +237,10 @@ export const api = {
     return request<VehicleHistory>(`/api/vehicles/history/${vehicleId}`);
   },
 
+  getHistorySnapshot(snapshotId: number) {
+    return request<VehicleHistorySnapshotResponse>(`/api/vehicles/history-snapshot/${snapshotId}`);
+  },
+
   getBadges(vehicleId: number) {
     return request<VehicleBadge[]>(`/api/vehicles/badges/${vehicleId}`);
   },
@@ -340,8 +351,11 @@ export const api = {
       model: string;
       year: number;
       passages: {
+        snapshotId: number;
+        canonicalSnapshotId: number;
         city: string;
         saleDate: string;
+        saleTime: string | null;
         status: string;
         startingPrice: number | null;
         soldPrice: number | null;
@@ -349,6 +363,9 @@ export const api = {
         mileage: number;
         scrapedAt: string;
         sourceUrl: string;
+        isSourceUrlStable: boolean;
+        openMode: 'vpauto' | 'local';
+        openReason: string;
       }[];
       firstStartingPrice: number | null;
     }>(`/api/vehicles/cross-auction/${hashId}`);

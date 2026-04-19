@@ -49,8 +49,11 @@ interface CrossAuctionData {
   model: string;
   year: number;
   passages: {
+    snapshotId: number;
+    canonicalSnapshotId: number;
     city: string;
     saleDate: string;
+    saleTime: string | null;
     status: string;
     startingPrice: number | null;
     soldPrice: number | null;
@@ -58,6 +61,9 @@ interface CrossAuctionData {
     mileage: number;
     scrapedAt: string;
     sourceUrl: string;
+    isSourceUrlStable: boolean;
+    openMode: 'vpauto' | 'local';
+    openReason: string;
   }[];
   firstStartingPrice: number | null;
 }
@@ -197,6 +203,7 @@ const numberFormatter = new Intl.NumberFormat('fr-FR');
 const dateFormatter = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium' });
 
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let countdownTimer: ReturnType<typeof setInterval> | null = null;
 let showDebug = false;
 let hasRenderedOnce = false;
 let isRefreshing = false;
@@ -1143,21 +1150,182 @@ async function refreshPanel(): Promise<void> {
   }
 }
 
-function bindActions(state: StoredPanelState): void {
-  document.querySelector<HTMLButtonElement>('[data-action="refresh"]')
-    ?.addEventListener('click', () => void refreshPanel());
+let tweaksOutsideClickBound = false;
 
-  document.querySelector<HTMLButtonElement>('[data-action="open-source"]')
-    ?.addEventListener('click', () => {
+/**
+ * Wire the floating Tweaks panel: toggle open/close, accent swatch picker,
+ * density (cozy/compact), and paper (warm/cool/pure). All state is expressed
+ * as CSS custom props / data-attrs on the document root so the styles pick
+ * the changes up automatically, and user preferences survive re-renders by
+ * being persisted through `browser.storage.local` under the `ui` key.
+ */
+function bindTweaksPanel(): void {
+  const panel = document.getElementById('tweaks');
+  const toggleBtn = document.querySelector<HTMLButtonElement>('[data-action="toggle-tweaks"]');
+  toggleBtn?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (!panel) return;
+    const willOpen = !panel.classList.contains('on');
+    panel.classList.toggle('on', willOpen);
+    toggleBtn.classList.toggle('active', willOpen);
+  });
+
+  // Outside click: closed via a single document-level listener installed once,
+  // not once per render (otherwise we'd pile up handlers on every refresh).
+  if (!tweaksOutsideClickBound) {
+    document.addEventListener('click', (event) => {
+      const panelEl = document.getElementById('tweaks');
+      if (!panelEl || !panelEl.classList.contains('on')) return;
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (panelEl.contains(target)) return;
+      const currentToggle = document.querySelector<HTMLButtonElement>('[data-action="toggle-tweaks"]');
+      if (currentToggle && currentToggle.contains(target)) return;
+      panelEl.classList.remove('on');
+      currentToggle?.classList.remove('active');
+    });
+    tweaksOutsideClickBound = true;
+  }
+
+  const currentAccent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+  document.querySelectorAll<HTMLButtonElement>('[data-accent]').forEach((btn) => {
+    // Mirror the saved accent onto the swatch ring.
+    if (btn.dataset.accent && currentAccent && btn.dataset.accent.toLowerCase() === currentAccent.toLowerCase()) {
+      document.querySelectorAll<HTMLButtonElement>('[data-accent]').forEach((b) => b.classList.remove('on'));
+      btn.classList.add('on');
+    }
+    btn.addEventListener('click', () => {
+      const color = btn.dataset.accent;
+      if (!color) return;
+      document.documentElement.style.setProperty('--accent', color);
+      document.querySelectorAll<HTMLButtonElement>('[data-accent]').forEach((b) => b.classList.remove('on'));
+      btn.classList.add('on');
+      persistUiPref({ accent: color });
+    });
+  });
+
+  const densitySel = document.querySelector<HTMLSelectElement>('[data-tweak="density"]');
+  if (densitySel) {
+    densitySel.value = document.documentElement.dataset.density || 'cozy';
+    densitySel.addEventListener('change', (event) => {
+      const value = (event.currentTarget as HTMLSelectElement).value;
+      document.documentElement.dataset.density = value;
+      persistUiPref({ density: value });
+    });
+  }
+
+  const paperSel = document.querySelector<HTMLSelectElement>('[data-tweak="paper"]');
+  if (paperSel) {
+    paperSel.value = document.documentElement.dataset.paper || 'warm';
+    paperSel.addEventListener('change', (event) => {
+      const value = (event.currentTarget as HTMLSelectElement).value;
+      document.documentElement.dataset.paper = value;
+      persistUiPref({ paper: value });
+    });
+  }
+}
+
+/**
+ * Re-arm the T−HH:MM:SS countdown ticker. Called once per render; the
+ * previous interval is cleared so only one timer ever runs. The DOM hook is
+ * a single `[data-countdown]` element whose sibling `.ticker` element carries
+ * the sale date/time data-attributes.
+ */
+function startTickerCountdown(): void {
+  if (countdownTimer) {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+  }
+  const tickerEl = document.querySelector<HTMLElement>('.ticker');
+  const valueEl = tickerEl?.querySelector<HTMLElement>('[data-countdown]');
+  if (!tickerEl || !valueEl) return;
+  const saleDate = tickerEl.dataset.saleDate;
+  if (!saleDate) return;
+  const rawTime = tickerEl.dataset.saleTime || '';
+  const timePart = /^\d{1,2}:\d{2}/.test(rawTime) ? rawTime.slice(0, 5) : '10:00';
+  const target = new Date(`${saleDate}T${timePart}:00`);
+  if (Number.isNaN(target.getTime())) return;
+
+  const tick = (): void => {
+    const diff = target.getTime() - Date.now();
+    if (diff <= 0) {
+      valueEl.textContent = 'EN COURS';
+      if (countdownTimer) {
+        clearInterval(countdownTimer);
+        countdownTimer = null;
+      }
+      return;
+    }
+    const totalSeconds = Math.floor(diff / 1000);
+    const h = String(Math.floor(totalSeconds / 3600)).padStart(2, '0');
+    const m = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0');
+    const s = String(totalSeconds % 60).padStart(2, '0');
+    valueEl.textContent = `${h}:${m}:${s}`;
+  };
+  tick();
+  countdownTimer = setInterval(tick, 1000);
+}
+
+/**
+ * Persist a partial UI preference patch under `storage.local.ui`. Reads the
+ * existing blob, merges, and writes back — non-critical so failures are
+ * swallowed silently to avoid console noise on every tweak.
+ */
+function persistUiPref(patch: Record<string, string>): void {
+  void (async () => {
+    try {
+      const current = await browser.storage.local.get('ui');
+      const ui = (current?.ui as Record<string, string>) || {};
+      await browser.storage.local.set({ ui: { ...ui, ...patch } });
+    } catch {
+      /* ignore */
+    }
+  })();
+}
+
+/**
+ * Apply the saved UI preferences (accent / density / paper) to the document
+ * root as early as possible. Runs once at module init so the first paint
+ * already reflects the user's choices rather than flashing the defaults.
+ */
+function applySavedUiPrefs(): void {
+  void (async () => {
+    try {
+      const stored = await browser.storage.local.get('ui');
+      const ui = (stored?.ui as Record<string, string>) || {};
+      if (ui.accent) document.documentElement.style.setProperty('--accent', ui.accent);
+      if (ui.density) document.documentElement.dataset.density = ui.density;
+      if (ui.paper) document.documentElement.dataset.paper = ui.paper;
+    } catch {
+      /* ignore */
+    }
+  })();
+}
+
+applySavedUiPrefs();
+
+function bindActions(state: StoredPanelState): void {
+  // Refresh and Open-source buttons can appear twice (header icon + footer button);
+  // bind every match so either triggers the action.
+  document.querySelectorAll<HTMLButtonElement>('[data-action="refresh"]').forEach((btn) => {
+    btn.addEventListener('click', () => void refreshPanel());
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('[data-action="open-source"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
       const url = state.currentVehicle?.snapshot?.sourceUrl;
       if (url) void browser.tabs.create({ url });
     });
+  });
 
   document.querySelector<HTMLButtonElement>('[data-action="toggle-debug"]')
     ?.addEventListener('click', () => {
       showDebug = !showDebug;
       void refreshPanel();
     });
+
+  bindTweaksPanel();
+  startTickerCountdown();
 
   document.querySelector<HTMLSelectElement>('[data-import-scope]')
     ?.addEventListener('change', (event) => {
@@ -1231,6 +1399,20 @@ function bindActions(state: StoredPanelState): void {
     el.addEventListener('click', () => {
       const url = el.dataset.vehicleUrl;
       if (url) void browser.tabs.create({ url });
+    });
+  });
+
+  document.querySelectorAll<HTMLElement>('[data-history-open-mode]').forEach((el) => {
+    el.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const rawId = el.dataset.historySnapshotId;
+      const snapshotId = rawId ? parseInt(rawId, 10) : NaN;
+      openHistoryTarget({
+        openMode: el.dataset.historyOpenMode,
+        snapshotId: Number.isFinite(snapshotId) ? snapshotId : null,
+        sourceUrl: el.dataset.historySourceUrl || '',
+      });
     });
   });
 }
@@ -1327,9 +1509,9 @@ function renderVehicleState(input: {
 
   return `
     <div class="panel">
-      ${renderHeader(title, subtitle, isApiOnline)}
-
-      ${renderStatusBar(snapshot, vehicleId, isNew)}
+      ${renderHeader(title, subtitle, isApiOnline, { showTitle: false })}
+      ${renderTicker(snapshot)}
+      ${renderVehicleHero(snapshot, startingPrice, similarSold ?? null, vehicleId, isNew)}
 
       ${renderSoldBanner(snapshot, startingPrice)}
 
@@ -1348,6 +1530,7 @@ function renderVehicleState(input: {
       ${renderHistorySection(enrichedHistory, vehicleId, snapshot)}
       ${renderPriceChart(enrichedHistory)}
       ${renderActionsBar(true)}
+      ${renderTweaksPanel()}
       ${showDebug ? renderDebugCard(isApiOnline, input.currentVehicleList, scrapeDebug, input.backgroundDebug) : ''}
     </div>
   `;
@@ -1377,6 +1560,7 @@ function renderListState(state: StoredPanelState, isApiOnline: boolean): string 
       ${hasVehicles ? renderVehicleList(list) : renderEmptyState(isApiOnline)}
 
       ${renderActionsBar(false)}
+      ${renderTweaksPanel()}
       ${showDebug ? renderDebugCard(isApiOnline, list, debug, state.backgroundDebug) : ''}
     </div>
   `;
@@ -1384,21 +1568,36 @@ function renderListState(state: StoredPanelState, isApiOnline: boolean): string 
 
 // ── Shared Components ────────────────────────────────────────────────────
 
-function renderHeader(title: string, subtitle: string, isApiOnline: boolean): string {
+function renderHeader(title: string, subtitle: string, isApiOnline: boolean, opts?: { showTitle?: boolean }): string {
+  const showTitle = opts?.showTitle !== false;
+  const statusLabel = isApiOnline ? 'CONNECTÉ · TERMINAL 2.4' : 'HORS LIGNE · MODE LOCAL';
   return `
-    <header class="hero">
+    <header class="hero ext-head">
       <div class="hero__brand">
-        <div class="hero__logo">VP</div>
-        <div>
-          <p class="hero__eyebrow">VPauto Assistant</p>
-          <div class="hero__status">
+        <div class="hero__logo ext-logo">vP</div>
+        <div class="ext-head-text">
+          <div class="a">${esc(title)}</div>
+          <div class="b">
             <span class="status-dot ${isApiOnline ? 'status-dot--ok' : 'status-dot--off'}"></span>
-            <span class="hero__status-text">${isApiOnline ? 'Connecte' : 'Hors ligne'}</span>
+            ${esc(statusLabel)}
           </div>
         </div>
       </div>
-      <h1 class="hero__title">${esc(title)}</h1>
-      <p class="hero__subtitle">${esc(subtitle)}</p>
+      <div class="head-btns">
+        <button class="ibtn" type="button" data-action="toggle-tweaks" title="Tweaks" aria-label="Ouvrir les tweaks">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        </button>
+        <button class="ibtn" type="button" data-action="open-source" title="Ouvrir la fiche" aria-label="Ouvrir la fiche source">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+        </button>
+        <button class="ibtn" type="button" data-action="refresh" title="Rafraîchir" aria-label="Rafraîchir">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+        </button>
+      </div>
+      ${showTitle && subtitle ? `
+        <h1 class="hero__title" style="width:100%; flex-basis:100%;">${esc(title === 'VPauto Assistant' ? subtitle : title)}</h1>
+        <p class="hero__subtitle" style="width:100%; flex-basis:100%;">${esc(subtitle)}</p>
+      ` : ''}
     </header>
   `;
 }
@@ -1530,6 +1729,73 @@ function isCurrentAuctionPassage(
   return true;
 }
 
+function openHistorySnapshot(snapshotId: number) {
+  return browser.tabs.create({
+    url: browser.runtime.getURL(`/history-snapshot.html?snapshotId=${encodeURIComponent(String(snapshotId))}`),
+  });
+}
+
+function openHistoryTarget(input: {
+  openMode?: string | null;
+  snapshotId?: number | null;
+  sourceUrl?: string | null;
+}): void {
+  const mode = input.openMode === 'vpauto' && input.sourceUrl ? 'vpauto' : 'local';
+
+  if (mode === 'vpauto' && input.sourceUrl) {
+    void browser.tabs.create({ url: input.sourceUrl });
+    return;
+  }
+
+  if (input.snapshotId != null) {
+    void openHistorySnapshot(input.snapshotId);
+  }
+}
+
+function renderHistoryOpenButton(input: {
+  snapshotId?: number | null;
+  sourceUrl?: string | null;
+  openMode?: string | null;
+  label?: string;
+}): string {
+  if (input.snapshotId == null && !input.sourceUrl) return '';
+
+  const mode = input.openMode === 'vpauto' && input.sourceUrl ? 'vpauto' : 'local';
+  const label = input.label || (mode === 'vpauto' ? 'Ouvrir la fiche VPauto' : 'Ouvrir la fiche historique');
+
+  return `
+    <button
+      class="timeline-link timeline-link--button"
+      type="button"
+      data-history-open-mode="${mode}"
+      data-history-snapshot-id="${input.snapshotId ?? ''}"
+      data-history-source-url="${esc(input.sourceUrl || '')}"
+    >
+      ${esc(label)}
+    </button>
+  `;
+}
+
+function formatHistoryOpenReason(reason?: string | null, openMode?: string | null): string {
+  if (reason) return reason;
+  return openMode === 'vpauto' ? 'URL historique stable' : 'Fiche locale reconstruite';
+}
+
+function formatPassageMoment(input: { saleDate?: string | null; saleTime?: string | null; scrapedAt?: string }): string {
+  if (input.saleDate) {
+    return `${formatDate(input.saleDate)}${input.saleTime ? ` · ${input.saleTime}` : ''}`;
+  }
+  if (input.scrapedAt) return formatDateTime(input.scrapedAt);
+  return 'Date inconnue';
+}
+
+function historyStatusTone(status?: string): 'green' | 'red' | 'blue' | 'amber' {
+  if (status === 'sold') return 'green';
+  if (status === 'unsold' || status === 'removed') return 'red';
+  if (status === 'auction_live') return 'amber';
+  return 'blue';
+}
+
 /**
  * Patch the passage that matches the current snapshot with a MAP resolved from
  * the live list card (or other fallback). This compensates for sold/unsold
@@ -1556,7 +1822,13 @@ function enrichHistoryWithResolvedMap(
     const p = passages[i];
     if ((p.city || '') !== snapshotCity) continue;
     if (p.startingPrice != null) break;
-    passages[i] = { ...p, startingPrice: resolvedStartingPrice };
+    const events = (p.events || []).slice();
+    for (let eventIndex = events.length - 1; eventIndex >= 0; eventIndex--) {
+      if (events[eventIndex].startingPrice != null) break;
+      events[eventIndex] = { ...events[eventIndex], startingPrice: resolvedStartingPrice };
+      break;
+    }
+    passages[i] = { ...p, startingPrice: resolvedStartingPrice, events };
     patched = true;
     break;
   }
@@ -1574,7 +1846,7 @@ function enrichHistoryWithResolvedMap(
 }
 
 function renderHistorySection(history: VehicleHistory | null, vehicleId: number | null | undefined, snapshot: VehicleSnapshot): string {
-  const historicalPassages = history?.passages.filter((passage) => !isCurrentAuctionPassage(passage, snapshot)) || [];
+  const historicalPassages = history?.passages.slice().reverse() || [];
 
   if (!history || historicalPassages.length === 0) {
     return `
@@ -1582,7 +1854,7 @@ function renderHistorySection(history: VehicleHistory | null, vehicleId: number 
         <h2 class="card__title"><span class="card__icon">&#128203;</span> Historique</h2>
         <div class="card__empty">
           ${vehicleId
-            ? "Aucun passage precedent connu pour ce vehicule dans la base locale."
+            ? "Aucun passage connu pour ce vehicule dans la base locale."
             : "Historique indisponible tant que le vehicule n'est pas rattache a un identifiant backend."}
         </div>
       </section>
@@ -1590,27 +1862,57 @@ function renderHistorySection(history: VehicleHistory | null, vehicleId: number 
   }
 
   const items = historicalPassages
-    .slice(-5)
-    .reverse()
-    .map((p, i) => {
-      const isFirst = i === 0;
-      const sourceLink = p.sourceUrl
-        ? ` <a class="timeline-link" href="${esc(p.sourceUrl)}" target="_blank" rel="noreferrer" title="Ouvrir la fiche de ce passage">&#128279; fiche</a>`
-        : '';
+    .map((p) => {
+      const isCurrent = isCurrentAuctionPassage(p, snapshot);
+      const events = p.events?.length
+        ? p.events
+        : [{
+            snapshotId: p.snapshotId,
+            scrapedAt: p.date,
+            saleDate: p.date,
+            saleTime: p.saleTime,
+            status: p.status,
+            startingPrice: p.startingPrice,
+            soldPrice: p.soldPrice,
+            mileage: p.mileage,
+            sourceUrl: p.sourceUrl,
+            openMode: p.openMode,
+            openReason: p.openReason,
+          }];
+      const eventRows = events.map((event, index) => `
+        <div class="timeline-event ${index === events.length - 1 ? 'timeline-event--latest' : ''}">
+          <div class="timeline-event__head">
+            <span class="timeline-event__moment">${esc(formatPassageMoment(event))}</span>
+            <span class="chip chip--${historyStatusTone(event.status)}">${esc(formatStatus(event.status))}</span>
+          </div>
+          <div class="timeline-event__meta">
+            MAP observee: ${formatPrice(event.startingPrice ?? undefined)}${event.soldPrice ? ` · Adjuge: ${formatPrice(event.soldPrice)}` : ''}${event.mileage ? ` · ${formatDistance(event.mileage)}` : ''}
+          </div>
+          <div class="timeline-event__actions">
+            ${renderHistoryOpenButton({
+              snapshotId: event.snapshotId,
+              sourceUrl: event.sourceUrl,
+              openMode: event.openMode,
+            })}
+            <span class="timeline-event__reason">${esc(formatHistoryOpenReason(event.openReason, event.openMode))}</span>
+          </div>
+        </div>
+      `).join('');
       return `
-        <div class="timeline-item ${isFirst ? 'timeline-item--current' : ''}">
+        <div class="timeline-item ${isCurrent ? 'timeline-item--current' : ''}">
           <div class="timeline-dot"></div>
           <div class="timeline-content">
             <div class="timeline-header">
-              <span class="timeline-date">${esc(formatDate(p.date))}${sourceLink}</span>
+              <span class="timeline-date">${esc(formatPassageMoment({ saleDate: p.date, saleTime: p.saleTime }))}</span>
               <span class="timeline-status">${esc(formatStatus(p.status))}</span>
             </div>
             <div class="timeline-body">
-              ${esc(p.city)}${p.center ? ` - ${esc(p.center)}` : ''}
+              ${esc(p.city)}${p.center ? ` - ${esc(p.center)}` : ''}${isCurrent ? ' <span class="timeline-current-badge">Passage courant</span>' : ''}
             </div>
             <div class="timeline-meta">
-              Mise a prix: ${formatPrice(p.startingPrice)}${p.soldPrice ? ` \u2192 Adjuge: ${formatPrice(p.soldPrice)}` : ''}${p.mileage ? ` \u2022 ${formatDistance(p.mileage)}` : ''}
+              Mise a prix passage: ${formatPrice(p.startingPrice)}${p.soldPrice ? ` \u2192 Adjuge: ${formatPrice(p.soldPrice)}` : ''}${p.mileage ? ` \u2022 ${formatDistance(p.mileage)}` : ''} \u2022 ${events.length} variation${events.length > 1 ? 's' : ''}
             </div>
+            <div class="timeline-events">${eventRows}</div>
           </div>
         </div>
       `;
@@ -1625,21 +1927,21 @@ function renderHistorySection(history: VehicleHistory | null, vehicleId: number 
 }
 
 function renderCrossAuction(data: CrossAuctionData | null | undefined, snapshot: VehicleSnapshot): string {
-  const previousPassages = data?.passages.filter((passage) => !isCurrentAuctionPassage(passage, snapshot)) || [];
+  const previousPassages = data?.passages.slice().reverse() || [];
 
   if (!data || previousPassages.length === 0) {
     return `
       <section class="card">
         <h2 class="card__title"><span class="card__icon">&#127758;</span> Parcours multi-encheres</h2>
         <div class="card__empty">
-          Aucun passage precedent connu pour ce vehicule dans la base locale pour le moment.
+          Aucun passage connu pour ce vehicule dans la base locale pour le moment.
         </div>
       </section>
     `;
   }
 
   const items = previousPassages.map(p => {
-    const isCurrent = false;
+    const isCurrent = isCurrentAuctionPassage(p, snapshot);
     const statusLabel = p.status === 'sold' ? 'Vendu' : p.status === 'unsold' ? 'Invendu' : 'Disponible';
     const statusColor = p.status === 'sold' ? 'green' : p.status === 'unsold' ? 'red' : 'blue';
 
@@ -1651,22 +1953,28 @@ function renderCrossAuction(data: CrossAuctionData | null | undefined, snapshot:
       priceHtml = `${formatPrice(p.startingPrice)}`;
     }
 
-    const linkOpen = p.sourceUrl
-      ? `<a class="cross-item cross-item--link ${isCurrent ? 'cross-item--current' : ''}" href="${esc(p.sourceUrl)}" target="_blank" rel="noreferrer" title="Ouvrir la fiche de ce passage">`
-      : `<div class="cross-item ${isCurrent ? 'cross-item--current' : ''}">`;
-    const linkClose = p.sourceUrl ? `</a>` : `</div>`;
-
     return `
-      ${linkOpen}
+      <div class="cross-item ${isCurrent ? 'cross-item--current' : ''}">
         <div class="cross-item__header">
-          <span class="cross-item__city">${esc(p.city)}${p.sourceUrl ? ' <span class="cross-item__link-hint">&#128279;</span>' : ''}</span>
+          <span class="cross-item__city">${esc(p.city)}${isCurrent ? ' <span class="timeline-current-badge">Courant</span>' : ''}</span>
           <span class="chip chip--${statusColor}" style="font-size:9px;padding:2px 6px;">${statusLabel}</span>
         </div>
         <div class="cross-item__detail">
-          <span>${esc(formatDate(p.saleDate))}</span>
+          <span>${esc(formatPassageMoment({ saleDate: p.saleDate, saleTime: p.saleTime, scrapedAt: p.scrapedAt }))}</span>
           <span>${priceHtml}</span>
         </div>
-      ${linkClose}
+        <div class="cross-item__detail cross-item__detail--footer">
+          <span>${formatDistance(p.mileage)}</span>
+          <div class="cross-item__open">
+            ${renderHistoryOpenButton({
+              snapshotId: p.snapshotId,
+              sourceUrl: p.sourceUrl,
+              openMode: p.openMode,
+            })}
+            <span class="timeline-event__reason">${esc(formatHistoryOpenReason(p.openReason, p.openMode))}</span>
+          </div>
+        </div>
+      </div>
     `;
   }).join('');
 
@@ -2514,12 +2822,274 @@ function renderActionsBar(hasSource: boolean): string {
   return `
     <div class="actions-bar">
       <button class="btn btn--primary" type="button" data-action="refresh">
-        &#8635; Rafraichir
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+        Rafraîchir
       </button>
-      ${hasSource ? '<button class="btn btn--ghost" type="button" data-action="open-source">Ouvrir la page &#8599;</button>' : ''}
-      <button class="btn btn--ghost btn--small" type="button" data-action="toggle-debug">
-        ${showDebug ? 'Masquer debug' : 'Debug'}
+      ${hasSource ? `<button class="btn btn--ghost" type="button" data-action="open-source">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+        Ouvrir la page
+      </button>` : ''}
+      <button class="btn btn--ghost btn--small" type="button" data-action="toggle-debug" title="Diagnostic">
+        ${showDebug ? 'Masquer' : 'Debug'}
       </button>
+    </div>
+  `;
+}
+
+// ── Vehicle hero: ref + serif title + mono meta + badges + linear-gauge verdict ──
+
+/**
+ * Format a time-to-sale countdown "T− HH:MM:SS" from a saleDate/saleTime
+ * pair. Returns undefined when no sale is scheduled or when the auction
+ * has already started (the caller then hides the ticker entirely).
+ */
+function computeCountdown(snapshot: VehicleSnapshot): string | undefined {
+  if (!snapshot.saleDate) return undefined;
+  const timePart = snapshot.saleTime && /^\d{1,2}:\d{2}/.test(snapshot.saleTime)
+    ? snapshot.saleTime.slice(0, 5)
+    : '10:00';
+  const target = new Date(`${snapshot.saleDate}T${timePart}:00`);
+  const now = new Date();
+  const diff = target.getTime() - now.getTime();
+  if (Number.isNaN(diff) || diff <= 0) return undefined;
+  const totalSeconds = Math.floor(diff / 1000);
+  const h = String(Math.floor(totalSeconds / 3600)).padStart(2, '0');
+  const m = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0');
+  const s = String(totalSeconds % 60).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+}
+
+function renderTicker(snapshot: VehicleSnapshot): string {
+  const startTime = snapshot.saleTime?.slice(0, 8) || (snapshot.saleDate ? '10:00:00' : '');
+  const countdown = computeCountdown(snapshot);
+  if (!countdown && !startTime) return '';
+  const dateLabel = snapshot.saleDate ? formatDate(snapshot.saleDate).toUpperCase() : 'SANS DATE';
+  return `
+    <div class="ticker" data-sale-date="${esc(snapshot.saleDate || '')}" data-sale-time="${esc(snapshot.saleTime || '')}">
+      <div class="ticker-col">
+        <div class="k">Début vente · ${esc(dateLabel)}</div>
+        <div class="v">${esc(startTime || '—')}</div>
+      </div>
+      <div class="ticker-sep"></div>
+      <div class="ticker-col right">
+        <div class="k">${countdown ? 'T−' : 'STATUT'}</div>
+        <div class="v" data-countdown>${esc(countdown || 'EN COURS')}</div>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * Hero block for a scraped vehicle: reference line, serif title, mono
+ * meta row, and (when enough data) a linear-gauge verdict panel that
+ * shows the MAP and marché markers on the same €/€ scale.
+ */
+function renderVehicleHero(
+  snapshot: VehicleSnapshot,
+  startingPrice: number | undefined,
+  similarSold: SimilarSoldData | null | undefined,
+  vehicleId?: number,
+  isNew?: boolean,
+): string {
+  const brand = (snapshot.brand || '').trim();
+  const model = (snapshot.model || '').trim();
+  const version = (snapshot.version || '').trim();
+  const serifTitle = [brand, model, version].filter(Boolean).join(' ') || 'Véhicule VPauto';
+  const refPart = snapshot.reference ? `Réf. ${snapshot.reference}` : '';
+  const vehiclePart = vehicleId ? `#${vehicleId}` : '';
+  const refLine = [vehiclePart, refPart].filter(Boolean).join(' · ');
+  const metaParts: string[] = [];
+  if (snapshot.year) metaParts.push(String(snapshot.year));
+  if (snapshot.mileage) metaParts.push(formatDistance(snapshot.mileage));
+  if (snapshot.city) metaParts.push(snapshot.city);
+  if (snapshot.vatRecoverable != null) metaParts.push(snapshot.vatRecoverable ? 'TVA récupérable' : 'TVA non');
+
+  const badges: string[] = [];
+  const nonRoulant = isNonRoulant(snapshot);
+  badges.push(`<span class="badge ${nonRoulant ? 'bad' : 'good'}">● ${nonRoulant ? 'Non roulant' : 'Roulant'}</span>`);
+  if (isNew) badges.push('<span class="badge ink">Nouveau</span>');
+  if (snapshot.mileage && snapshot.year) {
+    const age = Math.max(1, new Date().getFullYear() - snapshot.year);
+    const kmPerYear = snapshot.mileage / age;
+    if (kmPerYear > 20000) badges.push('<span class="badge bad">Km élevé</span>');
+    else if (kmPerYear < 8000) badges.push('<span class="badge good">Km faible</span>');
+    else badges.push('<span class="badge warn">Km moyen</span>');
+  }
+  if (snapshot.lotNumber) badges.push(`<span class="badge">Lot ${snapshot.lotNumber}</span>`);
+
+  return `
+    <div class="veh">
+      ${refLine ? `<div class="veh-ref">${esc(refLine)}</div>` : ''}
+      <div class="veh-title">${esc(serifTitle)}</div>
+      ${metaParts.length ? `<div class="veh-meta">${metaParts.map((p, i) =>
+        `<span>${esc(p)}</span>${i < metaParts.length - 1 ? '<span class="sep">/</span>' : ''}`
+      ).join('')}</div>` : ''}
+      ${badges.length ? `<div class="veh-badges">${badges.join('')}</div>` : ''}
+    </div>
+    ${renderVerdict(snapshot, startingPrice, similarSold)}
+  `;
+}
+
+/**
+ * Verdict panel with linear gauge. Only emitted when we have at least a
+ * MAP and either a Cote (marketValue) or a similar-sold average — without
+ * a market reference, there's no verdict to render. The gauge range spans
+ * a "reasonable" € window centered on the marché value, with the MAP and
+ * marché markers positioned on the same axis so the user can eyeball the
+ * bargain at a glance.
+ */
+function renderVerdict(
+  snapshot: VehicleSnapshot,
+  startingPrice: number | undefined,
+  similarSold: SimilarSoldData | null | undefined,
+): string {
+  const marketValue = snapshot.marketValue ?? undefined;
+  const avgSold = similarSold?.stats?.avgSoldPrice ?? undefined;
+  const market = avgSold || marketValue;
+  if (!market) return '';
+
+  const map = startingPrice ?? snapshot.currentAuctionPrice ?? snapshot.soldPrice;
+  // Range: min/max from comparables when available, else ±40% of market.
+  const minSold = similarSold?.stats?.minSoldPrice ?? undefined;
+  const maxSold = similarSold?.stats?.maxSoldPrice ?? undefined;
+  const rangeMin = minSold ?? Math.round(market * 0.85);
+  const rangeMax = maxSold ?? Math.round(market * 1.15);
+
+  // Axis: wider than the range so MAP + extremes fit even when the MAP is
+  // far below the market (typical VPauto case).
+  const axisLo = Math.min(map ?? market, rangeMin) * 0.9;
+  const axisHi = Math.max(map ?? market, rangeMax) * 1.05;
+  const axisSpan = Math.max(axisHi - axisLo, 1);
+  const pct = (v: number) => Math.max(0, Math.min(100, ((v - axisLo) / axisSpan) * 100));
+
+  const rangeLeftPct = pct(rangeMin);
+  const rangeWidthPct = Math.max(2, pct(rangeMax) - rangeLeftPct);
+
+  // Verdict: compare MAP (or sold) against market average. Tunable thresholds.
+  const reference = snapshot.soldPrice ?? map ?? market;
+  const diffPct = ((reference - market) / market) * 100;
+  let tag = 'DANS LE MARCHÉ';
+  let toneClass = 'warn';
+  let title = 'Aligné marché';
+  if (diffPct <= -8) { tag = 'BONNE AFFAIRE'; toneClass = ''; title = `${Math.round(diffPct)} % sous la cote`; }
+  else if (diffPct >= 8) { tag = 'ATTENTION'; toneClass = 'bad'; title = `+${Math.round(diffPct)} % au-dessus de la moy.`; }
+  else { title = diffPct === 0 ? 'Aligné marché' : `${diffPct > 0 ? '+' : ''}${Math.round(diffPct)} % vs cote`; }
+
+  const score = Math.max(5, Math.min(95, Math.round(50 - diffPct * 2)));
+  const comparableCount = similarSold?.stats?.count ?? 0;
+  const rangeLabel = `${formatShortPrice(rangeMin)} – ${formatShortPrice(rangeMax)}`;
+  const compLabel = comparableCount
+    ? `${comparableCount} comparable${comparableCount > 1 ? 's' : ''}`
+    : 'base locale';
+
+  // Tick marks at 5 evenly spaced values along the axis.
+  const ticks: number[] = [];
+  for (let i = 0; i < 5; i++) ticks.push(Math.round(axisLo + (axisSpan * i) / 4));
+
+  const ledger: string[] = [];
+  ledger.push(`
+    <div class="ledger-row">
+      <span class="k">Prix moyen adjugé</span>
+      <span class="v">${formatPrice(market)}</span>
+      <span class="d ${diffPct < 0 ? 'down' : diffPct > 0 ? 'up' : ''}">${diffPct === 0 ? 'réf.' : `${diffPct > 0 ? '+' : ''}${Math.round(diffPct)}%`}</span>
+    </div>
+  `);
+  if (marketValue) {
+    const diffVsCote = ((reference - marketValue) / marketValue) * 100;
+    ledger.push(`
+      <div class="ledger-row">
+        <span class="k">Cote Argus</span>
+        <span class="v">${formatPrice(marketValue)}</span>
+        <span class="d ${diffVsCote < 0 ? 'down' : diffVsCote > 0 ? 'up' : ''}">${marketValue === market ? 'réf.' : `${diffVsCote > 0 ? '+' : ''}${Math.round(diffVsCote)}%`}</span>
+      </div>
+    `);
+  }
+  if (snapshot.newPrice) {
+    const diffVsNew = ((reference - snapshot.newPrice) / snapshot.newPrice) * 100;
+    ledger.push(`
+      <div class="ledger-row">
+        <span class="k">Prix neuf constructeur</span>
+        <span class="v">${formatPrice(snapshot.newPrice)}</span>
+        <span class="d down">${Math.round(diffVsNew)}%</span>
+      </div>
+    `);
+  }
+  if (snapshot.mileage && snapshot.year) {
+    const age = Math.max(1, new Date().getFullYear() - snapshot.year);
+    const perYear = Math.round(snapshot.mileage / age);
+    ledger.push(`
+      <div class="ledger-row">
+        <span class="k">Km / an</span>
+        <span class="v">${numberFormatter.format(perYear)}</span>
+        <span class="d">moy. 14k</span>
+      </div>
+    `);
+  }
+
+  return `
+    <div class="verdict${toneClass ? ` ${toneClass}` : ''}">
+      <div class="verdict-head">
+        <span class="verdict-tag">${esc(tag)}</span>
+        <span class="verdict-score">Score <b>${score}</b>/100</span>
+      </div>
+      <div class="verdict-title">${esc(title)}</div>
+      <div class="verdict-sub">Prix moyen adjugé <b class="mono">${formatPrice(market)}</b> · Fourchette <b class="mono">${esc(rangeLabel)}</b> · ${esc(compLabel)}</div>
+
+      <div class="lgauge">
+        <div class="lgauge-track"></div>
+        <div class="lgauge-range" style="left:${rangeLeftPct.toFixed(1)}%; width:${rangeWidthPct.toFixed(1)}%;"></div>
+        <div class="lgauge-mkt" style="left:${pct(market).toFixed(1)}%" data-label="MARCHÉ"></div>
+        ${map ? `<div class="lgauge-mp" style="left:${pct(map).toFixed(1)}%" data-label="MISE À PRIX"></div>` : ''}
+        <div class="lgauge-ticks">
+          ${ticks.map((t) => `<span>${numberFormatter.format(t)}</span>`).join('')}
+        </div>
+      </div>
+
+      <div class="ledger">${ledger.join('')}</div>
+    </div>
+  `;
+}
+
+function formatShortPrice(v: number): string {
+  if (v >= 1000) return `${numberFormatter.format(Math.round(v))} €`;
+  return formatPrice(v);
+}
+
+/**
+ * Floating Tweaks panel — four controls (accent swatch, verdict preview,
+ * density, paper mode). The panel is kept in the DOM on every render so
+ * its open/close state is driven by a single `.on` class toggle; all
+ * settings persist via CSS custom properties / data-attributes on the
+ * document root.
+ */
+function renderTweaksPanel(): string {
+  return `
+    <div class="tweaks" id="tweaks" role="dialog" aria-label="Tweaks">
+      <h3>Tweaks</h3>
+      <div class="tweak">
+        <span>Accent</span>
+        <div class="swatches" data-swatches>
+          <button class="sw on" type="button" style="background:#D64000" data-accent="#D64000" aria-label="Vermillon"></button>
+          <button class="sw" type="button" style="background:#0F3D91" data-accent="#0F3D91" aria-label="Bleu"></button>
+          <button class="sw" type="button" style="background:#1C6E4C" data-accent="#1C6E4C" aria-label="Vert"></button>
+          <button class="sw" type="button" style="background:#14151A" data-accent="#14151A" aria-label="Encre"></button>
+        </div>
+      </div>
+      <div class="tweak">
+        <span>Densité</span>
+        <select data-tweak="density">
+          <option value="cozy">Confortable</option>
+          <option value="compact">Compact</option>
+        </select>
+      </div>
+      <div class="tweak">
+        <span>Papier</span>
+        <select data-tweak="paper">
+          <option value="warm">Warm paper</option>
+          <option value="cool">Cool gray</option>
+          <option value="pure">Pure white</option>
+        </select>
+      </div>
     </div>
   `;
 }
