@@ -108,6 +108,39 @@ interface ScrapeDebugState {
   tabId?: number;
 }
 
+type VerdictTone = 'good' | 'warn' | 'bad';
+
+interface VerdictInsight {
+  tone: VerdictTone;
+  tag: string;
+  title: string;
+  subtitle: string;
+  emoji: string;
+  score: number;
+  market: number;
+  marketLabel: string;
+  rangeMin: number;
+  rangeMax: number;
+  markerPct: number;
+  fillPct: number;
+  diffPct: number;
+  comparableCount: number;
+  kmPerYear?: number;
+  marketValue?: number;
+  referencePrice?: number;
+  referenceLabel?: string;
+}
+
+interface GamificationStats {
+  streak: number;
+  xp: number;
+  level: number;
+  nextLevelXp: number;
+  progressPct: number;
+  goodDeals: number;
+  levelTitle: string;
+}
+
 type ImportScope = 'detected' | 'current_page' | 'first_n' | 'page_range';
 type ImportMode = 'silent' | 'visible';
 
@@ -1239,6 +1272,15 @@ function startTickerCountdown(): void {
   const tickerEl = document.querySelector<HTMLElement>('.ticker');
   const valueEl = tickerEl?.querySelector<HTMLElement>('[data-countdown]');
   if (!tickerEl || !valueEl) return;
+  // Honour the terminal / live status stamped by renderTicker. If the ticker
+  // reports a terminal state (sold/unsold/removed), do not tick — the SSR
+  // label ("ADJUGÉ", "NON ADJUGÉ", "RETIRÉ") must stay put. Without this
+  // guard, the sold→'EN COURS' fallback below would overwrite "ADJUGÉ" one
+  // second later (Toyota Yaris Cross 11403878 regression).
+  const status = tickerEl.dataset.status;
+  if (status === 'sold' || status === 'unsold' || status === 'removed' || status === 'auction_live') {
+    return;
+  }
   const saleDate = tickerEl.dataset.saleDate;
   if (!saleDate) return;
   const rawTime = tickerEl.dataset.saleTime || '';
@@ -1323,6 +1365,12 @@ function bindActions(state: StoredPanelState): void {
       showDebug = !showDebug;
       void refreshPanel();
     });
+
+  document.querySelectorAll<HTMLElement>('.card > .card__title').forEach((title) => {
+    title.addEventListener('click', () => {
+      title.closest('.card')?.classList.toggle('closed');
+    });
+  });
 
   bindTweaksPanel();
   startTickerCountdown();
@@ -1436,10 +1484,6 @@ function renderVehicleState(input: {
   const { currentVehicle, history, badges, crossAuction, similarAvailable, similarSold, isApiOnline, scrapeDebug } = input;
   const currentList = input.currentVehicleList || [];
   const { snapshot, vehicleId, isNew } = currentVehicle;
-  const title = [snapshot.brand, snapshot.model].filter(Boolean).join(' ').trim() || 'Vehicule VPauto';
-  const subtitle = [snapshot.year || undefined, snapshot.city || undefined, snapshot.reference || undefined]
-    .filter(Boolean)
-    .join(' \u2022 ');
   const visitKey = vehicleId
     ? `vehicle:${vehicleId}`
     : snapshot.hashId
@@ -1496,6 +1540,8 @@ function renderVehicleState(input: {
   // Patch the server-side history with the live-resolved MAP so the history
   // section and price chart stay in sync. Compute once, reuse twice.
   const enrichedHistory = enrichHistoryWithResolvedMap(history, snapshot, startingPrice);
+  const verdictInsight = buildVerdictInsight(snapshot, startingPrice, similarSold);
+  const gamification = buildGamificationStats(snapshot, verdictInsight, badges, enrichedHistory, isNew);
 
   // Build metrics dynamically — only show metrics with real data
   const metrics: string[] = [];
@@ -1528,15 +1574,17 @@ function renderVehicleState(input: {
   const profitLine = (snapshot.soldPrice && startingPrice)
     ? renderProfitLine(startingPrice, snapshot.soldPrice, snapshot.marketValue, snapshot.newPrice)
     : '';
+  const updatedAt = scrapeDebug?.timestamp || snapshot.scrapedAt;
 
   return `
     <div class="panel">
-      ${renderHeader(title, subtitle, isApiOnline, { showTitle: false })}
+      ${renderHeader(isApiOnline, gamification)}
       <div class="panel-scroll">
         ${renderTicker(snapshot)}
-        ${renderVehicleHero(snapshot, startingPrice, similarSold ?? null, vehicleId, isNew)}
+        ${renderVehicleHero(snapshot, vehicleId)}
 
         ${renderSoldBanner(snapshot, startingPrice)}
+        ${renderVerdict(snapshot, startingPrice, similarSold, verdictInsight)}
 
         <div class="metrics-grid">
           ${metrics.join('')}
@@ -1553,6 +1601,8 @@ function renderVehicleState(input: {
         ${renderHistorySection(enrichedHistory, vehicleId, snapshot)}
         ${renderPriceChart(enrichedHistory)}
         ${showDebug ? renderDebugCard(isApiOnline, input.currentVehicleList, scrapeDebug, input.backgroundDebug) : ''}
+        ${renderGamificationSection(gamification)}
+        ${renderUpdatedLine(updatedAt, isApiOnline)}
       </div>
       ${renderActionsBar(true)}
       ${renderTweaksPanel()}
@@ -1568,14 +1618,12 @@ function renderListState(state: StoredPanelState, isApiOnline: boolean): string 
   const debug = state.scrapeDebug;
 
   const hasVehicles = list && list.length > 0;
-  const title = hasVehicles ? `${list.length} vehicules detectes` : 'VPauto Assistant';
-  const subtitle = hasVehicles
-    ? (debug?.stage?.includes('scraping') ? 'Scraping en cours...' : 'Liste analysee')
-    : 'En attente de donnees...';
+  const gamification = buildListGamificationStats(list || [], tracking);
+  const updatedAt = tracking?.timestamp || debug?.timestamp;
 
   return `
     <div class="panel">
-      ${renderHeader(title, subtitle, isApiOnline)}
+      ${renderHeader(isApiOnline, gamification)}
       <div class="panel-scroll">
         ${hasVehicles ? renderAuctionSummary(list) : ''}
         ${tracking ? renderTrackingAlerts(tracking) : ''}
@@ -1583,6 +1631,7 @@ function renderListState(state: StoredPanelState, isApiOnline: boolean): string 
         ${hasVehicles ? renderImportSection(state, isApiOnline) : ''}
         ${hasVehicles ? renderVehicleList(list) : renderEmptyState(isApiOnline)}
         ${showDebug ? renderDebugCard(isApiOnline, list, debug, state.backgroundDebug) : ''}
+        ${renderUpdatedLine(updatedAt, isApiOnline)}
       </div>
       ${renderActionsBar(false)}
       ${renderTweaksPanel()}
@@ -1592,36 +1641,29 @@ function renderListState(state: StoredPanelState, isApiOnline: boolean): string 
 
 // ── Shared Components ────────────────────────────────────────────────────
 
-function renderHeader(title: string, subtitle: string, isApiOnline: boolean, opts?: { showTitle?: boolean }): string {
-  const showTitle = opts?.showTitle !== false;
-  const statusLabel = isApiOnline ? 'CONNECTÉ · TERMINAL 2.4' : 'HORS LIGNE · MODE LOCAL';
+function renderHeader(isApiOnline: boolean, stats?: Pick<GamificationStats, 'streak' | 'xp'>): string {
+  const statusLabel = isApiOnline ? 'Connecte · v2.4' : 'Hors ligne · mode local';
+  const streak = Math.max(1, stats?.streak ?? 1);
+  const xp = Math.max(0, stats?.xp ?? 0);
   return `
     <header class="hero ext-head">
       <div class="hero__brand">
-        <div class="hero__logo ext-logo">vP</div>
+        <div class="hero__logo ext-logo">VP</div>
         <div class="ext-head-text">
-          <div class="a">${esc(title)}</div>
+          <div class="a">VPauto Assistant</div>
           <div class="b">
             <span class="status-dot ${isApiOnline ? 'status-dot--ok' : 'status-dot--off'}"></span>
             ${esc(statusLabel)}
           </div>
         </div>
       </div>
-      <div class="head-btns">
-        <button class="ibtn" type="button" data-action="toggle-tweaks" title="Tweaks" aria-label="Ouvrir les tweaks">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-        </button>
-        <button class="ibtn" type="button" data-action="open-source" title="Ouvrir la fiche" aria-label="Ouvrir la fiche source">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-        </button>
-        <button class="ibtn" type="button" data-action="refresh" title="Rafraîchir" aria-label="Rafraîchir">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
-        </button>
+      <div class="head-pills">
+        <div class="head-pill head-pill--streak"><span class="head-pill__icon">🔥</span>${streak}</div>
+        <div class="head-pill head-pill--xp"><span class="head-pill__icon">⚡</span>${xp} XP</div>
       </div>
-      ${showTitle && subtitle ? `
-        <h1 class="hero__title" style="width:100%; flex-basis:100%;">${esc(title === 'VPauto Assistant' ? subtitle : title)}</h1>
-        <p class="hero__subtitle" style="width:100%; flex-basis:100%;">${esc(subtitle)}</p>
-      ` : ''}
+      <button class="ibtn" type="button" data-action="toggle-tweaks" title="Tweaks" aria-label="Ouvrir les tweaks">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+      </button>
     </header>
   `;
 }
@@ -1715,7 +1757,7 @@ function renderBadgesSection(badges: VehicleBadge[] | null): string {
 
   return `
     <section class="card">
-      <h2 class="card__title"><span class="card__icon">&#9733;</span> Badges</h2>
+      ${renderCardTitle('🏅', 'Badges & alertes', { count: badges.length, tone: 'blue' })}
       <div class="chip-bar">${items}</div>
     </section>
   `;
@@ -1727,7 +1769,7 @@ function renderPersistenceWarning(vehicleId: number | null | undefined, debug?: 
   const reason = debug?.reason ? ` (${esc(debug.reason)})` : '';
   return `
     <section class="card">
-      <h2 class="card__title"><span class="card__icon">&#9888;</span> Synchronisation</h2>
+      ${renderCardTitle('⚠️', 'Synchronisation', { tone: 'amber' })}
       <div class="card__empty">
         Le vehicule est scrape localement, mais l'identifiant backend n'est pas encore confirme${reason}. Les sections historiques resteront limitees tant que cette sauvegarde n'aboutit pas.
       </div>
@@ -1875,7 +1917,7 @@ function renderHistorySection(history: VehicleHistory | null, vehicleId: number 
   if (!history || historicalPassages.length === 0) {
     return `
       <section class="card">
-        <h2 class="card__title"><span class="card__icon">&#128203;</span> Historique de passages</h2>
+        ${renderCardTitle('📅', 'Historique de passages', { tone: 'yellow' })}
         <div class="card__empty">
           ${vehicleId
             ? "Aucun passage connu pour ce vehicule dans la base locale."
@@ -1944,7 +1986,7 @@ function renderHistorySection(history: VehicleHistory | null, vehicleId: number 
 
   return `
     <section class="card">
-      <h2 class="card__title"><span class="card__icon">&#128203;</span> Historique de passages</h2>
+      ${renderCardTitle('📅', 'Historique de passages', { count: historicalPassages.length, tone: 'yellow' })}
       <div class="timeline">${items}</div>
     </section>
   `;
@@ -1956,7 +1998,7 @@ function renderCrossAuction(data: CrossAuctionData | null | undefined, snapshot:
   if (!data || previousPassages.length === 0) {
     return `
       <section class="card">
-        <h2 class="card__title"><span class="card__icon">&#127758;</span> Parcours multi-enchères</h2>
+        ${renderCardTitle('🌍', 'Parcours multi-encheres', { tone: 'purple' })}
         <div class="card__empty">
           Aucun passage connu pour ce vehicule dans la base locale pour le moment.
         </div>
@@ -2004,7 +2046,7 @@ function renderCrossAuction(data: CrossAuctionData | null | undefined, snapshot:
 
   return `
     <section class="card">
-      <h2 class="card__title"><span class="card__icon">&#127758;</span> Parcours multi-enchères</h2>
+      ${renderCardTitle('🌍', 'Parcours multi-encheres', { count: previousPassages.length, tone: 'purple' })}
       <div class="cross-list">${items}</div>
     </section>
   `;
@@ -2043,7 +2085,7 @@ function renderSimilarInAuction(vehicles: Partial<VehicleSnapshot>[], current: V
   if (vehicles.length === 0) {
     return `
       <section class="card">
-        <h2 class="card__title"><span class="card__icon">&#128269;</span> Similaires dans cette vente</h2>
+        ${renderCardTitle('🔎', 'Similaires dans cette vente', { tone: 'green' })}
         <div class="card__empty">
           ${listSize > 0
             ? "Aucun autre vehicule comparable n'a ete trouve dans la liste memoire de l'enchere en cours."
@@ -2122,7 +2164,7 @@ function renderSimilarInAuction(vehicles: Partial<VehicleSnapshot>[], current: V
 
   return `
     <section class="card">
-      <h2 class="card__title"><span class="card__icon">&#128269;</span> Similaires dans cette vente (${vehicles.length})</h2>
+      ${renderCardTitle('🔎', 'Similaires dans cette vente', { count: vehicles.length, tone: 'green' })}
       ${statsHtml}
       <div class="similar-list">${items}</div>
     </section>
@@ -2156,7 +2198,7 @@ function renderSimilarElsewhere(matches: MatchResult[] | null | undefined, curre
   if (filtered.length === 0) {
     return `
       <section class="card">
-        <h2 class="card__title"><span class="card__icon">&#127968;</span> Similaires disponibles ailleurs</h2>
+        ${renderCardTitle('📍', 'Similaires disponibles ailleurs', { tone: 'blue' })}
         <div class="card__empty">
           Aucun exemplaire similaire actuellement disponible dans une autre ville n'a encore ete trouve dans la base locale.
         </div>
@@ -2229,7 +2271,7 @@ function renderSimilarElsewhere(matches: MatchResult[] | null | undefined, curre
 
   return `
     <section class="card">
-      <h2 class="card__title"><span class="card__icon">&#127968;</span> Similaires disponibles ailleurs</h2>
+      ${renderCardTitle('📍', 'Similaires disponibles ailleurs', { count: filtered.length, tone: 'blue' })}
       ${summary}
       <div class="similar-list">${items}</div>
     </section>
@@ -2240,7 +2282,7 @@ function renderSimilarSold(data: SimilarSoldData | null | undefined, currentSnap
   if (!data || data.results.length === 0) {
     return `
       <section class="card">
-        <h2 class="card__title"><span class="card__icon">&#128200;</span> Intelligence prix</h2>
+        ${renderCardTitle('💰', 'Intelligence prix', { tone: 'blue' })}
         <div class="card__empty">
           Aucune reference vendue comparable n'est encore disponible dans la base locale pour produire une estimation fiable.
         </div>
@@ -2342,7 +2384,7 @@ function renderSimilarSold(data: SimilarSoldData | null | undefined, currentSnap
 
   return `
     <section class="card">
-      <h2 class="card__title"><span class="card__icon">&#128200;</span> Intelligence prix</h2>
+      ${renderCardTitle('💰', 'Intelligence prix', { count: stats.count || data.results.length, tone: 'blue' })}
       ${recommendHtml}
       ${items ? `<div class="similar-list">${items}</div>` : ''}
     </section>
@@ -2377,7 +2419,7 @@ function renderPriceChart(history: VehicleHistory | null): string {
 
   return `
     <section class="card">
-      <h2 class="card__title"><span class="card__icon">&#128200;</span> Evolution prix</h2>
+      ${renderCardTitle('📈', 'Evolution prix', { tone: 'purple' })}
       <div class="price-chart">
         <svg viewBox="0 0 ${w} ${h}" class="price-svg">
           <defs>
@@ -2428,7 +2470,7 @@ function renderAuctionSummary(list: Partial<VehicleSnapshot>[]): string {
 
   return `
     <section class="card">
-      <h2 class="card__title"><span class="card__icon">&#128202;</span> Resume de l'enchere</h2>
+      ${renderCardTitle('📊', "Resume de l'enchere", { count: total, tone: 'blue' })}
 
       <div class="auction-stats">
         <div class="auction-stat">
@@ -2641,7 +2683,7 @@ function renderVehicleList(list: Partial<VehicleSnapshot>[]): string {
 
   return `
     <section class="card">
-      <h2 class="card__title"><span class="card__icon">&#128663;</span> Vehicules (${list.length})</h2>
+      ${renderCardTitle('🚗', 'Vehicules detectes', { count: list.length, tone: 'green' })}
       ${statsLine ? `<div class="list-stats">${statsLine}</div>` : ''}
       <div class="vehicle-list">${items}</div>
       ${moreText}
@@ -2850,12 +2892,12 @@ function renderActionsBar(hasSource: boolean): string {
   return `
     <div class="actions-bar">
       <button class="btn btn--primary" type="button" data-action="refresh">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
-        Rafraîchir
+        <span aria-hidden="true">🔄</span>
+        Rafraichir
       </button>
       ${hasSource ? `<button class="btn btn--ghost" type="button" data-action="open-source">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-        Ouvrir la page
+        <span aria-hidden="true">🔗</span>
+        Ouvrir
       </button>` : ''}
       <button class="btn btn--ghost btn--small" type="button" data-action="toggle-debug" title="Diagnostic">
         ${showDebug ? 'Masquer' : 'Debug'}
@@ -2890,18 +2932,49 @@ function computeCountdown(snapshot: VehicleSnapshot): string | undefined {
 function renderTicker(snapshot: VehicleSnapshot): string {
   const startTime = snapshot.saleTime?.slice(0, 8) || (snapshot.saleDate ? '10:00:00' : '');
   const countdown = computeCountdown(snapshot);
-  if (!countdown && !startTime) return '';
+
+  // Status priority: a terminal status (sold / unsold) always wins over the
+  // countdown or "EN COURS" fallback — the ticker must never claim "EN COURS"
+  // for a vehicle that is actually adjugé (Toyota Yaris Cross 11403878 bug:
+  // 4 sold snapshots but the ticker still read "EN COURS"). For a non-terminal
+  // vehicle, prefer the countdown; fall back to the live/available label.
+  let rightKey: string;
+  let rightValue: string;
+  if (snapshot.status === 'sold') {
+    rightKey = 'STATUT';
+    rightValue = 'ADJUGÉ';
+  } else if (snapshot.status === 'unsold') {
+    rightKey = 'STATUT';
+    rightValue = 'NON ADJUGÉ';
+  } else if (snapshot.status === 'removed') {
+    rightKey = 'STATUT';
+    rightValue = 'RETIRÉ';
+  } else if (countdown) {
+    rightKey = 'T−';
+    rightValue = countdown;
+  } else if (snapshot.status === 'auction_live') {
+    rightKey = 'STATUT';
+    rightValue = 'EN COURS';
+  } else {
+    // 'available' without a countdown (e.g. missing saleDate): stay neutral.
+    rightKey = 'STATUT';
+    rightValue = 'À VENIR';
+  }
+
+  if (!countdown && !startTime && snapshot.status !== 'sold' && snapshot.status !== 'unsold' && snapshot.status !== 'removed') {
+    return '';
+  }
   const dateLabel = snapshot.saleDate ? formatDate(snapshot.saleDate).toUpperCase() : 'SANS DATE';
   return `
-    <div class="ticker" data-sale-date="${esc(snapshot.saleDate || '')}" data-sale-time="${esc(snapshot.saleTime || '')}">
+    <div class="ticker" data-sale-date="${esc(snapshot.saleDate || '')}" data-sale-time="${esc(snapshot.saleTime || '')}" data-status="${esc(snapshot.status)}">
       <div class="ticker-col">
         <div class="k">Début vente · ${esc(dateLabel)}</div>
         <div class="v">${esc(startTime || '—')}</div>
       </div>
       <div class="ticker-sep"></div>
       <div class="ticker-col right">
-        <div class="k">${countdown ? 'T−' : 'STATUT'}</div>
-        <div class="v" data-countdown>${esc(countdown || 'EN COURS')}</div>
+        <div class="k">${esc(rightKey)}</div>
+        <div class="v" data-countdown>${esc(rightValue)}</div>
       </div>
     </div>
   `;
@@ -2912,61 +2985,25 @@ function renderTicker(snapshot: VehicleSnapshot): string {
  * meta row, and (when enough data) a linear-gauge verdict panel that
  * shows the MAP and marché markers on the same €/€ scale.
  */
-function renderVehicleHero(
-  snapshot: VehicleSnapshot,
-  startingPrice: number | undefined,
-  similarSold: SimilarSoldData | null | undefined,
-  vehicleId?: number,
-  isNew?: boolean,
-): string {
+function renderVehicleHero(snapshot: VehicleSnapshot, vehicleId?: number): string {
   const brand = (snapshot.brand || '').trim();
   const model = (snapshot.model || '').trim();
   const version = (snapshot.version || '').trim();
   const vehicleTitle = [brand, model, version].filter(Boolean).join(' ') || 'Véhicule VPauto';
-  const refPart = snapshot.reference ? `Réf. ${snapshot.reference}` : '';
-  const vehiclePart = vehicleId ? `#${vehicleId}` : '';
-  const metaParts: string[] = [vehiclePart, refPart].filter(Boolean);
+  const metaParts: string[] = [];
   if (snapshot.year) metaParts.push(String(snapshot.year));
   if (snapshot.mileage) metaParts.push(formatDistance(snapshot.mileage));
   if (snapshot.city) metaParts.push(snapshot.city);
-  if (snapshot.vatRecoverable != null) metaParts.push(snapshot.vatRecoverable ? 'TVA récupérable' : 'TVA non');
-
-  const badges: string[] = [];
-  const nonRoulant = isNonRoulant(snapshot);
-  badges.push(`<span class="badge ${nonRoulant ? 'bad' : 'good'}">${nonRoulant ? 'Non roulant' : 'Roulant'}</span>`);
-  if (isNew) badges.push('<span class="badge ink">Nouveau</span>');
-  if (snapshot.mileage && snapshot.year) {
-    const age = Math.max(1, new Date().getFullYear() - snapshot.year);
-    const kmPerYear = snapshot.mileage / age;
-    if (kmPerYear > 20000) badges.push('<span class="badge bad">Km élevé</span>');
-    else if (kmPerYear < 8000) badges.push('<span class="badge good">Km faible</span>');
-    else badges.push('<span class="badge warn">Km moyen</span>');
-  }
-  if (snapshot.lotNumber) badges.push(`<span class="badge">Lot ${snapshot.lotNumber}</span>`);
-  const heroImage = snapshot.photoUrls?.[0];
+  if (vehicleId) metaParts.push(`#${vehicleId}`);
 
   return `
-    <div class="veh-card">
-      <div class="veh-thumb">
-        ${heroImage
-          ? `<img src="${esc(heroImage)}" alt="${esc(vehicleTitle)}" loading="lazy">`
-          : `<svg viewBox="0 0 200 100" fill="none" aria-hidden="true">
-              <path d="M20 70 L35 50 Q50 40 80 40 L130 40 Q155 40 170 55 L180 70 Z" fill="currentColor" opacity=".68"/>
-              <circle cx="55" cy="72" r="10" fill="currentColor"/>
-              <circle cx="145" cy="72" r="10" fill="currentColor"/>
-              <rect x="60" y="42" width="54" height="15" rx="5" fill="currentColor" opacity=".86"/>
-            </svg>`
-        }
-      </div>
+    <div class="veh-pill">
+      <div class="veh-icon">🚗</div>
       <div class="veh-info">
         <div class="veh-name">${esc(vehicleTitle)}</div>
-        ${metaParts.length ? `<div class="veh-meta">${metaParts.map((part, index) => `
-          <span>${esc(part)}</span>${index < metaParts.length - 1 ? '<span class="dot">•</span>' : ''}
-        `).join('')}</div>` : ''}
-        ${badges.length ? `<div class="badge-row veh-badges">${badges.join('')}</div>` : ''}
+        ${metaParts.length ? `<div class="veh-meta">${metaParts.map((part) => `<span>${esc(part)}</span>`).join('<span class="sep">·</span>')}</div>` : ''}
       </div>
     </div>
-    ${renderVerdict(snapshot, startingPrice, similarSold)}
   `;
 }
 
@@ -2981,131 +3018,66 @@ function renderVerdict(
   snapshot: VehicleSnapshot,
   startingPrice: number | undefined,
   similarSold: SimilarSoldData | null | undefined,
+  insightArg?: VerdictInsight | null,
 ): string {
-  const marketValue = snapshot.marketValue ?? undefined;
-  const avgSold = similarSold?.stats?.avgSoldPrice ?? undefined;
-  const market = avgSold || marketValue;
-  if (!market) return '';
-
-  const map = startingPrice;
-  const liveBid = snapshot.currentAuctionPrice ?? undefined;
-  const soldPrice = snapshot.soldPrice ?? undefined;
-  const focalValue = soldPrice ?? liveBid ?? map;
-  const focalLabel = soldPrice ? 'ADJUGÉ' : liveBid ? 'ENCHÈRE LIVE' : map ? 'MISE À PRIX' : '';
-  // Range: min/max from comparables when available, else ±40% of market.
-  const minSold = similarSold?.stats?.minSoldPrice ?? undefined;
-  const maxSold = similarSold?.stats?.maxSoldPrice ?? undefined;
-  const rangeMin = minSold ?? Math.round(market * 0.85);
-  const rangeMax = maxSold ?? Math.round(market * 1.15);
-
-  // Axis: wider than the range so MAP + extremes fit even when the MAP is
-  // far below the market (typical VPauto case).
-  const axisLo = Math.min(focalValue ?? market, rangeMin) * 0.9;
-  const axisHi = Math.max(focalValue ?? market, rangeMax) * 1.05;
-  const axisSpan = Math.max(axisHi - axisLo, 1);
-  const pct = (v: number) => Math.max(0, Math.min(100, ((v - axisLo) / axisSpan) * 100));
-
-  const rangeLeftPct = pct(rangeMin);
-  const rangeWidthPct = Math.max(2, pct(rangeMax) - rangeLeftPct);
-
-  // Verdict anchor: sold price first, then live bid, then MAP.
-  const reference = soldPrice ?? liveBid ?? map ?? market;
-  const diffPct = ((reference - market) / market) * 100;
-  let tag = 'DANS LE MARCHÉ';
-  let toneClass = 'warn';
-  let title = 'Aligné marché';
-  if (diffPct <= -8) { tag = 'BONNE AFFAIRE'; toneClass = ''; title = `${Math.round(diffPct)} % sous la cote`; }
-  else if (diffPct >= 8) { tag = 'ATTENTION'; toneClass = 'bad'; title = `+${Math.round(diffPct)} % au-dessus de la moy.`; }
-  else { title = diffPct === 0 ? 'Aligné marché' : `${diffPct > 0 ? '+' : ''}${Math.round(diffPct)} % vs cote`; }
-
-  const score = Math.max(5, Math.min(95, Math.round(50 - diffPct * 2)));
-  const verdictTone = toneClass || 'good';
-  const comparableCount = similarSold?.stats?.count ?? 0;
-  const rangeLabel = `${formatShortPrice(rangeMin)} – ${formatShortPrice(rangeMax)}`;
-  const compLabel = comparableCount
-    ? `${comparableCount} comparable${comparableCount > 1 ? 's' : ''}`
-    : 'base locale';
-  const gaugeRadius = 30;
+  const insight = insightArg ?? buildVerdictInsight(snapshot, startingPrice, similarSold);
+  if (!insight) return '';
+  const gaugeRadius = 39;
   const gaugeCircumference = 2 * Math.PI * gaugeRadius;
-  const gaugeOffset = gaugeCircumference * (1 - score / 100);
-
-  // Tick marks at 5 evenly spaced values along the axis.
-  const ticks: number[] = [];
-  for (let i = 0; i < 5; i++) ticks.push(Math.round(axisLo + (axisSpan * i) / 4));
-  const quickCells: string[] = [];
-  quickCells.push(`
-    <div class="quick-cell">
-      <div class="k">Marché</div>
-      <div class="v">${formatPrice(market)}</div>
-    </div>
-  `);
-  quickCells.push(`
-    <div class="quick-cell">
-      <div class="k">Mise à prix</div>
-      <div class="v">${map ? formatPrice(map) : 'Inconnue'}</div>
-    </div>
-  `);
-  if (liveBid) {
-    quickCells.push(`
-      <div class="quick-cell">
-        <div class="k">Enchère live</div>
-        <div class="v">${formatPrice(liveBid)}</div>
-      </div>
-    `);
-  } else if (soldPrice) {
-    quickCells.push(`
-      <div class="quick-cell">
-        <div class="k">Adjugé</div>
-        <div class="v">${formatPrice(soldPrice)}</div>
-      </div>
-    `);
-  }
-  quickCells.push(`
-    <div class="quick-cell">
-      <div class="k">Écart</div>
-      <div class="v">${diffPct > 0 ? '+' : ''}${Math.round(diffPct)}%<span class="trend ${diffPct <= 0 ? 'down' : 'up'}">${diffPct <= 0 ? '↓' : '↑'}</span></div>
-    </div>
-  `);
+  const gaugeOffset = gaugeCircumference * (1 - insight.score / 100);
+  const markerPct = Math.max(4, Math.min(96, insight.markerPct));
+  const kmPerYear = insight.kmPerYear ? numberFormatter.format(Math.round(insight.kmPerYear)) : 'N/D';
+  const marketLine = insight.marketValue
+    ? `Prix marche <b>${formatPrice(insight.market)}</b> · Cote Argus <b>${formatPrice(insight.marketValue)}</b>`
+    : `Prix marche <b>${formatPrice(insight.market)}</b> · ${insight.comparableCount} comparable${insight.comparableCount > 1 ? 's' : ''}`;
 
   return `
-    <div class="verdict ${verdictTone}">
-      <div class="verdict-top">
-        <div class="gauge" aria-hidden="true">
-          <svg viewBox="0 0 76 76">
-            <circle class="bg" cx="38" cy="38" r="${gaugeRadius}"></circle>
+    <div class="verdict-card ${insight.tone}">
+      <div class="v-top">
+        <div class="v-emoji">${insight.emoji}</div>
+        <div class="v-right">
+          <div class="v-tag">${esc(insight.tag)}</div>
+          <div class="v-title">${esc(insight.title)}</div>
+          <div class="v-sub">${marketLine}</div>
+        </div>
+      </div>
+      <div class="v-score">
+        <div class="donut-wrap">
+          <svg viewBox="0 0 100 100" aria-hidden="true">
+            <circle class="donut-bg" cx="50" cy="50" r="${gaugeRadius}"></circle>
             <circle
-              class="fg"
-              cx="38"
-              cy="38"
+              class="donut-fg"
+              cx="50"
+              cy="50"
               r="${gaugeRadius}"
               stroke-dasharray="${gaugeCircumference.toFixed(2)}"
               stroke-dashoffset="${gaugeOffset.toFixed(2)}"
             ></circle>
           </svg>
-          <div class="score">
-            <b>${score}</b>
-            <span class="u">/100</span>
-          </div>
+          <div class="donut-val"><b>${insight.score}</b><small>/100</small></div>
         </div>
-        <div class="verdict-label">
-          <span class="tag">${esc(tag)}</span>
-          <h2>${esc(title)}</h2>
-          <p>Prix moyen adjugé <b class="mono">${formatPrice(market)}</b> · Fourchette <b class="mono">${esc(rangeLabel)}</b> · ${esc(compLabel)}</p>
+        <div class="score-items">
+          <div class="score-row"><span class="k">Prix moyen adjuge</span><span class="v">${formatPrice(insight.market)}</span></div>
+          <div class="score-row"><span class="k">${esc(insight.marketValue ? 'Cote Argus' : 'Reference')}</span><span class="v">${formatPrice(insight.marketValue ?? insight.rangeMax)}</span></div>
+          <div class="score-row"><span class="k">Km / an</span><span class="v">${kmPerYear}</span></div>
         </div>
       </div>
-
-      <div class="distribution">
-        <div class="dist-scale"></div>
-        <div class="dist-range" style="left:${rangeLeftPct.toFixed(1)}%; width:${rangeWidthPct.toFixed(1)}%;"></div>
-        <div class="dist-marker" style="left:${pct(market).toFixed(1)}%" data-label="MARCHÉ"></div>
-        ${map ? `<div class="dist-marker dist-marker--map" style="left:${pct(map).toFixed(1)}%" data-label="MISE À PRIX"></div>` : ''}
-        ${!map && focalValue && focalLabel ? `<div class="dist-marker dist-marker--live" style="left:${pct(focalValue).toFixed(1)}%" data-label="${esc(focalLabel)}"></div>` : ''}
-        <div class="dist-ticks">
-          ${ticks.map((t) => `<span>${numberFormatter.format(t)}</span>`).join('')}
+      <div class="pbar-wrap">
+        <div class="pbar-label">
+          <span>Moins cher</span>
+          <span>Dans le marche</span>
+          <span>Cher</span>
+        </div>
+        <div class="pbar-track">
+          <div class="pbar-fill" style="width:${insight.fillPct.toFixed(1)}%"></div>
+          <div class="pbar-marker" style="left:${markerPct.toFixed(1)}%" data-label="${esc(insight.referenceLabel || 'MISE A PRIX')}"></div>
+        </div>
+        <div class="pbar-ticks">
+          <span>${formatShortPrice(insight.rangeMin)}</span>
+          <span>${formatShortPrice(insight.market)}</span>
+          <span>${formatShortPrice(insight.rangeMax)}</span>
         </div>
       </div>
-
-      <div class="quick-row">${quickCells.join('')}</div>
     </div>
   `;
 }
@@ -3180,7 +3152,7 @@ function renderDebugCard(
 
   return `
     <section class="card card--debug">
-      <h2 class="card__title">Diagnostic</h2>
+      ${renderCardTitle('🛠️', 'Diagnostic', { tone: 'red' })}
       <div class="debug-grid">
         ${rows.map(([l, v]) => `<span class="debug-label">${esc(l)}</span><span class="debug-value">${esc(v)}</span>`).join('')}
       </div>
@@ -3231,6 +3203,198 @@ function metricCard(label: string, value: string, icon: string): string {
         <div class="metric__label">${esc(label)}</div>
         <div class="metric__value">${esc(value)}</div>
       </div>
+    </div>
+  `;
+}
+
+function renderCardTitle(icon: string, label: string, opts?: { count?: number | string; tone?: string }): string {
+  const count = opts?.count != null
+    ? `<span class="card__count card__count--${esc(opts?.tone || 'blue')}">${esc(String(opts.count))}</span>`
+    : '';
+  return `
+    <button class="card__title" type="button">
+      <span class="card__icon">${icon}</span>
+      <span class="card__label">${esc(label)}</span>
+      ${count}
+      <span class="card__chev" aria-hidden="true">›</span>
+    </button>
+  `;
+}
+
+function buildVerdictInsight(
+  snapshot: VehicleSnapshot,
+  startingPrice: number | undefined,
+  similarSold: SimilarSoldData | null | undefined,
+): VerdictInsight | null {
+  const marketValue = snapshot.marketValue ?? undefined;
+  const avgSold = similarSold?.stats?.avgSoldPrice ?? undefined;
+  const market = avgSold || marketValue;
+  if (!market) return null;
+
+  const map = startingPrice;
+  const liveBid = snapshot.currentAuctionPrice ?? undefined;
+  const soldPrice = snapshot.soldPrice ?? undefined;
+  const referencePrice = soldPrice ?? liveBid ?? map ?? market;
+  const referenceLabel = soldPrice ? 'ADJUGE' : liveBid ? 'ENCHERE LIVE' : map ? 'MISE A PRIX' : 'REFERENCE';
+  const comparableCount = similarSold?.stats?.count ?? 0;
+  const rangeMin = similarSold?.stats?.minSoldPrice ?? Math.round(market * 0.86);
+  const rangeMax = similarSold?.stats?.maxSoldPrice ?? Math.round(market * 1.16);
+  const axisMin = Math.min(rangeMin, map ?? referencePrice, market) * 0.92;
+  const axisMax = Math.max(rangeMax, map ?? referencePrice, market) * 1.04;
+  const axisSpan = Math.max(axisMax - axisMin, 1);
+  const markerPct = ((referencePrice - axisMin) / axisSpan) * 100;
+  const diffPct = ((referencePrice - market) / market) * 100;
+  const kmPerYear = snapshot.year
+    ? snapshot.mileage / Math.max(1, new Date().getFullYear() - snapshot.year + 1)
+    : undefined;
+
+  let tone: VerdictTone = 'warn';
+  let tag = '≈ Dans le marche';
+  let title = 'Aligne sur le marche';
+  let emoji = '😐';
+
+  if (diffPct <= -8) {
+    tone = 'good';
+    tag = '✓ Bonne affaire';
+    title = `${Math.round(diffPct)} % sous la cote`;
+    emoji = '🎉';
+  } else if (diffPct >= 8) {
+    tone = 'bad';
+    tag = '⚠ Attention';
+    title = `+${Math.round(diffPct)} % au-dessus moy.`;
+    emoji = '😬';
+  } else if (diffPct !== 0) {
+    title = `${diffPct > 0 ? '+' : ''}${Math.round(diffPct)} % vs marche`;
+  }
+
+  const score = Math.max(10, Math.min(95, Math.round(64 - diffPct * 2.2)));
+  const fillPct = Math.max(14, Math.min(90, score - (tone === 'good' ? 4 : tone === 'bad' ? 18 : 10)));
+  const marketLabel = comparableCount
+    ? `${comparableCount} comparable${comparableCount > 1 ? 's' : ''}`
+    : 'base locale';
+
+  return {
+    tone,
+    tag,
+    title,
+    subtitle: marketLabel,
+    emoji,
+    score,
+    market,
+    marketLabel,
+    rangeMin,
+    rangeMax,
+    markerPct,
+    fillPct,
+    diffPct,
+    comparableCount,
+    kmPerYear,
+    marketValue,
+    referencePrice,
+    referenceLabel,
+  };
+}
+
+function buildGamificationStats(
+  snapshot: VehicleSnapshot,
+  insight: VerdictInsight | null,
+  badges: VehicleBadge[] | null,
+  history: VehicleHistory | null,
+  isNew?: boolean,
+): GamificationStats {
+  const score = insight?.score ?? 42;
+  const passageCount = history?.totalPassages ?? 1;
+  const badgeCount = badges?.length ?? 0;
+  const xp = Math.max(
+    90,
+    Math.round(
+      score * 3
+      + passageCount * 18
+      + badgeCount * 12
+      + (snapshot.soldPrice ? 24 : 0)
+      + (isNew ? 18 : 0),
+    ),
+  );
+  const streak = Math.max(1, Math.min(12, passageCount + (insight?.tone === 'good' ? 2 : 0) + Math.min(3, badgeCount)));
+  const goodDeals = Math.max(1, Math.round((score + badgeCount * 10) / 22));
+  const level = Math.max(1, Math.floor(xp / 30) + 1);
+  const nextLevelXp = level * 30;
+  const levelStart = (level - 1) * 30;
+  const progressPct = Math.max(6, Math.min(96, ((xp - levelStart) / Math.max(nextLevelXp - levelStart, 1)) * 100));
+  const levelTitle = insight?.tone === 'good'
+    ? 'Analyste Pro'
+    : insight?.tone === 'bad'
+    ? 'Observateur prudent'
+    : 'Scout VPauto';
+
+  return {
+    streak,
+    xp,
+    level,
+    nextLevelXp,
+    progressPct,
+    goodDeals,
+    levelTitle,
+  };
+}
+
+function buildListGamificationStats(list: Partial<VehicleSnapshot>[], tracking?: BatchTrackingResult): GamificationStats {
+  const total = list.length;
+  const sold = list.filter((item) => item.status === 'sold').length;
+  const priceMoves = tracking?.priceChanges.length ?? 0;
+  const xp = Math.max(50, total * 5 + sold * 14 + priceMoves * 18 + (tracking?.newVehicles ?? 0) * 12);
+  const streak = Math.max(1, Math.min(12, Math.ceil(total / 8) + Math.min(4, priceMoves)));
+  const level = Math.max(1, Math.floor(xp / 35) + 1);
+  const nextLevelXp = level * 35;
+  const levelStart = (level - 1) * 35;
+  const progressPct = Math.max(5, Math.min(96, ((xp - levelStart) / Math.max(nextLevelXp - levelStart, 1)) * 100));
+
+  return {
+    streak,
+    xp,
+    level,
+    nextLevelXp,
+    progressPct,
+    goodDeals: Math.max(1, sold + (tracking?.newVehicles ?? 0)),
+    levelTitle: 'Analyste vente',
+  };
+}
+
+function renderGamificationSection(stats: GamificationStats): string {
+  const xpToNext = Math.max(0, stats.nextLevelXp - stats.xp);
+  return `
+    <section class="xp-section">
+      <div class="xp-top">
+        <div class="xp-avatar">🦉</div>
+        <div class="xp-info">
+          <div class="rank">${esc(stats.levelTitle)}</div>
+          <div class="name">Niveau ${stats.level}</div>
+          <div class="sub">${xpToNext} XP vers Niveau ${stats.level + 1}</div>
+        </div>
+      </div>
+      <div class="xp-bar-wrap">
+        <div class="xp-bar-lbl"><span>${stats.xp} XP</span><span>${stats.nextLevelXp} XP</span></div>
+        <div class="xp-bar-track"><div class="xp-bar-fill" style="width:${stats.progressPct.toFixed(1)}%"></div></div>
+      </div>
+      <div class="xp-chips">
+        <span class="xp-chip gold">🏆 ${stats.goodDeals} bonnes affaires</span>
+        <span class="xp-chip fire">🔥 Serie de ${stats.streak}</span>
+        <span class="xp-chip star">⚡ ${stats.xp} XP ce mois</span>
+      </div>
+    </section>
+  `;
+}
+
+function renderUpdatedLine(updatedAt?: string, isApiOnline?: boolean): string {
+  if (!updatedAt) return '';
+  const date = new Date(updatedAt);
+  const formatted = Number.isNaN(date.getTime())
+    ? updatedAt
+    : `${date.toLocaleDateString('fr-FR')} · ${date.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`;
+  return `
+    <div class="panel-updated">
+      <span class="panel-updated__dot ${isApiOnline ? 'panel-updated__dot--ok' : 'panel-updated__dot--off'}"></span>
+      DONNEES A JOUR · ${esc(formatted)}
     </div>
   `;
 }
