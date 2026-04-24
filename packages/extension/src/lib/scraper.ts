@@ -1094,9 +1094,32 @@ function extractCity(kv: Record<string, string>, bodyText: string): string {
 function extractSaleDate(kv: Record<string, string>, bodyText: string): string | undefined {
   const raw = kv['date de vente'] || kv['date'] || '';
   if (raw) return formatDate(raw);
-  // Match "Le 02/04/26" or "Le 02/04/2026" or standalone date
-  const m = bodyText.match(/(?:Le\s+)?(\d{2}\/\d{2}\/\d{2,4})/i);
-  return m ? formatDate(m[1]) : undefined;
+  // Fallback regex: match "Le 02/04/26" or "Le 02/04/2026" or standalone date.
+  //
+  // HAZARD: bodyText on auction_live / detail pages can contain the vehicle's
+  // registration date (e.g. "1ère MEC 19/08/2019") long before any real
+  // auction date appears. If we naively pick the first DD/MM/YYYY match we end
+  // up stamping saleDate = 2019-08-19 on the snapshot, which poisons passage
+  // grouping (the snapshot becomes the "canonical" for a phantom ancient
+  // passage). See packages/backend/src/history.ts `pickPassageSaleDate` for
+  // the backend-side MODE consensus guard. Here we scan ALL DD/MM/YYYY
+  // matches in order and return the first one that plausibly corresponds to
+  // an auction date: within ~14 days in the past or ~120 days in the future
+  // relative to scrape time. Real VPauto auctions are always close to "now".
+  const iter = bodyText.matchAll(/(?:Le\s+)?(\d{2}\/\d{2}\/\d{2,4})/gi);
+  const nowMs = Date.now();
+  const MAX_PAST_MS = 14 * 86_400_000; // 2 weeks — generous for post-auction scrapes
+  const MAX_FUTURE_MS = 120 * 86_400_000; // 4 months — auctions are posted ahead
+  for (const match of iter) {
+    const iso = formatDate(match[1]);
+    const t = new Date(`${iso}T00:00:00Z`).getTime();
+    if (Number.isNaN(t)) continue;
+    const delta = t - nowMs;
+    if (delta < -MAX_PAST_MS) continue; // stale — likely a registration/MEC date
+    if (delta > MAX_FUTURE_MS) continue; // nonsense — likely an expiration/warranty date
+    return iso;
+  }
+  return undefined;
 }
 
 function formatDate(s: string): string {

@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyPassageNavigation,
+  buildLiveBidTrajectory,
   buildMapTrajectory,
   buildPassageEvents,
   buildPassageFromGroup,
+  buildPassagesForVehicle,
   buildPriceHistory,
   computeEvolution,
   groupSnapshotsIntoPassages,
+  pickLatestLiveBid,
+  pickPassageSaleDate,
   pickStartingPrice,
   type SnapshotForHistory,
 } from './history.js';
@@ -36,7 +40,10 @@ function snap(overrides: Partial<SnapshotForHistory>): SnapshotForHistory {
     saleTime: null,
     scrapedAt: new Date('2026-04-10T10:00:00Z'),
     startingPrice: null,
+    currentAuctionPrice: null,
     soldPrice: null,
+    marketValue: null,
+    newPrice: null,
     mileage: 50000,
     lotNumber: null,
     observations: null,
@@ -713,5 +720,503 @@ describe('computeEvolution', () => {
     expect(evo.evolutionDirection).toBe('unknown');
     expect(evo.evolutionAmount).toBeNull();
     expect(evo.totalPassages).toBe(0);
+  });
+});
+
+describe('buildLiveBidTrajectory', () => {
+  it('captures the ordered sequence of distinct live-bid values (Yaris Cross 11403878)', () => {
+    // Real case: 27 snapshots of ref 11403878, startingPrice always null,
+    // currentAuctionPrice walked 17 900 → 18 000 → 18 400 before soldPrice=19 800.
+    const snaps = [
+      snap({ id: 1, scrapedAt: new Date('2026-04-18T14:00:00Z'), currentAuctionPrice: 17900, status: 'auction_live' }),
+      snap({ id: 2, scrapedAt: new Date('2026-04-18T14:05:00Z'), currentAuctionPrice: 17900, status: 'auction_live' }),
+      snap({ id: 3, scrapedAt: new Date('2026-04-18T14:10:00Z'), currentAuctionPrice: 18000, status: 'auction_live' }),
+      snap({ id: 4, scrapedAt: new Date('2026-04-18T14:15:00Z'), currentAuctionPrice: 18400, status: 'auction_live' }),
+      snap({ id: 5, scrapedAt: new Date('2026-04-18T14:20:00Z'), currentAuctionPrice: null, soldPrice: 19800, status: 'sold' }),
+    ];
+    expect(buildLiveBidTrajectory(snaps)).toEqual([17900, 18000, 18400]);
+  });
+
+  it('returns [] when no snapshot ever reported a live bid', () => {
+    const snaps = [
+      snap({ startingPrice: 15000, status: 'available' }),
+      snap({ startingPrice: 15000, soldPrice: 17200, status: 'sold' }),
+    ];
+    expect(buildLiveBidTrajectory(snaps)).toEqual([]);
+  });
+
+  it('ignores zero / null live-bid values', () => {
+    const snaps = [
+      snap({ scrapedAt: new Date('2026-04-18T14:00:00Z'), currentAuctionPrice: 0, status: 'auction_live' }),
+      snap({ scrapedAt: new Date('2026-04-18T14:10:00Z'), currentAuctionPrice: null, status: 'auction_live' }),
+      snap({ scrapedAt: new Date('2026-04-18T14:20:00Z'), currentAuctionPrice: 12000, status: 'auction_live' }),
+    ];
+    expect(buildLiveBidTrajectory(snaps)).toEqual([12000]);
+  });
+
+  it('collapses consecutive duplicates but preserves re-visits', () => {
+    const snaps = [
+      snap({ scrapedAt: new Date('2026-04-18T14:00:00Z'), currentAuctionPrice: 10000 }),
+      snap({ scrapedAt: new Date('2026-04-18T14:05:00Z'), currentAuctionPrice: 10000 }),
+      snap({ scrapedAt: new Date('2026-04-18T14:10:00Z'), currentAuctionPrice: 10500 }),
+      snap({ scrapedAt: new Date('2026-04-18T14:15:00Z'), currentAuctionPrice: 10500 }),
+      snap({ scrapedAt: new Date('2026-04-18T14:20:00Z'), currentAuctionPrice: 11000 }),
+    ];
+    expect(buildLiveBidTrajectory(snaps)).toEqual([10000, 10500, 11000]);
+  });
+});
+
+describe('pickLatestLiveBid', () => {
+  it('returns the latest currentAuctionPrice by scrapedAt', () => {
+    const snaps = [
+      snap({ scrapedAt: new Date('2026-04-18T14:00:00Z'), currentAuctionPrice: 17900 }),
+      snap({ scrapedAt: new Date('2026-04-18T14:20:00Z'), currentAuctionPrice: 18400 }),
+      snap({ scrapedAt: new Date('2026-04-18T14:10:00Z'), currentAuctionPrice: 18000 }),
+    ];
+    expect(pickLatestLiveBid(snaps)).toBe(18400);
+  });
+
+  it('returns undefined when no snapshot has a live bid', () => {
+    expect(pickLatestLiveBid([snap({ startingPrice: 15000 })])).toBeUndefined();
+  });
+});
+
+describe('buildPassageFromGroup with live-bid', () => {
+  it('exposes liveBidTrajectory + currentAuctionPrice on the passage (Yaris Cross)', () => {
+    const snaps = [
+      snap({ id: 1, hashId: 'yaris', scrapedAt: new Date('2026-04-18T14:00:00Z'), currentAuctionPrice: 17900, status: 'auction_live' }),
+      snap({ id: 2, hashId: 'yaris', scrapedAt: new Date('2026-04-18T14:10:00Z'), currentAuctionPrice: 18000, status: 'auction_live' }),
+      snap({ id: 3, hashId: 'yaris', scrapedAt: new Date('2026-04-18T14:15:00Z'), currentAuctionPrice: 18400, status: 'auction_live' }),
+      snap({ id: 4, hashId: 'yaris', scrapedAt: new Date('2026-04-18T14:20:00Z'), soldPrice: 19800, status: 'sold' }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const p = buildPassageFromGroup(groups[0], 0);
+    expect(p.liveBidTrajectory).toEqual([17900, 18000, 18400]);
+    expect(p.currentAuctionPrice).toBe(18400);
+    expect(p.soldPrice).toBe(19800);
+    expect(p.startingPrice).toBeUndefined(); // no MAP ever published
+  });
+
+  it('omits liveBidTrajectory when no live bid was ever observed', () => {
+    const snaps = [
+      snap({ id: 1, hashId: 'a', scrapedAt: new Date('2026-04-10T08:00:00Z'), startingPrice: 15000, status: 'available' }),
+      snap({ id: 2, hashId: 'a', scrapedAt: new Date('2026-04-13T18:00:00Z'), soldPrice: 17200, status: 'sold' }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const p = buildPassageFromGroup(groups[0], 0);
+    expect(p.liveBidTrajectory).toBeUndefined();
+    expect(p.currentAuctionPrice).toBeUndefined();
+  });
+});
+
+describe('buildPassageEvents with live-bid', () => {
+  it('emits a distinct event for each live-bid change within one passage', () => {
+    const snaps = [
+      snap({ id: 1, scrapedAt: new Date('2026-04-18T14:00:00Z'), currentAuctionPrice: 17900, status: 'auction_live' }),
+      snap({ id: 2, scrapedAt: new Date('2026-04-18T14:10:00Z'), currentAuctionPrice: 18000, status: 'auction_live' }),
+      snap({ id: 3, scrapedAt: new Date('2026-04-18T14:15:00Z'), currentAuctionPrice: 18400, status: 'auction_live' }),
+    ];
+    const events = buildPassageEvents(snaps);
+    expect(events.map((e) => e.currentAuctionPrice)).toEqual([17900, 18000, 18400]);
+  });
+
+  it('carries currentAuctionPrice on each event alongside startingPrice', () => {
+    const snaps = [
+      snap({
+        id: 1,
+        scrapedAt: new Date('2026-04-18T14:00:00Z'),
+        startingPrice: 15000,
+        currentAuctionPrice: 16500,
+        status: 'auction_live',
+      }),
+    ];
+    const events = buildPassageEvents(snaps);
+    expect(events).toHaveLength(1);
+    expect(events[0].startingPrice).toBe(15000);
+    expect(events[0].currentAuctionPrice).toBe(16500);
+  });
+});
+
+describe('buildPriceHistory with live-bid', () => {
+  it('emits live-bid points + sold point when MAP is absent (Yaris Cross 11403878)', () => {
+    // No MAP ever → evolution built entirely from live bids + sold price.
+    const snaps = [
+      snap({ id: 1, hashId: 'yaris', scrapedAt: new Date('2026-04-18T14:00:00Z'), currentAuctionPrice: 17900, status: 'auction_live' }),
+      snap({ id: 2, hashId: 'yaris', scrapedAt: new Date('2026-04-18T14:10:00Z'), currentAuctionPrice: 18000, status: 'auction_live' }),
+      snap({ id: 3, hashId: 'yaris', scrapedAt: new Date('2026-04-18T14:15:00Z'), currentAuctionPrice: 18400, status: 'auction_live' }),
+      snap({ id: 4, hashId: 'yaris', scrapedAt: new Date('2026-04-18T14:20:00Z'), soldPrice: 19800, status: 'sold' }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = groups.map((g, i) => buildPassageFromGroup(g, i));
+    const history = buildPriceHistory(passages);
+    expect(history.map((h) => h.price)).toEqual([17900, 18000, 18400, 19800]);
+    expect(history.at(-1)?.label).toBe('Adjugé');
+    expect(history.slice(0, -1).every((h) => h.label?.startsWith('Enchère'))).toBe(true);
+  });
+
+  it('does not duplicate a live-bid point equal to the final MAP', () => {
+    const snaps = [
+      snap({ id: 1, hashId: 'a', scrapedAt: new Date('2026-04-18T14:00:00Z'), startingPrice: 15000, status: 'available' }),
+      snap({ id: 2, hashId: 'a', scrapedAt: new Date('2026-04-18T14:10:00Z'), currentAuctionPrice: 15000, startingPrice: 15000, status: 'auction_live' }),
+      snap({ id: 3, hashId: 'a', scrapedAt: new Date('2026-04-18T14:20:00Z'), currentAuctionPrice: 16500, status: 'auction_live' }),
+      snap({ id: 4, hashId: 'a', scrapedAt: new Date('2026-04-18T14:30:00Z'), soldPrice: 17200, status: 'sold' }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = groups.map((g, i) => buildPassageFromGroup(g, i));
+    const history = buildPriceHistory(passages);
+    expect(history.map((h) => h.price)).toEqual([15000, 16500, 17200]);
+    expect(history[0].label).toBe('Mise à prix');
+  });
+
+  it('does not duplicate a live-bid point equal to the sold price', () => {
+    const snaps = [
+      snap({ id: 1, hashId: 'a', scrapedAt: new Date('2026-04-18T14:00:00Z'), currentAuctionPrice: 12000, status: 'auction_live' }),
+      snap({ id: 2, hashId: 'a', scrapedAt: new Date('2026-04-18T14:30:00Z'), currentAuctionPrice: 14500, status: 'auction_live' }),
+      snap({ id: 3, hashId: 'a', scrapedAt: new Date('2026-04-18T14:40:00Z'), soldPrice: 14500, status: 'sold' }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = groups.map((g, i) => buildPassageFromGroup(g, i));
+    const history = buildPriceHistory(passages);
+    // 14 500 appears only once (as "Adjugé") — not twice.
+    expect(history.filter((h) => h.price === 14500)).toHaveLength(1);
+    expect(history.at(-1)?.label).toBe('Adjugé');
+  });
+});
+
+describe('retroactive placeholder scrub in passage-level helpers (C3 BlueHDi 11404446)', () => {
+  // Real case: 13 snaps captured MAP=100 € (VPauto placeholder) from 16/04 to
+  // 20/04 while no live/cote/neuf signal existed. On 21/04 the real MAP=1 200 €
+  // arrived, then on sale day the auction went live at 1 500 € with cote=6 800 €
+  // and prix neuf=18 750 €. Those later signals retroactively prove the 100 €
+  // was bogus — the passage-level helpers must reject it when rendering.
+  const makeC3Passage = () => [
+    ...Array.from({ length: 10 }, (_, i) =>
+      snap({
+        id: 100 + i,
+        hashId: 'c3-hash',
+        saleDate: '2026-04-24',
+        scrapedAt: new Date(`2026-04-${16 + Math.floor(i / 3)}T${10 + (i % 3) * 4}:00:00Z`),
+        startingPrice: 100,
+        status: 'available',
+      }),
+    ),
+    snap({
+      id: 200,
+      hashId: 'c3-hash',
+      saleDate: '2026-04-24',
+      scrapedAt: new Date('2026-04-21T08:20:00Z'),
+      startingPrice: 1200,
+      status: 'available',
+    }),
+    snap({
+      id: 300,
+      hashId: 'c3-hash',
+      saleDate: '2026-04-24',
+      scrapedAt: new Date('2026-04-24T00:36:00Z'),
+      startingPrice: null,
+      currentAuctionPrice: 1500,
+      marketValue: 6800,
+      newPrice: 18750,
+      status: 'auction_live',
+    }),
+  ];
+
+  it('buildMapTrajectory drops the 100 € placeholder when a later live/cote/neuf signal disproves it', () => {
+    const snaps = makeC3Passage();
+    expect(buildMapTrajectory(snaps)).toEqual([1200]);
+  });
+
+  it('pickStartingPrice ignores the polluted 100 € and returns the real 1 200 € reserve', () => {
+    const snaps = makeC3Passage();
+    expect(pickStartingPrice(snaps)).toBe(1200);
+  });
+
+  it('buildPassageFromGroup exposes a clean single-value mapTrajectory (no 100 → 1200 fake drop)', () => {
+    const snaps = makeC3Passage();
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const p = buildPassageFromGroup(groups[0], 0);
+    // 13 snapshots collapse into 1 passage; the polluted 100 € is gone.
+    expect(p.startingPrice).toBe(1200);
+    expect(p.mapTrajectory).toBeUndefined(); // single-value, not surfaced
+    expect(p.currentAuctionPrice).toBe(1500);
+    expect(p.liveBidTrajectory).toEqual([1500]);
+  });
+
+  it('buildPassageEvents does NOT emit a startingPrice=100 event inside the polluted passage', () => {
+    const snaps = makeC3Passage();
+    const events = buildPassageEvents(snaps);
+    // No event should report startingPrice=100 — only the real 1 200 € step
+    // (and the live-bid / status transitions) should survive.
+    expect(events.every((e) => e.startingPrice !== 100)).toBe(true);
+    expect(events.some((e) => e.startingPrice === 1200)).toBe(true);
+  });
+
+  it('buildPriceHistory emits a single clean progression 1 200 € → 1 500 € (no phantom 100 → 1200 drop)', () => {
+    const snaps = makeC3Passage();
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = groups.map((g, i) => buildPassageFromGroup(g, i));
+    const history = buildPriceHistory(passages);
+    const prices = history.map((h) => h.price);
+    expect(prices).not.toContain(100);
+    expect(prices).toEqual([1200, 1500]);
+  });
+
+  it('preserves a real 100 € MAP when no contradicting signal exists (scooter / épave case)', () => {
+    // Defense-in-depth check: the scrub must only fire when a signal actively
+    // disproves the 100 €. A passage with only MAP=100 and nothing else stays.
+    const snaps = [
+      snap({ id: 1, scrapedAt: new Date('2026-04-20T08:00:00Z'), startingPrice: 100, status: 'available' }),
+      snap({ id: 2, scrapedAt: new Date('2026-04-22T08:00:00Z'), startingPrice: 100, status: 'available' }),
+    ];
+    expect(buildMapTrajectory(snaps)).toEqual([100]);
+    expect(pickStartingPrice(snaps)).toBe(100);
+  });
+
+  it('preserves a real 100 € MAP when only a sub-threshold signal exists (299 € bid)', () => {
+    // A 100 € scooter bid up to 299 € is plausible; the scrub threshold is 500.
+    const snaps = [
+      snap({ id: 1, scrapedAt: new Date('2026-04-20T08:00:00Z'), startingPrice: 100, status: 'available' }),
+      snap({ id: 2, scrapedAt: new Date('2026-04-22T08:00:00Z'), startingPrice: 100, currentAuctionPrice: 299, status: 'auction_live' }),
+    ];
+    expect(buildMapTrajectory(snaps)).toEqual([100]);
+  });
+});
+
+describe('cross-passage placeholder scrub (ref 11402626 regression)', () => {
+  // Real case: a vehicle is listed on 3 successive sale dates with 3 distinct
+  // hashIds (VPauto regenerates the listing each time). The 24/04 passage
+  // captured only MAP=100 € snapshots (scraper placeholder) with no live/sold
+  // and no cote yet. The 02/05 passage finally captured cote=21 200 € and prix
+  // neuf=38 500 € — those values retroactively prove the 24/04 MAP=100 €
+  // was the bogus VPauto placeholder. The per-passage scrub alone couldn't
+  // see them (distinct hashId → distinct passage); we need vehicle-wide
+  // signal aggregation via buildPassagesForVehicle.
+  const makeMultiPassageVehicle = () => [
+    // P1 — 18/04: no signal, no MAP stored (legitimate blank passage).
+    snap({
+      id: 1,
+      hashId: 'hash-18',
+      saleDate: '2026-04-18',
+      scrapedAt: new Date('2026-04-18T08:00:00Z'),
+      startingPrice: null,
+      status: 'available',
+    }),
+    // P2 — 24/04: MAP=100 (placeholder). No signal in this passage alone.
+    ...Array.from({ length: 9 }, (_, i) => {
+      const day = String(20 + Math.floor(i / 3)).padStart(2, '0');
+      const hour = String(8 + (i % 3) * 2).padStart(2, '0');
+      return snap({
+        id: 10 + i,
+        hashId: 'hash-24',
+        saleDate: '2026-04-24',
+        scrapedAt: new Date(`2026-04-${day}T${hour}:00:00Z`),
+        startingPrice: 100,
+        status: 'available',
+      });
+    }),
+    // P3 — 02/05: cote + prix neuf, but no MAP yet (listing just opened).
+    snap({
+      id: 100,
+      hashId: 'hash-02',
+      saleDate: '2026-05-02',
+      scrapedAt: new Date('2026-05-01T09:00:00Z'),
+      startingPrice: null,
+      marketValue: 21200,
+      newPrice: 38500,
+      status: 'available',
+    }),
+  ];
+
+  it('buildPassagesForVehicle scrubs MAP=100 € on P2 using cote/neuf captured on P3', () => {
+    const snaps = makeMultiPassageVehicle();
+    const groups = groupSnapshotsIntoPassages(snaps);
+    expect(groups).toHaveLength(3);
+    const passages = buildPassagesForVehicle(groups, snaps);
+    expect(passages).toHaveLength(3);
+    // None of the passages must surface 100 € as startingPrice — the vehicle's
+    // cote/neuf make 100 € categorically implausible.
+    expect(passages.every((p) => p.startingPrice !== 100)).toBe(true);
+  });
+
+  it('buildPriceHistory for a cross-passage-polluted vehicle never emits a 100 € chart point', () => {
+    const snaps = makeMultiPassageVehicle();
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = buildPassagesForVehicle(groups, snaps);
+    const history = buildPriceHistory(passages);
+    expect(history.some((h) => h.price === 100)).toBe(false);
+  });
+
+  it('without cross-passage signals, per-passage helpers alone keep the 100 € (proves the bug pattern)', () => {
+    // Sanity anchor: if we only look at P2's own snapshots, there is no way
+    // to know the 100 € is bogus — 9 snaps, all MAP=100, no live/sold/cote.
+    // This test codifies the limitation the vehicle-wide scrub was built to
+    // overcome.
+    const snaps = makeMultiPassageVehicle();
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const p2 = groups[1]; // the 24/04 passage, isolated
+    expect(buildMapTrajectory(p2.snapshots)).toEqual([100]);
+    expect(pickStartingPrice(p2.snapshots)).toBe(100);
+  });
+
+  it('buildPassageFromGroup accepts externalSignals and rejects the canonical 100 € fallback', () => {
+    // Defense-in-depth: even when the trajectory is empty and pickStartingPrice
+    // returns undefined, the canonical snapshot's raw startingPrice must not
+    // leak through when vehicle-wide signals prove it bogus.
+    const snaps = makeMultiPassageVehicle();
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const p2 = groups[1];
+    // With no external signals, the 100 € leaks through the canonical fallback.
+    const withoutExternal = buildPassageFromGroup(p2, 1);
+    expect(withoutExternal.startingPrice).toBe(100);
+    // With vehicle-wide signals, the 100 € is scrubbed.
+    const withExternal = buildPassageFromGroup(p2, 1, {
+      currentAuctionPrice: null,
+      soldPrice: null,
+      marketValue: 21200,
+      newPrice: 38500,
+    });
+    expect(withExternal.startingPrice).toBeUndefined();
+  });
+});
+
+describe('pickPassageSaleDate (CITROEN C3 11404446 regression)', () => {
+  // Bug: snapshot #27955 was scraped on 2026-04-24 with saleDate=2019-08-19
+  // because the live-auction page lacked an explicit "date de vente" kv and
+  // the scraper's regex fallback latched onto the car's MEC (19/08/2019).
+  // That outlier became the canonical (latest scrapedAt) and pulled the
+  // entire passage's saleDate into 2019, which created a phantom "old
+  // passage" with a stale 1 200 € MAP copied from the real 24/04 passage.
+  // The chart then rendered [1 200, 1 500, 1 200] → "Stable" instead of
+  // [1 200, 1 500] → "+300 € ↑". The consensus MODE below immunises us.
+  it('returns the MODE when one saleDate dominates', () => {
+    const snaps = [
+      snap({ id: 1, saleDate: '2026-04-24' }),
+      snap({ id: 2, saleDate: '2026-04-24' }),
+      snap({ id: 3, saleDate: '2026-04-24' }),
+      snap({ id: 4, saleDate: '2019-08-19' }), // outlier
+    ];
+    expect(pickPassageSaleDate(snaps)).toBe('2026-04-24');
+  });
+
+  it('ignores null saleDates in the count', () => {
+    const snaps = [
+      snap({ id: 1, saleDate: null }),
+      snap({ id: 2, saleDate: '2026-04-24' }),
+      snap({ id: 3, saleDate: '2026-04-24' }),
+    ];
+    expect(pickPassageSaleDate(snaps)).toBe('2026-04-24');
+  });
+
+  it('prefers the later date on ties (MODE tie-break)', () => {
+    const snaps = [
+      snap({ id: 1, saleDate: '2026-04-20' }),
+      snap({ id: 2, saleDate: '2026-04-20' }),
+      snap({ id: 3, saleDate: '2026-04-24' }),
+      snap({ id: 4, saleDate: '2026-04-24' }),
+    ];
+    expect(pickPassageSaleDate(snaps)).toBe('2026-04-24');
+  });
+
+  it('falls back to the canonical when every saleDate is null', () => {
+    const canonical = snap({
+      id: 9,
+      saleDate: null,
+      scrapedAt: new Date('2026-04-24T12:00:00Z'),
+    });
+    const snaps = [snap({ id: 1, saleDate: null }), canonical];
+    expect(pickPassageSaleDate(snaps, canonical)).toBe('2026-04-24');
+  });
+
+  it('keeps the real passage on 2026-04-24 when 11 snaps say 24/04 and 1 says MEC 2019 (C3 11404446 e2e)', () => {
+    // Full integration: feed 12 sibling snapshots (same hashId) where 11 have
+    // saleDate=2026-04-24 and the 12th — with the latest scrapedAt, i.e. the
+    // natural canonical pick — reports 2019-08-19. Grouping + rendering
+    // must surface a single 2026-04-24 passage, not two (one phantom 2019).
+    const hashId = 'c3-11404446';
+    const snaps: SnapshotForHistory[] = [];
+    for (let i = 0; i < 11; i++) {
+      snaps.push(
+        snap({
+          id: 100 + i,
+          hashId,
+          saleDate: '2026-04-24',
+          scrapedAt: new Date(`2026-04-24T${String(6 + i).padStart(2, '0')}:00:00Z`),
+          startingPrice: 1200,
+          currentAuctionPrice: i > 5 ? 1500 : null,
+          status: 'auction_live',
+        }),
+      );
+    }
+    // Poisoned canonical — latest scrapedAt, bogus saleDate.
+    snaps.push(
+      snap({
+        id: 999,
+        hashId,
+        saleDate: '2019-08-19',
+        scrapedAt: new Date('2026-04-24T23:00:00Z'),
+        startingPrice: 1200,
+        currentAuctionPrice: 1500,
+        status: 'auction_live',
+      }),
+    );
+
+    const groups = groupSnapshotsIntoPassages(snaps);
+    expect(groups).toHaveLength(1);
+    const passages = buildPassagesForVehicle(groups, snaps);
+    expect(passages).toHaveLength(1);
+    expect(passages[0].date).toBe('2026-04-24');
+    // Sanity: no phantom 2019 passage in the chart.
+    const history = buildPriceHistory(passages);
+    expect(history.every((h) => !(h.label ?? '').includes('2019'))).toBe(true);
+  });
+});
+
+describe('computeEvolution with live-bid fallback', () => {
+  it('reports +1 900 € for Yaris Cross 11403878 (null MAP, live bid → sold)', () => {
+    // First live bid = 17 900, sold = 19 800 → +1 900, direction up.
+    const snaps = [
+      snap({ id: 1, hashId: 'yaris', scrapedAt: new Date('2026-04-18T14:00:00Z'), currentAuctionPrice: 17900, status: 'auction_live' }),
+      snap({ id: 2, hashId: 'yaris', scrapedAt: new Date('2026-04-18T14:15:00Z'), currentAuctionPrice: 18400, status: 'auction_live' }),
+      snap({ id: 3, hashId: 'yaris', scrapedAt: new Date('2026-04-18T14:20:00Z'), soldPrice: 19800, status: 'sold' }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = groups.map((g, i) => buildPassageFromGroup(g, i));
+    const evo = computeEvolution(passages);
+    expect(evo.firstStartingPrice).toBeNull(); // no real MAP ever published
+    expect(evo.lastEffectivePrice).toBe(19800);
+    expect(evo.evolutionAmount).toBe(1900);
+    expect(evo.evolutionDirection).toBe('up');
+    expect(evo.lastPassageSold).toBe(true);
+  });
+
+  it('still uses MAP as anchor when both MAP and live bid exist', () => {
+    const snaps = [
+      snap({ id: 1, hashId: 'a', scrapedAt: new Date('2026-04-18T14:00:00Z'), startingPrice: 15000, status: 'available' }),
+      snap({ id: 2, hashId: 'a', scrapedAt: new Date('2026-04-18T14:10:00Z'), startingPrice: 15000, currentAuctionPrice: 16500, status: 'auction_live' }),
+      snap({ id: 3, hashId: 'a', scrapedAt: new Date('2026-04-18T14:30:00Z'), soldPrice: 17200, status: 'sold' }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = groups.map((g, i) => buildPassageFromGroup(g, i));
+    const evo = computeEvolution(passages);
+    expect(evo.firstStartingPrice).toBe(15000);
+    expect(evo.lastEffectivePrice).toBe(17200);
+    expect(evo.evolutionAmount).toBe(2200);
+    expect(evo.evolutionDirection).toBe('up');
+  });
+
+  it('reports live-bid-only evolution while still live (no sold yet)', () => {
+    // Auction ongoing: first bid 10 000, current bid 12 500 → +2 500.
+    const snaps = [
+      snap({ id: 1, hashId: 'a', scrapedAt: new Date('2026-04-20T14:00:00Z'), currentAuctionPrice: 10000, status: 'auction_live' }),
+      snap({ id: 2, hashId: 'a', scrapedAt: new Date('2026-04-20T14:30:00Z'), currentAuctionPrice: 12500, status: 'auction_live' }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = groups.map((g, i) => buildPassageFromGroup(g, i));
+    const evo = computeEvolution(passages);
+    expect(evo.firstStartingPrice).toBeNull();
+    expect(evo.lastEffectivePrice).toBe(12500);
+    expect(evo.evolutionAmount).toBe(2500);
+    expect(evo.evolutionDirection).toBe('up');
+    expect(evo.lastPassageSold).toBe(false);
   });
 });

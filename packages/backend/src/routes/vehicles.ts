@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import {
   applyPassageNavigation,
-  buildPassageFromGroup,
+  buildPassagesForVehicle,
   buildPriceHistory,
   computeEvolution,
   groupSnapshotsIntoPassages,
@@ -566,7 +566,7 @@ app.get('/history/:vehicleId', async (c) => {
     hashId: vehicle.hashId,
   });
   const sortedGroups = groupSnapshotsIntoPassages(historySnapshots);
-  const rawPassages: VehiclePassage[] = sortedGroups.map((g, idx) => buildPassageFromGroup(g, idx));
+  const rawPassages: VehiclePassage[] = buildPassagesForVehicle(sortedGroups, historySnapshots);
   const passages = applyPassageNavigation(sortedGroups, rawPassages);
   const priceHistory = buildPriceHistory(passages);
   const mileageHistory = passages.map((p) => ({ date: p.date, mileage: p.mileage }));
@@ -1035,7 +1035,7 @@ app.get('/cross-auction/:hashId', async (c) => {
     hashId: vehicle.hashId,
   });
   const groups = groupSnapshotsIntoPassages(historySnapshots);
-  const rawPassages = groups.map((group, index) => buildPassageFromGroup(group, index));
+  const rawPassages = buildPassagesForVehicle(groups, historySnapshots);
   const resolvedPassages = applyPassageNavigation(groups, rawPassages);
 
   const passages: {

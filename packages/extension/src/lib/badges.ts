@@ -193,6 +193,7 @@ function injectStatusOverlay(card: HTMLElement, v: Partial<VehicleSnapshot>): vo
   const isNonRoulant = /non\s*roulant/i.test(v.observations || '') || /non\s*roulant/i.test(v.model || '');
 
   if (!isSold && !isNonRoulant) return;
+  card.dataset.vpautoHasStatus = 'true';
 
   const overlay = document.createElement('div');
   overlay.className = 'vpauto-status-overlay';
@@ -272,6 +273,7 @@ function injectBadgeOverlay(card: HTMLElement, badges: VehicleBadge[]): void {
 
 type DocKind = 'ct' | 'be' | 'se' | 'db' | 'obs' | 'eq' | 'tech';
 type DocButtonState = 'checking' | 'confirmed' | 'missing' | 'fallback';
+type DocButtonVariant = 'badge' | 'menu';
 
 type DocButtonConfig = {
   kind: DocKind;
@@ -294,6 +296,105 @@ function isTextKind(kind: DocKind): boolean {
   return kind === 'obs' || kind === 'eq' || kind === 'tech';
 }
 
+function shortDocLabel(kind: DocKind): string {
+  switch (kind) {
+    case 'be': return 'BE';
+    case 'se': return 'SE';
+    case 'db': return 'BAT';
+    case 'obs': return 'OBS';
+    case 'eq': return 'EQ';
+    case 'tech': return 'TECH';
+    case 'ct':
+    default: return 'CT';
+  }
+}
+
+function docIcon(kind: DocKind): string {
+  switch (kind) {
+    case 'ct': return 'CT';
+    case 'be': return 'BE';
+    case 'se': return 'SE';
+    case 'db': return 'BAT';
+    case 'obs': return 'OBS';
+    case 'eq': return 'EQ';
+    case 'tech': return 'CAR';
+    default: return shortDocLabel(kind);
+  }
+}
+
+function badgeLabelForState(state: DocButtonState): string {
+  switch (state) {
+    case 'confirmed': return 'CT disponible';
+    case 'missing': return 'CT indisponible';
+    case 'fallback': return 'Vérifier sur la fiche';
+    case 'checking':
+    default: return 'Analyse CT…';
+  }
+}
+
+function menuMetaForState(kind: DocKind, state: DocButtonState): string {
+  if (state === 'checking') return 'Analyse…';
+  if (state === 'missing') return 'Indisponible';
+  if (state === 'fallback') return 'Ouvrir la fiche';
+
+  switch (kind) {
+    case 'obs':
+    case 'eq':
+      return 'Texte';
+    case 'tech':
+      return 'Données';
+    case 'ct':
+    case 'be':
+    case 'se':
+    case 'db':
+    default:
+      return 'PDF';
+  }
+}
+
+function buttonTitleForState(config: DocButtonConfig): string {
+  switch (config.state) {
+    case 'confirmed':
+      return config.tooltip;
+    case 'missing':
+      return missingTooltip(config.kind);
+    case 'fallback':
+      return 'Vérification indisponible — ouvrir la fiche véhicule';
+    case 'checking':
+    default:
+      return 'Vérification du document sur la fiche véhicule';
+  }
+}
+
+function renderDocButtonState(button: HTMLButtonElement, config: DocButtonConfig): void {
+  const variant = (button.dataset.vpautoVariant as DocButtonVariant | undefined) || 'menu';
+  const isDisabled = config.state === 'checking' || config.state === 'missing';
+
+  button.dataset.vpautoState = config.state;
+  button.dataset.vpautoCtState = config.state;
+  button.disabled = isDisabled;
+  button.title = buttonTitleForState(config);
+  button.setAttribute('aria-disabled', isDisabled ? 'true' : 'false');
+
+  if (variant === 'badge') {
+    const label = button.querySelector<HTMLElement>('.vpauto-ct-badge__label');
+    if (label) label.textContent = badgeLabelForState(config.state);
+  } else {
+    const label = button.querySelector<HTMLElement>('.vpauto-doc-menu-item__label');
+    const meta = button.querySelector<HTMLElement>('.vpauto-doc-menu-item__meta');
+    const arrow = button.querySelector<HTMLElement>('.vpauto-doc-menu-item__arrow');
+
+    if (label) label.textContent = config.label;
+    if (meta) meta.textContent = menuMetaForState(config.kind, config.state);
+    if (arrow) {
+      arrow.textContent = config.state === 'fallback' ? '↗' : '›';
+      arrow.setAttribute('aria-hidden', config.state === 'missing' ? 'true' : 'false');
+    }
+  }
+
+  syncDocDockSummary(button);
+}
+
 /** Close any open doc popup on other cards (or on this one if not excluded). */
 function closeAllDocPopups(exceptCard?: HTMLElement): void {
   document.querySelectorAll<HTMLElement>('.vpauto-doc-popup').forEach((popup) => {
@@ -302,17 +403,104 @@ function closeAllDocPopups(exceptCard?: HTMLElement): void {
     popup.remove();
   });
 
-  document.querySelectorAll<HTMLElement>('.vpauto-doc-toggle').forEach((button) => {
+  document.querySelectorAll<HTMLElement>('.vpauto-doc-toggle[aria-expanded="true"]').forEach((button) => {
     const owner = button.closest('li') as HTMLElement | null;
     if (exceptCard && owner === exceptCard) return;
     button.setAttribute('aria-expanded', 'false');
-    const defaultLabel = button.dataset.vpautoDefaultLabel;
-    if (defaultLabel) button.textContent = defaultLabel;
   });
 }
 
+function closeAllDocMenus(exceptCard?: HTMLElement): void {
+  document.querySelectorAll<HTMLElement>('.vpauto-doc-dock[data-vpauto-open="true"]').forEach((dock) => {
+    const owner = dock.closest('li') as HTMLElement | null;
+    if (exceptCard && owner === exceptCard) return;
+
+    dock.dataset.vpautoOpen = 'false';
+    dock.querySelector<HTMLButtonElement>('.vpauto-doc-trigger')?.setAttribute('aria-expanded', 'false');
+  });
+}
+
+function setDocMenuOpen(card: HTMLElement, open: boolean): void {
+  const dock = card.querySelector<HTMLElement>('.vpauto-doc-dock');
+  if (!dock) return;
+
+  if (open) {
+    closeAllDocMenus(card);
+  }
+
+  dock.dataset.vpautoOpen = open ? 'true' : 'false';
+  dock.querySelector<HTMLButtonElement>('.vpauto-doc-trigger')?.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function buildActionTriggerMessage(counts: {
+  total: number;
+  confirmed: number;
+  checking: number;
+  missing: number;
+  fallback: number;
+}): string {
+  const { total, confirmed, checking, missing, fallback } = counts;
+
+  if (fallback === total && total > 0) {
+    return 'Vérification indisponible. Ouvrez la fiche pour accéder aux documents.';
+  }
+
+  if (confirmed > 0) {
+    return `${confirmed} action${confirmed > 1 ? 's' : ''} disponible${confirmed > 1 ? 's' : ''}`;
+  }
+
+  if (checking > 0) {
+    return 'Analyse de la fiche en cours…';
+  }
+
+  if (missing === total && total > 0) {
+    return 'Aucune action disponible pour le moment.';
+  }
+
+  return 'Actions rapides';
+}
+
+function syncDocDockSummary(target: HTMLElement): void {
+  const dock = target.closest<HTMLElement>('.vpauto-doc-dock');
+  if (!dock) return;
+
+  const trigger = dock.querySelector<HTMLButtonElement>('.vpauto-doc-trigger');
+  const buttons = [...dock.querySelectorAll<HTMLButtonElement>('.vpauto-doc-toggle')];
+
+  if (!trigger || buttons.length === 0) return;
+
+  const counts = buttons.reduce(
+    (acc, button) => {
+      const state = button.dataset.vpautoState as DocButtonState | undefined;
+      acc.total += 1;
+      if (state === 'confirmed') acc.confirmed += 1;
+      else if (state === 'checking') acc.checking += 1;
+      else if (state === 'fallback') acc.fallback += 1;
+      else acc.missing += 1;
+      return acc;
+    },
+    { total: 0, confirmed: 0, checking: 0, missing: 0, fallback: 0 },
+  );
+
+  let summaryState: 'ready' | 'checking' | 'missing' | 'fallback' = 'missing';
+  if (counts.fallback === counts.total && counts.total > 0) {
+    summaryState = 'fallback';
+  } else if (counts.confirmed > 0) {
+    summaryState = 'ready';
+  } else if (counts.checking > 0) {
+    summaryState = 'checking';
+  }
+
+  trigger.dataset.vpautoSummaryState = summaryState;
+  trigger.title = buildActionTriggerMessage(counts);
+  trigger.dataset.vpautoAvailableCount = String(counts.confirmed);
+}
+
 /**
- * Add CT (and, if confirmed, Bilan Expert) buttons to a vehicle card.
+ * Add the list-card quick actions UI:
+ * - one always-visible CT badge
+ * - one compact "Actions" trigger
+ * - a floating menu for text sections and extra docs
  *
  * Important: the CT button is NEVER rendered as clickable on top of an
  * unverified URL — that previously caused black 404 iframes for vehicles
@@ -320,8 +508,8 @@ function closeAllDocPopups(exceptCard?: HTMLElement): void {
  * transitions to either "confirmed" (clickable) or "missing" (greyed,
  * "CT indisponible") once the eager probe of the detail page resolves.
  *
- * The Bilan Expert button is created only after the probe positively
- * confirms a `_BE.pdf` link in the detail page.
+ * Optional docs like Bilan Expert and Diagnostic batterie are only added
+ * when the probe positively confirms them on the detail page.
  */
 function addDocumentButtons(
   card: HTMLElement,
@@ -329,23 +517,11 @@ function addDocumentButtons(
   hashId: string,
   detailPageUrl: string,
 ): void {
-  // Container that hosts all doc buttons (CT, Bilan, ...)
   const dock = document.createElement('div');
   dock.className = 'vpauto-doc-dock';
-  dock.style.cssText = `
-    position: absolute;
-    right: 10px;
-    bottom: 10px;
-    z-index: 18;
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    align-items: center;
-  `;
-  card.appendChild(dock);
+  dock.dataset.vpautoOpen = 'false';
+  dock.dataset.vpautoHasStatus = card.dataset.vpautoHasStatus === 'true' ? 'true' : 'false';
 
-  // CT button starts in "checking" state — non-clickable, no URL.
   const ctConfig: DocButtonConfig = {
     kind: 'ct',
     label: 'Voir le CT',
@@ -355,13 +531,48 @@ function addDocumentButtons(
     state: 'checking',
     detailPageUrl,
   };
-  const ctButton = createDocButton(card, dock, v, ctConfig);
+  const ctButton = createDocButton(card, dock, v, ctConfig, 'badge');
   applyCheckingState(ctButton, ctConfig);
 
-  // Three text-only buttons (Observations, Équipements/Options,
-  // Caractéristiques techniques) — all start "checking", transition to
-  // "confirmed" with extracted text on success, or "missing" if the
-  // section wasn't found on the page.
+  const triggerWrap = document.createElement('div');
+  triggerWrap.className = 'vpauto-doc-trigger-wrap';
+  dock.appendChild(triggerWrap);
+
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'vpauto-doc-trigger';
+  trigger.dataset.vpautoDetailUrl = detailPageUrl;
+  trigger.dataset.vpautoSummaryState = 'checking';
+  trigger.setAttribute('aria-expanded', 'false');
+  trigger.innerHTML = `
+    <span class="vpauto-doc-trigger__icon" aria-hidden="true">•••</span>
+    <span class="vpauto-doc-trigger__label">Actions</span>
+  `;
+  triggerWrap.appendChild(trigger);
+
+  const panel = document.createElement('div');
+  panel.className = 'vpauto-doc-panel';
+  triggerWrap.appendChild(panel);
+
+  const menuList = document.createElement('div');
+  menuList.className = 'vpauto-doc-panel__list';
+  panel.appendChild(menuList);
+
+  trigger.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const open = dock.dataset.vpautoOpen === 'true';
+    if (!open) {
+      closeAllDocPopups(card);
+    }
+    setDocMenuOpen(card, !open);
+  });
+
+  panel.addEventListener('click', (event) => {
+    event.stopPropagation();
+  });
+
   const obsConfig: DocButtonConfig = {
     kind: 'obs',
     label: 'Observations',
@@ -371,7 +582,7 @@ function addDocumentButtons(
     state: 'checking',
     detailPageUrl,
   };
-  const obsButton = createDocButton(card, dock, v, obsConfig);
+  const obsButton = createDocButton(card, menuList, v, obsConfig, 'menu');
   applyCheckingState(obsButton, obsConfig);
 
   const eqConfig: DocButtonConfig = {
@@ -383,8 +594,10 @@ function addDocumentButtons(
     state: 'checking',
     detailPageUrl,
   };
-  const eqButton = createDocButton(card, dock, v, eqConfig);
+  const eqButton = createDocButton(card, menuList, v, eqConfig, 'menu');
   applyCheckingState(eqButton, eqConfig);
+
+  menuList.appendChild(document.createElement('div')).className = 'vpauto-doc-menu-separator';
 
   const techConfig: DocButtonConfig = {
     kind: 'tech',
@@ -395,40 +608,55 @@ function addDocumentButtons(
     state: 'checking',
     detailPageUrl,
   };
-  const techButton = createDocButton(card, dock, v, techConfig);
+  const techButton = createDocButton(card, menuList, v, techConfig, 'menu');
   applyCheckingState(techButton, techConfig);
 
-  // Eagerly run the probe (rate-limited to MAX_CONCURRENT_PROBES).
-  // We do not wait for the card to be in viewport: a vehicle in the list
-  // might be clicked at any moment, including by keyboard nav.
+  const seConfig: DocButtonConfig = {
+    kind: 'se',
+    label: 'Voir entretien',
+    tooltip: 'Afficher le Suivi d\'Entretien',
+    confirmedUrl: null,
+    confirmedText: null,
+    state: 'checking',
+    detailPageUrl,
+  };
+  const seButton = createDocButton(card, menuList, v, seConfig, 'menu');
+  applyCheckingState(seButton, seConfig);
+
+  const optionalSeparator = document.createElement('div');
+  optionalSeparator.className = 'vpauto-doc-menu-separator';
+  optionalSeparator.hidden = true;
+  panel.appendChild(optionalSeparator);
+
+  const optionalList = document.createElement('div');
+  optionalList.className = 'vpauto-doc-panel__list';
+  panel.appendChild(optionalList);
+
+  const appendOptionalButton = (config: DocButtonConfig) => {
+    if (optionalSeparator.hidden) optionalSeparator.hidden = false;
+    const button = createDocButton(card, optionalList, v, config, 'menu');
+    applyConfirmedState(button, config);
+  };
+
+  card.appendChild(dock);
+
   void getOrProbe(hashId, detailPageUrl).then((result) => {
     if (!result) {
-      // Network/parse failure → DEGRADED MODE, NOT a false negative.
-      // We can't prove absence, so we don't grey. We can't prove presence,
-      // so we don't link to a guessed PDF URL. Instead, the button becomes
-      // a "Voir la fiche ↗" link that opens the detail page in a new tab,
-      // where the user can manually access whatever docs exist.
       applyFallbackState(ctButton, ctConfig);
-      // Same treatment for the three text-only buttons — without a probe
-      // we don't have the text to display, so "open the detail page" is
-      // the only safe fallback.
       applyFallbackState(obsButton, obsConfig);
       applyFallbackState(eqButton, eqConfig);
       applyFallbackState(techButton, techConfig);
+      applyFallbackState(seButton, seConfig);
       return;
     }
 
-    // ── CT handling ──
     if (result.hasCt && result.ctUrl) {
       ctConfig.confirmedUrl = result.ctUrl;
       applyConfirmedState(ctButton, ctConfig);
     } else {
-      // Probe ran successfully and confirmed no `_CT.pdf` link in the page →
-      // genuine absence, safe to grey.
       applyMissingState(ctButton, ctConfig);
     }
 
-    // ── Observations handling (text, in-page) ──
     if (result.hasObservationsText && result.observationsText) {
       obsConfig.confirmedText = result.observationsText;
       applyConfirmedState(obsButton, obsConfig);
@@ -436,7 +664,6 @@ function addDocumentButtons(
       applyMissingState(obsButton, obsConfig);
     }
 
-    // ── Équipements/Options handling (text, in-page) ──
     if (result.hasEquipmentText && result.equipmentText) {
       eqConfig.confirmedText = result.equipmentText;
       applyConfirmedState(eqButton, eqConfig);
@@ -444,7 +671,6 @@ function addDocumentButtons(
       applyMissingState(eqButton, eqConfig);
     }
 
-    // ── Caractéristiques techniques handling (text, in-page) ──
     if (result.hasTechnicalSpecsText && result.technicalSpecsText) {
       techConfig.confirmedText = result.technicalSpecsText;
       applyConfirmedState(techButton, techConfig);
@@ -452,11 +678,13 @@ function addDocumentButtons(
       applyMissingState(techButton, techConfig);
     }
 
-    // ── Bilan Expert handling ──
-    // Only add a BE button if a `_BE.pdf` was positively found. We deliberately
-    // do NOT render a "missing" BE button when absent — the absence of a Bilan
-    // Expert is the norm (most cars don't have one) and a greyed-out button
-    // would add visual noise on every card.
+    if (result.hasSuiviEntretien && result.suiviEntretienUrl) {
+      seConfig.confirmedUrl = result.suiviEntretienUrl;
+      applyConfirmedState(seButton, seConfig);
+    } else {
+      applyMissingState(seButton, seConfig);
+    }
+
     if (result.hasBilanExpert && result.bilanExpertUrl) {
       const beConfig: DocButtonConfig = {
         kind: 'be',
@@ -467,32 +695,9 @@ function addDocumentButtons(
         state: 'confirmed',
         detailPageUrl,
       };
-      const beButton = createDocButton(card, dock, v, beConfig);
-      applyConfirmedState(beButton, beConfig);
+      appendOptionalButton(beConfig);
     }
 
-    // ── Suivi d'Entretien handling ──
-    // Same philosophy as BE: only render the button when the document is
-    // positively present. The "Suivi d'Entretien : Non" metadata field is
-    // also the norm, and silencing it visually keeps cards clean.
-    if (result.hasSuiviEntretien && result.suiviEntretienUrl) {
-      const seConfig: DocButtonConfig = {
-        kind: 'se',
-        label: 'Voir entretien',
-        tooltip: 'Afficher le Suivi d\'Entretien',
-        confirmedUrl: result.suiviEntretienUrl,
-        confirmedText: null,
-        state: 'confirmed',
-        detailPageUrl,
-      };
-      const seButton = createDocButton(card, dock, v, seConfig);
-      applyConfirmedState(seButton, seConfig);
-    }
-
-    // ── Diagnostic batterie handling ──
-    // Only for EVs and PHEVs — ICE cars will never have a `_TB.pdf`, so
-    // rendering a greyed "Diagnostic batterie indisponible" button on every
-    // petrol car would be pure noise. Present-only rendering.
     if (result.hasDiagnosticBatterie && result.diagnosticBatterieUrl) {
       const dbConfig: DocButtonConfig = {
         kind: 'db',
@@ -503,8 +708,7 @@ function addDocumentButtons(
         state: 'confirmed',
         detailPageUrl,
       };
-      const dbButton = createDocButton(card, dock, v, dbConfig);
-      applyConfirmedState(dbButton, dbConfig);
+      appendOptionalButton(dbConfig);
     }
   });
 }
@@ -512,50 +716,57 @@ function addDocumentButtons(
 /** Build one doc button shell and wire its click handler. State is applied separately. */
 function createDocButton(
   card: HTMLElement,
-  dock: HTMLElement,
+  container: HTMLElement,
   v: Partial<VehicleSnapshot>,
   config: DocButtonConfig,
+  variant: DocButtonVariant,
 ): HTMLButtonElement {
   const button = document.createElement('button');
   button.type = 'button';
-  button.className = `vpauto-doc-toggle vpauto-doc-toggle-${config.kind}`;
+  button.className = variant === 'badge'
+    ? 'vpauto-doc-toggle vpauto-ct-badge'
+    : 'vpauto-doc-toggle vpauto-doc-menu-item';
   button.setAttribute('aria-expanded', 'false');
-  button.dataset.vpautoDefaultLabel = config.label;
   button.dataset.vpautoDocKind = config.kind;
-  button.style.cssText = `
-    border: none;
-    color: #f8fafc;
-    padding: 7px 11px;
-    border-radius: 999px;
-    font: 700 11px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    letter-spacing: 0.01em;
-    box-shadow: 0 6px 18px rgba(0,0,0,0.28);
-    backdrop-filter: blur(8px);
-    transition: opacity 150ms, filter 150ms, background 150ms;
-  `;
-  dock.appendChild(button);
+  button.dataset.vpautoVariant = variant;
+  button.dataset.vpautoShort = shortDocLabel(config.kind);
+  button.dataset.vpautoState = config.state;
+  if (variant === 'badge') {
+    button.innerHTML = `
+      <span class="vpauto-ct-badge__dot" aria-hidden="true"></span>
+      <span class="vpauto-ct-badge__label"></span>
+    `;
+  } else {
+    button.innerHTML = `
+      <span class="vpauto-doc-menu-item__icon" aria-hidden="true">${docIcon(config.kind)}</span>
+      <span class="vpauto-doc-menu-item__body">
+        <span class="vpauto-doc-menu-item__label"></span>
+        <span class="vpauto-doc-menu-item__meta"></span>
+      </span>
+      <span class="vpauto-doc-menu-item__arrow" aria-hidden="true">›</span>
+    `;
+  }
+  container.appendChild(button);
 
   button.addEventListener('click', (event) => {
     event.preventDefault();
     event.stopPropagation();
 
-    // Fallback (probe failed): just open the detail page in a new tab —
-    // no popup, no iframe, no risk of a black 404 preview.
     if (config.state === 'fallback') {
+      setDocMenuOpen(card, false);
       window.open(config.detailPageUrl, '_blank', 'noopener');
       return;
     }
 
-    // Only confirmed buttons open a popup. checking + missing → no-op.
     if (config.state !== 'confirmed') return;
 
-    // Toggle: if a popup of this kind is already open, close it
     const existing = card.querySelector<HTMLElement>(`.vpauto-doc-popup[data-vpauto-doc-kind="${config.kind}"]`);
     if (existing) {
       removeDocPopup(button);
       return;
     }
 
+    setDocMenuOpen(card, false);
     closeAllDocPopups(card);
 
     if (isTextKind(config.kind)) {
@@ -573,82 +784,19 @@ function createDocButton(
 /** Apply "checking" visuals — greyed out + non-clickable, "Vérification…" label. */
 function applyCheckingState(button: HTMLButtonElement, config: DocButtonConfig): void {
   config.state = 'checking';
-  button.disabled = true;
-  button.textContent = checkingLabel(config.kind);
-  button.title = 'Vérification du document sur la fiche véhicule';
-  button.style.background = 'rgba(60,64,75,0.78)';
-  button.style.opacity = '0.65';
-  button.style.cursor = 'progress';
-  button.dataset.vpautoCtState = 'checking';
-  button.setAttribute('aria-disabled', 'true');
-}
-
-function checkingLabel(kind: DocKind): string {
-  switch (kind) {
-    case 'be': return 'Bilan…';
-    case 'se': return 'Entretien…';
-    case 'db': return 'Batterie…';
-    case 'obs': return 'Observations…';
-    case 'eq': return 'Équipements…';
-    case 'tech': return 'Caractéristiques…';
-    case 'ct':
-    default:   return 'Vérification CT…';
-  }
+  renderDocButtonState(button, config);
 }
 
 /** Apply "confirmed" visuals — coloured background, clickable. */
 function applyConfirmedState(button: HTMLButtonElement, config: DocButtonConfig): void {
   config.state = 'confirmed';
-  button.disabled = false;
-  button.textContent = config.label;
-  button.title = config.tooltip;
-  button.style.background = confirmedBackground(config.kind);
-  button.style.opacity = '1';
-  button.style.filter = 'none';
-  button.style.cursor = 'pointer';
-  button.dataset.vpautoCtState = 'confirmed';
-  button.removeAttribute('aria-disabled');
-}
-
-/** Colour used for the confirmed state of each document kind. */
-function confirmedBackground(kind: DocKind): string {
-  switch (kind) {
-    case 'be':   return 'rgba(244,121,32,0.92)';  // orange — Bilan Expert
-    case 'se':   return 'rgba(34,197,94,0.92)';   // green  — Suivi d'Entretien
-    case 'db':   return 'rgba(59,130,246,0.92)';  // blue   — Diagnostic batterie
-    case 'obs':  return 'rgba(236,72,153,0.92)';  // pink   — Observations (text)
-    case 'eq':   return 'rgba(139,92,246,0.92)';  // purple — Équipements/Options (text)
-    case 'tech': return 'rgba(14,165,233,0.92)';  // cyan   — Caractéristiques techniques (text)
-    case 'ct':
-    default:     return 'rgba(15,17,23,0.85)';    // dark   — Contrôle Technique
-  }
+  renderDocButtonState(button, config);
 }
 
 /** Apply "missing" visuals — fully greyed, "indisponible", non-clickable. */
 function applyMissingState(button: HTMLButtonElement, config: DocButtonConfig): void {
   config.state = 'missing';
-  button.disabled = true;
-  button.textContent = missingLabel(config.kind);
-  button.title = missingTooltip(config.kind);
-  button.style.background = 'rgba(60,64,75,0.78)';
-  button.style.opacity = '0.55';
-  button.style.filter = 'grayscale(0.8)';
-  button.style.cursor = 'not-allowed';
-  button.dataset.vpautoCtState = 'missing';
-  button.setAttribute('aria-disabled', 'true');
-}
-
-function missingLabel(kind: DocKind): string {
-  switch (kind) {
-    case 'be':   return 'Bilan indisponible';
-    case 'se':   return 'Entretien indisponible';
-    case 'db':   return 'Batterie indisponible';
-    case 'obs':  return 'Observations indispo.';
-    case 'eq':   return 'Équipements indispo.';
-    case 'tech': return 'Caract. indisponibles';
-    case 'ct':
-    default:     return 'CT indisponible';
-  }
+  renderDocButtonState(button, config);
 }
 
 function missingTooltip(kind: DocKind): string {
@@ -673,15 +821,7 @@ function missingTooltip(kind: DocKind): string {
  */
 function applyFallbackState(button: HTMLButtonElement, config: DocButtonConfig): void {
   config.state = 'fallback';
-  button.disabled = false;
-  button.textContent = 'Voir la fiche ↗';
-  button.title = 'Vérification du document indisponible — ouvrir la fiche véhicule';
-  button.style.background = 'rgba(15,17,23,0.85)';
-  button.style.opacity = '1';
-  button.style.filter = 'none';
-  button.style.cursor = 'pointer';
-  button.dataset.vpautoCtState = 'fallback';
-  button.removeAttribute('aria-disabled');
+  renderDocButtonState(button, config);
 }
 
 function removeDocPopup(button: HTMLButtonElement): void {
@@ -690,8 +830,69 @@ function removeDocPopup(button: HTMLButtonElement): void {
   const popup = card.querySelector<HTMLElement>(`.vpauto-doc-popup[data-vpauto-doc-kind="${button.dataset.vpautoDocKind}"]`);
   if (popup) popup.remove();
   button.setAttribute('aria-expanded', 'false');
-  const defaultLabel = button.dataset.vpautoDefaultLabel;
-  if (defaultLabel) button.textContent = defaultLabel;
+}
+
+function popupTitle(kind: DocKind): string {
+  switch (kind) {
+    case 'ct': return 'Contrôle technique';
+    case 'be': return 'Bilan expert';
+    case 'se': return 'Suivi d’entretien';
+    case 'db': return 'Diagnostic batterie';
+    case 'obs': return 'Observations';
+    case 'eq': return 'Équipements';
+    case 'tech': return 'Caractéristiques';
+    default: return 'Document';
+  }
+}
+
+function popupPrimaryLabel(kind: DocKind): string {
+  switch (kind) {
+    case 'ct': return 'Ouvrir le CT';
+    case 'be': return 'Ouvrir le bilan';
+    case 'se': return 'Ouvrir l’entretien';
+    case 'db': return 'Ouvrir le diagnostic';
+    case 'obs':
+    case 'eq':
+    case 'tech':
+    default:
+      return 'Ouvrir la fiche';
+  }
+}
+
+function popupSubtitle(kind: DocKind): string {
+  switch (kind) {
+    case 'ct': return 'Document PDF confirmé sur la fiche VPauto';
+    case 'be': return 'Rapport d’expertise confirmé sur la fiche';
+    case 'se': return 'Document d’entretien confirmé sur la fiche';
+    case 'db': return 'Rapport batterie confirmé sur la fiche';
+    case 'obs': return 'Extrait texte récupéré sur la fiche VPauto';
+    case 'eq': return 'Liste d’équipements extraite de la fiche';
+    case 'tech': return 'Caractéristiques techniques extraites de la fiche';
+    default: return 'Accès rapide depuis la liste';
+  }
+}
+
+function vehicleMetaLine(v: Partial<VehicleSnapshot>): string {
+  const parts: string[] = [];
+  const name = [v.brand, v.model].filter(Boolean).join(' ');
+  if (name) parts.push(name);
+  if (v.year) parts.push(String(v.year));
+  if (v.mileage) parts.push(`${v.mileage.toLocaleString('fr-FR')} km`);
+  if (v.city) parts.push(v.city);
+  return parts.join(' • ');
+}
+
+function buildPopupHeader(v: Partial<VehicleSnapshot>, kind: DocKind): string {
+  return `
+    <div class="vpauto-doc-popup__head">
+      <div class="vpauto-doc-popup__icon" aria-hidden="true">${docIcon(kind)}</div>
+      <div class="vpauto-doc-popup__titleblock">
+        <div class="vpauto-doc-popup__title">${esc(popupTitle(kind))}</div>
+        <div class="vpauto-doc-popup__meta">${esc(vehicleMetaLine(v) || popupSubtitle(kind))}</div>
+      </div>
+      <button type="button" class="vpauto-doc-close vpauto-doc-popup__close" aria-label="Fermer l’aperçu">×</button>
+    </div>
+  `;
 }
 
 function openDocPopup(
@@ -704,111 +905,38 @@ function openDocPopup(
   const popup = document.createElement('div');
   popup.className = 'vpauto-doc-popup';
   popup.dataset.vpautoDocKind = config.kind;
-  popup.style.cssText = `
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(180deg, rgba(12,16,24,0.96) 0%, rgba(15,17,23,0.98) 100%);
-    padding: 0;
-    z-index: 30;
-    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    font-size: 12px;
-    color: #f0f0f5;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    animation: vpauto-ct-fade-in 140ms ease-out;
-    backdrop-filter: blur(3px);
-  `;
-
-  const brand = v.brand || '';
-  const model = v.model || '';
-  const isSold = v.status === 'sold';
-  const isNonRoulant = /non\s*roulant/i.test(v.observations || '') || /non\s*roulant/i.test(v.model || '');
-
-  let priceHtml = '';
-  if (isSold && v.soldPrice) {
-    priceHtml += `<span style="color:#22c55e;font-weight:700;">Adjuge: ${v.soldPrice.toLocaleString('fr-FR')} €</span>`;
-    if (v.startingPrice) {
-      priceHtml += `<span style="color:#8b8fa3;text-decoration:line-through;margin-left:8px;">${v.startingPrice.toLocaleString('fr-FR')} €</span>`;
-    }
-  } else if (v.startingPrice) {
-    priceHtml = `<span style="color:#f47920;font-weight:700;">${v.startingPrice.toLocaleString('fr-FR')} €</span>`;
-  }
-
-  const km = v.mileage ? v.mileage.toLocaleString('fr-FR') + ' km' : '';
-  const city = v.city || '';
-  const year = v.year || '';
-
-  let tagsHtml = '';
-  if (isNonRoulant) {
-    tagsHtml += `<span style="background:rgba(239,68,68,0.15);color:#ef4444;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;">NON ROULANT</span>`;
-  }
-  if (isSold) {
-    tagsHtml += `<span style="background:rgba(34,197,94,0.15);color:#22c55e;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;">VENDU</span>`;
-  }
-
-  const headerHtml = `
-    <div style="padding:10px 12px; background:linear-gradient(135deg,rgba(30,42,58,0.96),rgba(15,21,32,0.98)); border-bottom:1px solid rgba(255,255,255,0.08); flex:0 0 auto;">
-      <div style="display:flex;justify-content:space-between;align-items:start;gap:8px;">
-        <div style="font-weight:700; color:#f0f0f5; font-size:13px; line-height:1.25;">${esc(brand)} ${esc(model)}</div>
-        <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;">${tagsHtml}</div>
+  const resultTone = config.kind === 'ct' ? 'vpauto-doc-result--ok' : 'vpauto-doc-result--info';
+  popup.innerHTML = `
+    <div class="vpauto-doc-popup__surface">
+      ${buildPopupHeader(v, config.kind)}
+      <div class="vpauto-doc-popup__body">
+        <div class="vpauto-doc-result ${resultTone}">
+          <div class="vpauto-doc-result__icon" aria-hidden="true">${docIcon(config.kind)}</div>
+          <div class="vpauto-doc-result__copy">
+            <strong>${esc(popupTitle(config.kind))}</strong>
+            <span>${esc(popupSubtitle(config.kind))}</span>
+          </div>
+        </div>
+        <div class="vpauto-doc-preview-frame-shell">
+          <iframe
+            src="${esc(url)}#toolbar=0&navpanes=0&scrollbar=0"
+            class="vpauto-doc-preview-frame"
+            loading="lazy"
+          ></iframe>
+        </div>
       </div>
-      <div style="display:flex; gap:12px; margin-top:6px; color:#dbe4ee; font-size:11px; flex-wrap:wrap;">
-        ${priceHtml ? `<span>${priceHtml}</span>` : ''}
-      </div>
-      <div style="display:flex; gap:10px; margin-top:4px; color:#8b8fa3; font-size:10px; flex-wrap:wrap;">
-        ${year ? `<span>${year}</span>` : ''}
-        ${km ? `<span>${km}</span>` : ''}
-        ${city ? `<span>${city}</span>` : ''}
+      <div class="vpauto-doc-popup__foot">
+        <a href="${esc(url)}" target="_blank" rel="noopener" class="vpauto-doc-panel-btn vpauto-doc-panel-btn--primary">
+          ${esc(popupPrimaryLabel(config.kind))} ↗
+        </a>
+        <button type="button" class="vpauto-doc-panel-btn vpauto-doc-panel-btn--secondary vpauto-doc-close">
+          Fermer
+        </button>
       </div>
     </div>
   `;
-
-  const badgeLabel =
-    config.kind === 'be' ? 'Aperçu Bilan Expert'
-    : config.kind === 'se' ? 'Aperçu Suivi d\'Entretien'
-    : config.kind === 'db' ? 'Aperçu Diagnostic batterie'
-    : 'Aperçu CT';
-  const openLabel =
-    config.kind === 'be' ? 'Ouvrir le Bilan ↗'
-    : config.kind === 'se' ? 'Ouvrir le Suivi ↗'
-    : config.kind === 'db' ? 'Ouvrir le Diagnostic ↗'
-    : 'Ouvrir le CT ↗';
-
-  const docHtml = `
-    <div style="position:relative; flex:1 1 auto; min-height:220px; background:#0f1117;">
-      <button type="button"
-              class="vpauto-doc-close"
-              style="position:absolute; right:10px; bottom:10px; z-index:3; border:none; border-radius:999px;
-                     background:rgba(15,17,23,0.85); color:#f8fafc; cursor:pointer; font-size:11px; font-weight:700;
-                     padding:7px 11px; letter-spacing:0.01em; box-shadow:0 6px 18px rgba(0,0,0,0.28); backdrop-filter:blur(8px);"
-              aria-label="Fermer l'aperçu">
-        Fermer
-      </button>
-      <iframe
-        src="${esc(url)}#toolbar=0&navpanes=0&scrollbar=0"
-        style="width:100%; height:100%; border:none;"
-        loading="lazy"
-      ></iframe>
-      <a href="${esc(url)}" target="_blank" rel="noopener"
-         style="position:absolute; left:10px; bottom:10px; background:linear-gradient(135deg,#f47920,#e06510); color:white;
-                padding:7px 12px; border-radius:999px; font-size:11px; font-weight:700; text-decoration:none;
-                box-shadow:0 4px 14px rgba(244,121,32,0.35); z-index:2;">
-        ${openLabel}
-      </a>
-      <div style="position:absolute; left:10px; top:10px; z-index:2; background:rgba(15,17,23,0.78); color:#cbd5e1;
-                  padding:6px 10px; border-radius:999px; font-size:10px; font-weight:600; letter-spacing:0.02em;
-                  backdrop-filter:blur(6px);">
-        ${badgeLabel}
-      </div>
-    </div>
-  `;
-
-  popup.innerHTML = headerHtml + docHtml;
   card.appendChild(popup);
   button.setAttribute('aria-expanded', 'true');
-  button.textContent = hideLabel(config.kind);
 
   popup.querySelector<HTMLButtonElement>('.vpauto-doc-close')?.addEventListener('click', (e) => {
     e.preventDefault();
@@ -833,141 +961,41 @@ function openTextPopup(
   const popup = document.createElement('div');
   popup.className = 'vpauto-doc-popup vpauto-doc-popup--text';
   popup.dataset.vpautoDocKind = config.kind;
-  popup.style.cssText = `
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(180deg, rgba(12,16,24,0.97) 0%, rgba(15,17,23,0.99) 100%);
-    padding: 0;
-    z-index: 30;
-    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    font-size: 12px;
-    color: #f0f0f5;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    animation: vpauto-ct-fade-in 140ms ease-out;
-    backdrop-filter: blur(3px);
-  `;
-
-  const brand = v.brand || '';
-  const model = v.model || '';
-  const isSold = v.status === 'sold';
-  const isNonRoulant = /non\s*roulant/i.test(v.observations || '') || /non\s*roulant/i.test(v.model || '');
-
-  let priceHtml = '';
-  if (isSold && v.soldPrice) {
-    priceHtml += `<span style="color:#22c55e;font-weight:700;">Adjuge: ${v.soldPrice.toLocaleString('fr-FR')} €</span>`;
-    if (v.startingPrice) {
-      priceHtml += `<span style="color:#8b8fa3;text-decoration:line-through;margin-left:8px;">${v.startingPrice.toLocaleString('fr-FR')} €</span>`;
-    }
-  } else if (v.startingPrice) {
-    priceHtml = `<span style="color:#f47920;font-weight:700;">${v.startingPrice.toLocaleString('fr-FR')} €</span>`;
-  }
-
-  const km = v.mileage ? v.mileage.toLocaleString('fr-FR') + ' km' : '';
-  const city = v.city || '';
-  const year = v.year || '';
-
-  let tagsHtml = '';
-  if (isNonRoulant) {
-    tagsHtml += `<span style="background:rgba(239,68,68,0.15);color:#ef4444;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;">NON ROULANT</span>`;
-  }
-  if (isSold) {
-    tagsHtml += `<span style="background:rgba(34,197,94,0.15);color:#22c55e;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;">VENDU</span>`;
-  }
-
-  const headerHtml = `
-    <div style="padding:10px 12px; background:linear-gradient(135deg,rgba(30,42,58,0.96),rgba(15,21,32,0.98)); border-bottom:1px solid rgba(255,255,255,0.08); flex:0 0 auto;">
-      <div style="display:flex;justify-content:space-between;align-items:start;gap:8px;">
-        <div style="font-weight:700; color:#f0f0f5; font-size:13px; line-height:1.25;">${esc(brand)} ${esc(model)}</div>
-        <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;">${tagsHtml}</div>
-      </div>
-      <div style="display:flex; gap:12px; margin-top:6px; color:#dbe4ee; font-size:11px; flex-wrap:wrap;">
-        ${priceHtml ? `<span>${priceHtml}</span>` : ''}
-      </div>
-      <div style="display:flex; gap:10px; margin-top:4px; color:#8b8fa3; font-size:10px; flex-wrap:wrap;">
-        ${year ? `<span>${year}</span>` : ''}
-        ${km ? `<span>${km}</span>` : ''}
-        ${city ? `<span>${city}</span>` : ''}
-      </div>
-    </div>
-  `;
-
-  const badgeLabel = textBadgeLabel(config.kind);
-  const accent = textAccentColor(config.kind);
-
-  // Split text into lines and turn each into a row. For "tech" (which has
-  // `Label : Value` items) we render a two-column key/value layout.
   const lines = text.split('\n').map((s) => s.trim()).filter(Boolean);
   const bodyRows = lines.map((line) => renderTextRow(line, config.kind)).join('');
-
-  const docHtml = `
-    <div style="position:relative; flex:1 1 auto; min-height:220px; background:#0f1117; display:flex; flex-direction:column;">
-      <div style="position:absolute; left:10px; top:10px; z-index:2; background:rgba(15,17,23,0.78); color:${accent};
-                  padding:6px 10px; border-radius:999px; font-size:10px; font-weight:700; letter-spacing:0.02em;
-                  backdrop-filter:blur(6px); border:1px solid ${accent}33;">
-        ${badgeLabel}
+  popup.innerHTML = `
+    <div class="vpauto-doc-popup__surface">
+      ${buildPopupHeader(v, config.kind)}
+      <div class="vpauto-doc-popup__body">
+        <div class="vpauto-doc-result vpauto-doc-result--info">
+          <div class="vpauto-doc-result__icon" aria-hidden="true">${docIcon(config.kind)}</div>
+          <div class="vpauto-doc-result__copy">
+            <strong>${esc(popupTitle(config.kind))}</strong>
+            <span>${esc(popupSubtitle(config.kind))}</span>
+          </div>
+        </div>
+        <div class="vpauto-doc-text-list">
+          ${bodyRows || '<div class="vpauto-doc-empty">Aucun contenu.</div>'}
+        </div>
       </div>
-      <div style="flex:1 1 auto; overflow-y:auto; padding:44px 14px 60px; font-size:12px; line-height:1.5; color:#e4e7ef;">
-        ${bodyRows || `<div style="color:#8b8fa3; font-style:italic;">Aucun contenu.</div>`}
+      <div class="vpauto-doc-popup__foot">
+        <a href="${esc(config.detailPageUrl)}" target="_blank" rel="noopener" class="vpauto-doc-panel-btn vpauto-doc-panel-btn--primary">
+          Ouvrir la fiche ↗
+        </a>
+        <button type="button" class="vpauto-doc-panel-btn vpauto-doc-panel-btn--secondary vpauto-doc-close">
+          Fermer
+        </button>
       </div>
-      <button type="button"
-              class="vpauto-doc-close"
-              style="position:absolute; right:10px; bottom:10px; z-index:3; border:none; border-radius:999px;
-                     background:rgba(15,17,23,0.85); color:#f8fafc; cursor:pointer; font-size:11px; font-weight:700;
-                     padding:7px 11px; letter-spacing:0.01em; box-shadow:0 6px 18px rgba(0,0,0,0.28); backdrop-filter:blur(8px);"
-              aria-label="Fermer l'aperçu">
-        Fermer
-      </button>
-      <a href="${esc(config.detailPageUrl)}" target="_blank" rel="noopener"
-         style="position:absolute; left:10px; bottom:10px; background:linear-gradient(135deg,${accent},${darken(accent)});
-                color:white; padding:7px 12px; border-radius:999px; font-size:11px; font-weight:700; text-decoration:none;
-                box-shadow:0 4px 14px ${accent}59; z-index:2;">
-        Ouvrir la fiche ↗
-      </a>
     </div>
   `;
-
-  popup.innerHTML = headerHtml + docHtml;
   card.appendChild(popup);
   button.setAttribute('aria-expanded', 'true');
-  button.textContent = hideLabel(config.kind);
 
   popup.querySelector<HTMLButtonElement>('.vpauto-doc-close')?.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
     removeDocPopup(button);
   });
-}
-
-function textBadgeLabel(kind: DocKind): string {
-  switch (kind) {
-    case 'obs':  return 'Observations';
-    case 'eq':   return 'Équipements / Options';
-    case 'tech': return 'Caractéristiques techniques';
-    default:     return '';
-  }
-}
-
-function textAccentColor(kind: DocKind): string {
-  switch (kind) {
-    case 'obs':  return '#ec4899'; // pink
-    case 'eq':   return '#8b5cf6'; // purple
-    case 'tech': return '#0ea5e9'; // cyan
-    default:     return '#f47920';
-  }
-}
-
-/** Rough "darken" to build a gradient pair for the open-page button. */
-function darken(hex: string): string {
-  const m = hex.match(/^#([0-9a-f]{6})$/i);
-  if (!m) return hex;
-  const n = parseInt(m[1], 16);
-  const r = Math.max(0, ((n >> 16) & 0xff) - 30);
-  const g = Math.max(0, ((n >> 8) & 0xff) - 30);
-  const b = Math.max(0, (n & 0xff) - 30);
-  return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, '0')}`;
 }
 
 /**
@@ -977,44 +1005,27 @@ function darken(hex: string): string {
  */
 function renderTextRow(line: string, kind: DocKind): string {
   if (kind === 'tech') {
-    // Accept separators ` : `, `:`, or tab-wide gaps.
     const m = line.match(/^(.*?)\s*:\s*(.+)$/);
     if (m) {
       const key = m[1].trim();
       const val = m[2].trim();
       return `
-        <div style="display:grid; grid-template-columns: minmax(0, 1fr) auto; gap:8px;
-                    padding:6px 0; border-bottom:1px dashed rgba(255,255,255,0.06);">
-          <span style="color:#94a3b8;">${esc(key)}</span>
-          <span style="color:#f1f5f9; font-weight:600; text-align:right;">${esc(val)}</span>
+        <div class="vpauto-doc-kv-row">
+          <span class="vpauto-doc-kv-row__key">${esc(key)}</span>
+          <span class="vpauto-doc-kv-row__value">${esc(val)}</span>
         </div>
       `;
     }
   }
 
-  // Strip a leading "- " or "• " bullet that VPauto sometimes includes in
-  // observations so we don't render "• - Export impossible".
   const clean = line.replace(/^[-–—•·]\s*/, '').trim();
 
   return `
-    <div style="display:flex; gap:8px; padding:5px 0; border-bottom:1px dashed rgba(255,255,255,0.05);">
-      <span style="color:#64748b; flex:0 0 auto;">•</span>
-      <span style="color:#e4e7ef; flex:1 1 auto;">${esc(clean)}</span>
+    <div class="vpauto-doc-bullet-row">
+      <span class="vpauto-doc-bullet-row__dot" aria-hidden="true">•</span>
+      <span class="vpauto-doc-bullet-row__text">${esc(clean)}</span>
     </div>
   `;
-}
-
-function hideLabel(kind: DocKind): string {
-  switch (kind) {
-    case 'be':   return 'Masquer bilan';
-    case 'se':   return 'Masquer entretien';
-    case 'db':   return 'Masquer batterie';
-    case 'obs':  return 'Masquer observations';
-    case 'eq':   return 'Masquer équipements';
-    case 'tech': return 'Masquer caract.';
-    case 'ct':
-    default:     return 'Masquer le CT';
-  }
 }
 
 function getBadgeColors(type: string): string {
@@ -1036,10 +1047,616 @@ if (!document.getElementById('vpauto-ct-popup-style')) {
   const style = document.createElement('style');
   style.id = 'vpauto-ct-popup-style';
   style.textContent = `
+    .vpauto-doc-dock {
+      position: absolute;
+      right: 10px;
+      bottom: 10px;
+      z-index: 18;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      max-width: calc(100% - 20px);
+      font-family: 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+
+    .vpauto-doc-dock[data-vpauto-has-status="true"] {
+      bottom: 36px;
+    }
+
+    .vpauto-doc-trigger-wrap {
+      position: relative;
+      flex: 0 0 auto;
+    }
+
+    .vpauto-ct-badge,
+    .vpauto-doc-trigger {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 34px;
+      border: 2px solid #e2e5ea;
+      border-radius: 999px;
+      padding: 6px 11px;
+      font: 800 11px/1 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      letter-spacing: 0.01em;
+      cursor: pointer;
+      box-shadow: 0 2px 0 #d8dde4;
+      transition: transform 140ms ease, box-shadow 140ms ease, filter 140ms ease, background 140ms ease, border-color 140ms ease;
+    }
+
+    .vpauto-ct-badge:hover:not(:disabled),
+    .vpauto-doc-trigger:hover {
+      filter: brightness(0.98);
+      transform: translateY(-1px);
+    }
+
+    .vpauto-ct-badge:active:not(:disabled),
+    .vpauto-doc-trigger:active {
+      transform: translateY(1px);
+      box-shadow: 0 1px 0 #d8dde4;
+    }
+
+    .vpauto-ct-badge {
+      max-width: min(180px, 100%);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      background: #fff0d6;
+      color: #cc6f00;
+      border-color: #cc6f00;
+      box-shadow: 0 2px 0 #cc6f00;
+    }
+
+    .vpauto-ct-badge__dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: currentColor;
+      flex: 0 0 auto;
+    }
+
+    .vpauto-ct-badge__label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .vpauto-ct-badge[data-vpauto-state="confirmed"] {
+      background: #e6f9eb;
+      color: #1e8a37;
+      border-color: #1e8a37;
+      box-shadow: 0 2px 0 #1e8a37;
+    }
+
+    .vpauto-ct-badge[data-vpauto-state="missing"] {
+      background: #fde8e5;
+      color: #b5200a;
+      border-color: #b5200a;
+      box-shadow: 0 2px 0 #b5200a;
+    }
+
+    .vpauto-ct-badge[data-vpauto-state="checking"] {
+      background: #fff0d6;
+      color: #cc6f00;
+      border-color: #cc6f00;
+      box-shadow: 0 2px 0 #cc6f00;
+      cursor: progress;
+    }
+
+    .vpauto-ct-badge[data-vpauto-state="fallback"] {
+      background: #fff4e8;
+      color: #b66911;
+      border-color: #e5b165;
+      box-shadow: 0 2px 0 #e5b165;
+    }
+
+    .vpauto-doc-trigger {
+      background: #ffffff;
+      color: #4a4a5a;
+      white-space: nowrap;
+      position: relative;
+      padding-right: 12px;
+    }
+
+    .vpauto-doc-trigger__icon {
+      font-size: 13px;
+      line-height: 1;
+      color: #6b7280;
+    }
+
+    .vpauto-doc-trigger[data-vpauto-summary-state="ready"] {
+      border-color: #cfe7d6;
+      box-shadow: 0 2px 0 #cfe7d6;
+    }
+
+    .vpauto-doc-trigger[data-vpauto-summary-state="checking"] {
+      border-color: #f0d7aa;
+      box-shadow: 0 2px 0 #f0d7aa;
+    }
+
+    .vpauto-doc-trigger[data-vpauto-summary-state="missing"] {
+      color: #6b7280;
+      background: #f8fafc;
+    }
+
+    .vpauto-doc-trigger[data-vpauto-summary-state="fallback"] {
+      border-color: #f0d7aa;
+      box-shadow: 0 2px 0 #f0d7aa;
+      color: #b66911;
+    }
+
+    .vpauto-doc-panel {
+      display: none;
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 8px);
+      min-width: 220px;
+      max-width: min(280px, calc(100vw - 40px));
+      padding: 6px;
+      border: 2px solid #e2e5ea;
+      border-radius: 14px;
+      background: #ffffff;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.16), 0 4px 0 #e2e5ea;
+      color: #1a1a2e;
+      animation: vpauto-ct-fade-in 140ms ease-out;
+    }
+
+    .vpauto-doc-dock[data-vpauto-open="true"] .vpauto-doc-panel {
+      display: block;
+    }
+
+    .vpauto-doc-panel__list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .vpauto-doc-panel__list:empty {
+      display: none;
+    }
+
+    .vpauto-doc-menu-separator {
+      height: 1px;
+      margin: 6px 2px;
+      background: #e2e5ea;
+    }
+
+    .vpauto-doc-menu-separator[hidden] {
+      display: none;
+    }
+
+    .vpauto-doc-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      padding: 9px 10px;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
+      color: #1a1a2e;
+      text-align: left;
+      box-shadow: none;
+      min-height: 0;
+    }
+
+    .vpauto-doc-menu-item:hover:not(:disabled) {
+      background: #f3f4f6;
+      transform: none;
+    }
+
+    .vpauto-doc-menu-item__icon {
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      background: #f3f4f6;
+      color: #4a4a5a;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.06em;
+      flex: 0 0 auto;
+    }
+
+    .vpauto-doc-menu-item__body {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      flex: 1 1 auto;
+    }
+
+    .vpauto-doc-menu-item__label {
+      font-size: 13px;
+      font-weight: 800;
+      color: #1a1a2e;
+    }
+
+    .vpauto-doc-menu-item__meta {
+      font-size: 11px;
+      font-weight: 700;
+      color: #6b7280;
+    }
+
+    .vpauto-doc-menu-item__arrow {
+      color: #9aa1ab;
+      font-size: 14px;
+      font-weight: 900;
+      flex: 0 0 auto;
+    }
+
+    .vpauto-doc-menu-item[data-vpauto-state="checking"] {
+      background: #fff8ea;
+      cursor: progress;
+    }
+
+    .vpauto-doc-menu-item[data-vpauto-state="checking"] .vpauto-doc-menu-item__icon {
+      background: #fff0d6;
+      color: #cc6f00;
+    }
+
+    .vpauto-doc-menu-item[data-vpauto-state="confirmed"] .vpauto-doc-menu-item__icon {
+      background: #eaf5ff;
+      color: #1f6fa9;
+    }
+
+    .vpauto-doc-menu-item[data-vpauto-state="confirmed"][data-vpauto-doc-kind="se"] .vpauto-doc-menu-item__icon {
+      background: #e6f9eb;
+      color: #1e8a37;
+    }
+
+    .vpauto-doc-menu-item[data-vpauto-state="confirmed"][data-vpauto-doc-kind="obs"] .vpauto-doc-menu-item__icon {
+      background: #fff0f5;
+      color: #c13584;
+    }
+
+    .vpauto-doc-menu-item[data-vpauto-state="confirmed"][data-vpauto-doc-kind="eq"] .vpauto-doc-menu-item__icon {
+      background: #f0f8ff;
+      color: #2665a8;
+    }
+
+    .vpauto-doc-menu-item[data-vpauto-state="confirmed"][data-vpauto-doc-kind="tech"] .vpauto-doc-menu-item__icon {
+      background: #f5f0ff;
+      color: #6840d6;
+    }
+
+    .vpauto-doc-menu-item[data-vpauto-state="missing"] {
+      opacity: 0.58;
+      filter: grayscale(0.2);
+      cursor: not-allowed;
+    }
+
+    .vpauto-doc-menu-item[data-vpauto-state="missing"] .vpauto-doc-menu-item__icon {
+      background: #f3f4f6;
+      color: #9aa1ab;
+    }
+
+    .vpauto-doc-menu-item[data-vpauto-state="fallback"] {
+      background: #fff8ea;
+      color: #b66911;
+    }
+
+    .vpauto-doc-menu-item[data-vpauto-state="fallback"] .vpauto-doc-menu-item__icon {
+      background: #fff0d6;
+      color: #b66911;
+    }
+
+    .vpauto-doc-toggle[aria-expanded="true"] {
+      outline: 2px solid rgba(31, 164, 201, 0.24);
+      outline-offset: 0;
+    }
+
+    .vpauto-doc-popup {
+      position: absolute;
+      inset: 0;
+      z-index: 30;
+      padding: 0;
+      background: rgba(15, 23, 42, 0.12);
+      backdrop-filter: blur(2px);
+      animation: vpauto-ct-fade-in 140ms ease-out;
+    }
+
+    .vpauto-doc-popup__surface {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      background: #ffffff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 14px 40px rgba(15, 23, 42, 0.18);
+      color: #1a1a2e;
+    }
+
+    .vpauto-doc-popup__head {
+      padding: 10px 12px;
+      background: #1a1a2e;
+      color: #ffffff;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      border-bottom: 2px solid #111827;
+    }
+
+    .vpauto-doc-popup__icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.12);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.06em;
+      flex: 0 0 auto;
+    }
+
+    .vpauto-doc-popup__titleblock {
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .vpauto-doc-popup__title {
+      font-size: 13px;
+      font-weight: 900;
+      line-height: 1.2;
+    }
+
+    .vpauto-doc-popup__meta {
+      margin-top: 2px;
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 10px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .vpauto-doc-popup__close {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      border: 0;
+      background: rgba(255, 255, 255, 0.12);
+      color: #ffffff;
+      box-shadow: none;
+      padding: 0;
+      font-size: 16px;
+      font-weight: 800;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+    }
+
+    .vpauto-doc-popup__close:hover {
+      background: rgba(255, 255, 255, 0.22);
+      transform: none;
+    }
+
+    .vpauto-doc-popup__body {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+      padding: 12px;
+      background: #ffffff;
+    }
+
+    .vpauto-doc-popup__foot {
+      padding: 10px 12px;
+      border-top: 2px solid #e2e5ea;
+      display: flex;
+      gap: 8px;
+      background: #ffffff;
+    }
+
+    .vpauto-doc-panel-btn {
+      flex: 1 1 0;
+      min-height: 36px;
+      border-radius: 10px;
+      border: 2px solid #e2e5ea;
+      font: 800 12px/1 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      text-decoration: none;
+      transition: transform 140ms ease, filter 140ms ease;
+      box-shadow: 0 3px 0 #e2e5ea;
+    }
+
+    .vpauto-doc-panel-btn:hover {
+      filter: brightness(0.97);
+      transform: translateY(-1px);
+    }
+
+    .vpauto-doc-panel-btn--primary {
+      background: #1fa4c9;
+      color: #ffffff;
+      border-color: #1787a8;
+      box-shadow: 0 3px 0 #1787a8;
+    }
+
+    .vpauto-doc-panel-btn--secondary {
+      background: #ffffff;
+      color: #1a1a2e;
+    }
+
+    .vpauto-doc-result {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 2px solid #e2e5ea;
+      margin-bottom: 10px;
+    }
+
+    .vpauto-doc-result--ok {
+      background: #e6f9eb;
+      border-color: #1e8a37;
+      color: #1e8a37;
+    }
+
+    .vpauto-doc-result--info {
+      background: #eef8fc;
+      border-color: #1fa4c9;
+      color: #177f9d;
+    }
+
+    .vpauto-doc-result__icon {
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.6);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.06em;
+      flex: 0 0 auto;
+    }
+
+    .vpauto-doc-result__copy {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .vpauto-doc-result__copy strong {
+      font-size: 13px;
+      font-weight: 900;
+      line-height: 1.2;
+    }
+
+    .vpauto-doc-result__copy span {
+      font-size: 11px;
+      font-weight: 700;
+      opacity: 0.9;
+      line-height: 1.35;
+    }
+
+    .vpauto-doc-preview-frame-shell {
+      min-height: 220px;
+      height: calc(100% - 64px);
+      border: 2px solid #e2e5ea;
+      border-radius: 10px;
+      overflow: hidden;
+      background: #f3f4f6;
+    }
+
+    .vpauto-doc-preview-frame {
+      width: 100%;
+      height: 100%;
+      min-height: 220px;
+      border: 0;
+      background: #ffffff;
+    }
+
+    .vpauto-doc-text-list {
+      border: 2px solid #e2e5ea;
+      border-radius: 10px;
+      background: #ffffff;
+      overflow: hidden;
+    }
+
+    .vpauto-doc-kv-row,
+    .vpauto-doc-bullet-row {
+      display: grid;
+      gap: 8px;
+      padding: 9px 11px;
+      border-bottom: 1px solid #edf0f4;
+    }
+
+    .vpauto-doc-kv-row:last-child,
+    .vpauto-doc-bullet-row:last-child {
+      border-bottom: 0;
+    }
+
+    .vpauto-doc-kv-row {
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: start;
+    }
+
+    .vpauto-doc-kv-row__key {
+      color: #4a4a5a;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .vpauto-doc-kv-row__value {
+      color: #1a1a2e;
+      font-size: 12px;
+      font-weight: 900;
+      text-align: right;
+    }
+
+    .vpauto-doc-bullet-row {
+      grid-template-columns: 10px minmax(0, 1fr);
+      align-items: start;
+    }
+
+    .vpauto-doc-bullet-row__dot {
+      color: #1fa4c9;
+      font-size: 14px;
+      line-height: 1;
+      transform: translateY(1px);
+    }
+
+    .vpauto-doc-bullet-row__text {
+      color: #1a1a2e;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.45;
+    }
+
+    .vpauto-doc-empty {
+      padding: 12px;
+      color: #6b7280;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    @media (max-width: 960px) {
+      .vpauto-doc-panel {
+        min-width: 200px;
+        max-width: min(250px, calc(100vw - 28px));
+      }
+
+      .vpauto-doc-popup__foot {
+        flex-direction: column;
+      }
+
+      .vpauto-doc-panel-btn {
+        width: 100%;
+      }
+    }
+
     @keyframes vpauto-ct-fade-in {
       from { opacity: 0; transform: translateY(4px); }
       to { opacity: 1; transform: translateY(0); }
     }
   `;
   document.head.appendChild(style);
+}
+
+if (!document.documentElement.dataset.vpautoDocUiBound) {
+  document.documentElement.dataset.vpautoDocUiBound = '1';
+
+  document.addEventListener('click', (event) => {
+    const target = event.target;
+    if (target instanceof Element && target.closest('.vpauto-doc-dock')) return;
+    closeAllDocMenus();
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    closeAllDocMenus();
+    closeAllDocPopups();
+  });
 }

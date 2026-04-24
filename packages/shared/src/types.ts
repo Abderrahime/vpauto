@@ -125,6 +125,12 @@ export interface VehiclePassageEvent {
   saleTime?: string;
   status: VehicleStatus;
   startingPrice?: number;
+  /**
+   * Live auction bid at the moment this event was captured. Distinct from
+   * startingPrice (real MAP / reserve) and from soldPrice (final hammer).
+   * Used to reconstruct price evolution when the real MAP is unknown.
+   */
+  currentAuctionPrice?: number;
   soldPrice?: number;
   mileage: number;
   sourceUrl: string;
@@ -143,6 +149,13 @@ export interface VehiclePassage {
   center?: string;
   status: VehicleStatus;
   startingPrice?: number;
+  /**
+   * Latest observed live-auction bid for this passage. Always distinct
+   * from startingPrice (real MAP) and soldPrice (final hammer): represents
+   * the last live bid seen before the passage ended (or the current bid
+   * while still live).
+   */
+  currentAuctionPrice?: number;
   soldPrice?: number;
   mileage: number;
   lotNumber?: number;
@@ -163,6 +176,13 @@ export interface VehiclePassage {
    * to 3 500 € before sale). Absent when the MAP was constant.
    */
   mapTrajectory?: number[];
+  /**
+   * Distinct currentAuctionPrice values observed during this passage's
+   * live window, oldest first (e.g. [17900, 18000, 18400]). Absent when
+   * no live bid was ever captured. Lets the UI reconstruct a real evolution
+   * when the MAP is unknown / null.
+   */
+  liveBidTrajectory?: number[];
 }
 
 export interface VehiclePriceEvolution {
