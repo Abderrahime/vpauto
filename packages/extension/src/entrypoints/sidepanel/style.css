@@ -1,8 +1,23 @@
 /* ───────────────────────────────────────────────────────────────────────────
-   VPauto Assistant — v2 Terminal
+   VPauto Assistant — v2 Terminal (legacy base layer)
    Warm-paper financial-terminal aesthetic inspired by Bloomberg / Refinitiv.
-   Typography: IBM Plex Sans (UI) · IBM Plex Mono (numbers) · IBM Plex Serif (titles)
-   See design brief: VPauto Extension v2 Terminal.html
+
+   NOTE: this v2 Terminal block is intentionally kept as a *base layer* below
+   the "v3 Duolingo" overrides that start around line 2830. Those overrides
+   win in the cascade for every selector they redefine, so the live UI is
+   fully Duolingo. The v2 rules stay as a fallback for any selector the v3
+   theme doesn't touch (e.g. `.loading__spinner`, debug panels) and to avoid
+   a large risky cleanup without visual regression testing.
+
+   Typography note: IBM Plex fonts are no longer loaded — `index.html` imports
+   Nunito / Nunito Sans instead. The `--font-sans/mono/serif` vars below still
+   list 'IBM Plex …' as a first choice, but those fail to resolve and the
+   `-apple-system`/`ui-monospace`/`Georgia` fallbacks kick in. Under the v3
+   Duolingo override block, `body`, `.mono` and `.serif` are all forced to
+   Nunito anyway, so this has zero visible effect.
+
+   See design briefs: VPauto Extension v2 Terminal.html, then
+                     VPauto Extension v3 Duolingo.html (current look).
    ─────────────────────────────────────────────────────────────────────────── */
 
 :root {
@@ -3404,6 +3419,39 @@ body {
   font-size: 20px;
 }
 
+/* Duolingo-style coloured icon tiles by metric kind. Matches the
+   `data-metric-icon` attribute set in metricCard() so each tile speaks
+   "green = money won", "orange = mileage", "purple = history", etc. */
+.metric[data-metric-icon="price"] .metric__icon {
+  background: var(--duo-green-bg);
+  color: var(--duo-green-dark);
+}
+
+.metric[data-metric-icon="sold"] .metric__icon {
+  background: var(--duo-green-bg);
+  color: var(--duo-green-dark);
+}
+
+.metric[data-metric-icon="km"] .metric__icon {
+  background: var(--duo-orange-bg);
+  color: var(--duo-orange-dark);
+}
+
+.metric[data-metric-icon="location"] .metric__icon {
+  background: var(--duo-blue-bg);
+  color: var(--duo-blue-dark);
+}
+
+.metric[data-metric-icon="history"] .metric__icon {
+  background: var(--duo-purple-bg);
+  color: var(--duo-purple-dark);
+}
+
+.metric[data-metric-icon="visit"] .metric__icon {
+  background: var(--duo-yellow-bg);
+  color: var(--duo-yellow-dark);
+}
+
 .metric__label {
   font-size: 10px;
   font-weight: 800;
@@ -3599,15 +3647,13 @@ body {
   color: var(--duo-ink-2);
 }
 
-.chip-bar,
-.badge-grid {
+.chip-bar {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.chip,
-.duo-badge {
+.chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -3723,6 +3769,18 @@ body {
   font-weight: 700;
 }
 
+/* Delta line — what's *different* between current car and candidate.
+   Tinted so the eye can quickly distinguish it from the year/km/city line
+   above, and the "all-identical" case gets a green positive treatment so
+   bidders don't have to read the line to know it's a clean comparable. */
+.similar-item__deltas {
+  color: var(--duo-orange-dark);
+}
+.similar-item__deltas--ok {
+  color: var(--duo-green-dark);
+  font-weight: 800;
+}
+
 .timeline-body {
   margin-top: 6px;
   font-size: 12px;
@@ -3816,7 +3874,8 @@ body {
 
 .badge-match,
 .badge-nr,
-.badge-off {
+.badge-off,
+.badge-score {
   display: inline-flex;
   align-items: center;
   margin-left: 6px;
@@ -3836,6 +3895,28 @@ body {
 
 .badge-nr,
 .badge-off {
+  background: var(--duo-red-bg);
+  color: var(--duo-red-dark);
+  border-color: var(--duo-red-dark);
+}
+
+/* Similarity score badge — colour scales with confidence so a 60/100 looks
+   visibly "warning" next to a 90/100 "go". Tones reuse the Duolingo palette
+   to stay consistent with `.chip--good`, `.chip--warn`, `.chip--bad`. */
+.badge-score {
+  font-variant-numeric: tabular-nums;
+}
+.badge-score--good {
+  background: var(--duo-green-bg);
+  color: var(--duo-green-dark);
+  border-color: var(--duo-green-dark);
+}
+.badge-score--warn {
+  background: var(--duo-orange-bg);
+  color: var(--duo-orange-dark);
+  border-color: var(--duo-orange-dark);
+}
+.badge-score--bad {
   background: var(--duo-red-bg);
   color: var(--duo-red-dark);
   border-color: var(--duo-red-dark);

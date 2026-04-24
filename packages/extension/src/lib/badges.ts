@@ -544,8 +544,10 @@ function addDocumentButtons(
   trigger.dataset.vpautoDetailUrl = detailPageUrl;
   trigger.dataset.vpautoSummaryState = 'checking';
   trigger.setAttribute('aria-expanded', 'false');
+  // Glyph is the horizontal-ellipsis (U+22EF) to match Option A of the
+  // "VPauto Liste Boutons" design — "Badge CT + ⋯" (max signal / min noise).
   trigger.innerHTML = `
-    <span class="vpauto-doc-trigger__icon" aria-hidden="true">•••</span>
+    <span class="vpauto-doc-trigger__icon" aria-hidden="true">⋯</span>
     <span class="vpauto-doc-trigger__label">Actions</span>
   `;
   triggerWrap.appendChild(trigger);

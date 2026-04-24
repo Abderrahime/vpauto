@@ -397,6 +397,33 @@ export function calculateSimilarityScore(
     return { score, reasons: [...reasons, 'Modèle différent'] };
   }
 
+  // ── Power gate (regression: AUDI A1 11406775).
+  //
+  // The user reported that an AUDI A1 Sportback "40 TFSI 207 ch S Line" was
+  // listed as "similaire disponible ailleurs" alongside an AUDI A1 Sportback
+  // "35 TFSI 150 ch Design Luxe". Same brand, model, body, fuel and gearbox
+  // → cumulative score crossed `MODEL_MATCH_THRESHOLD` (60), even though
+  // 207 vs 150 ch (-38 %) is a different engine variant in Audi nomenclature
+  // and a primary price driver in the used-car market. Surfacing the lower-
+  // power car as a price benchmark misled the bidder.
+  //
+  // Rule: when BOTH sides report a power figure, reject the candidate when
+  // the gap exceeds ±20 % of the input power (or 25 ch absolute, whichever
+  // is larger — protects small engines where 20 % is only ~15 ch and a
+  // 75/100 ch trim swap genuinely is a different car). When either side is
+  // missing power, the gate stays inert: we don't have the signal to
+  // discriminate, so we let the rest of the score decide.
+  if (a.power && b.power) {
+    const powerDiff = Math.abs(a.power - b.power);
+    const powerThreshold = Math.max(25, Math.round(a.power * 0.2));
+    if (powerDiff > powerThreshold) {
+      return {
+        score: 0,
+        reasons: [...reasons, `Puissance trop différente (${a.power} ch vs ${b.power} ch)`],
+      };
+    }
+  }
+
   // Version/trim
   if (a.version && b.version && a.version.toLowerCase() === b.version.toLowerCase()) {
     score += 10;
@@ -453,9 +480,22 @@ export function calculateSimilarityScore(
     reasons.push('Même cylindrée');
   }
 
-  if (a.power && b.power && a.power === b.power) {
-    score += 2;
-    reasons.push('Même puissance');
+  // Power scoring + UI signal.
+  //
+  // The hard gate above already ruled out anything outside ±20 % / 25 ch, so
+  // here we just reward an exact match (+2) and surface a "Δ ch" reason in
+  // every other case. The reason is consumed by `renderSimilarElsewhere` in
+  // the sidepanel — it lets the bidder see at a glance whether a match is
+  // power-aligned or has a 30 ch gap they should price-adjust for.
+  if (a.power && b.power) {
+    const powerDiff = a.power - b.power;
+    if (powerDiff === 0) {
+      score += 2;
+      reasons.push(`Même puissance (${a.power} ch)`);
+    } else {
+      const sign = powerDiff < 0 ? '+' : '-';
+      reasons.push(`Puissance ${sign}${Math.abs(powerDiff)} ch (${b.power} ch)`);
+    }
   }
 
   return { score: Math.min(score, 100), reasons };

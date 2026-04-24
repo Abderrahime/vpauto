@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { VehicleSnapshot } from '@vpauto/shared';
-import { computeIdentityScore } from './matching.js';
+import { calculateSimilarityScore, computeIdentityScore } from './matching.js';
 
 /**
  * Regression tests for the identity scoring logic.
@@ -346,5 +346,112 @@ describe('computeIdentityScore', () => {
     expect(result.score).toBeGreaterThanOrEqual(55);
     expect(result.reasons).toContain('same_technical_check');
     expect(result.reasons).not.toContain('no_reference_no_discriminator');
+  });
+});
+
+// ── Similarity (cross-vehicle "similaires ailleurs" scoring) ──
+//
+// `calculateSimilarityScore` powers the "Similaires disponibles ailleurs"
+// card in the sidepanel. Unlike `computeIdentityScore`, which decides
+// whether two listings are the SAME car, this one decides whether two
+// DIFFERENT cars are close enough to be a useful price benchmark.
+//
+// The regression that motivated this block: an AUDI A1 Sportback "40 TFSI
+// 207 ch S Line" (ref 11406775) was matched with an AUDI A1 Sportback
+// "35 TFSI 150 ch Design Luxe" (ref 11404612). Same chassis, but a 38 %
+// power gap and a different engine variant in the Audi nomenclature →
+// genuinely different price segment. The user reported this as misleading.
+describe('calculateSimilarityScore — power gate (AUDI A1 11406775 regression)', () => {
+  function audiA1(overrides: Partial<{
+    version: string;
+    year: number;
+    mileage: number;
+    color: string;
+    fuel: string;
+    transmission: string;
+    engineSize: number | null;
+    power: number | null;
+  }> = {}) {
+    // Note: we use `'key' in overrides` rather than `??` for nullable fields
+    // (engineSize / power) — `null ?? 207` evaluates to `207`, which would
+    // silently swallow an explicit null override.
+    return {
+      brand: 'AUDI',
+      model: 'A1 Sportback',
+      version: overrides.version ?? '40 TFSI 207 ch S tronic 7 S Line',
+      year: overrides.year ?? 2022,
+      mileage: overrides.mileage ?? 35000,
+      color: overrides.color ?? 'Blanc',
+      fuel: overrides.fuel ?? 'ES',
+      transmission: overrides.transmission ?? 'BVA',
+      engineSize: 'engineSize' in overrides ? overrides.engineSize ?? null : 1984,
+      power: 'power' in overrides ? overrides.power ?? null : 207,
+    };
+  }
+
+  it('REJECTS the 35 TFSI 150 ch as similar to a 40 TFSI 207 ch', () => {
+    const input = audiA1({ power: 207 });
+    const candidate = audiA1({
+      version: '35 TFSI 150 ch S tronic 7 Design Luxe',
+      power: 150,
+      engineSize: 1498,
+    });
+    const result = calculateSimilarityScore(input, candidate);
+    expect(result.score).toBe(0);
+    expect(result.reasons.some((r) => r.includes('Puissance trop différente'))).toBe(true);
+  });
+
+  it('ACCEPTS a 40 TFSI 207 ch matched with a 40 TFSI 200 ch (within band)', () => {
+    // Different production year of the same engine variant — still a fair
+    // comparable. Power within ±5 % stays in the same price segment.
+    const input = audiA1({ power: 207 });
+    const candidate = audiA1({ power: 200, year: 2021 });
+    const result = calculateSimilarityScore(input, candidate);
+    expect(result.score).toBeGreaterThanOrEqual(60);
+    expect(result.reasons.some((r) => r.includes('trop différente'))).toBe(false);
+  });
+
+  it('ACCEPTS exact power match and emits "Même puissance"', () => {
+    const input = audiA1({ power: 207 });
+    const candidate = audiA1({ power: 207, mileage: 42000 });
+    const result = calculateSimilarityScore(input, candidate);
+    expect(result.reasons).toContain('Même puissance (207 ch)');
+  });
+
+  it('emits a "Puissance ±X ch" reason when within band but not equal (UI signal)', () => {
+    // The sidepanel reads `match.reasons.slice(0, 3)` — the delta string
+    // must be there so the bidder sees "Puissance -10 ch (197 ch)" without
+    // having to open the candidate page.
+    const input = audiA1({ power: 207 });
+    const candidate = audiA1({ power: 197 });
+    const result = calculateSimilarityScore(input, candidate);
+    expect(result.reasons.some((r) => /Puissance [+-]\d+ ch/.test(r))).toBe(true);
+  });
+
+  it('STAYS INERT when either side is missing power data (no false reject)', () => {
+    // Older snapshots and list-only stubs can have power=null. The gate
+    // must not fire in that case — falling back to the rest of the score
+    // is safer than rejecting every legacy row.
+    const input = audiA1({ power: null });
+    const candidate = audiA1({ power: 150 });
+    const result = calculateSimilarityScore(input, candidate);
+    expect(result.score).toBeGreaterThan(0);
+    expect(result.reasons.some((r) => r.includes('trop différente'))).toBe(false);
+  });
+
+  it('uses a 25 ch absolute floor for small engines (75 vs 100 ch passes, 75 vs 130 ch fails)', () => {
+    // For a 75 ch city car, 20 % is only 15 ch — too tight, would reject
+    // genuinely close trims. The max(25, 0.2*power) floor lets a 75/100
+    // pair through while still rejecting a 75/130 pair.
+    const passing = calculateSimilarityScore(
+      audiA1({ power: 75, version: 'TFSI 75 ch' }),
+      audiA1({ power: 100, version: 'TFSI 100 ch' }),
+    );
+    const failing = calculateSimilarityScore(
+      audiA1({ power: 75, version: 'TFSI 75 ch' }),
+      audiA1({ power: 130, version: 'TFSI 130 ch' }),
+    );
+    expect(passing.score).toBeGreaterThan(0);
+    expect(failing.score).toBe(0);
   });
 });

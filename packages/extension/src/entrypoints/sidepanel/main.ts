@@ -2244,19 +2244,36 @@ function renderSimilarElsewhere(matches: MatchResult[] | null | undefined, curre
       ? 'amber'
       : 'green';
 
+    // Show the similarity score next to the title with a colour tone so the
+    // bidder can see at a glance how loose the match is. The new power-gate
+    // (backend `calculateSimilarityScore`) rejects > ±20 % candidates, so any
+    // result here is at least power-aligned, but a 60/100 still tells the
+    // user "this is a close-but-not-identical comparable, price-adjust".
+    const scoreTone = match.score >= 80 ? 'good' : match.score >= 65 ? 'warn' : 'bad';
+    const scoreBadge = `<span class="badge-score badge-score--${scoreTone}" title="Indice de similarité — plus c'est haut, plus la comparaison est fiable">${match.score}/100</span>`;
+
+    // Build the delta line: actionable differences (year, power, trim, fuel,
+    // gearbox, engine size, colour). When everything matches, fall back to
+    // a positive "Spécifications identiques" — that's a strong signal too.
+    const deltas = buildSpecDelta(candidate, current);
+    const deltaBits = deltas.length > 0
+      ? deltas.slice(0, 4).join(' \u2022 ')
+      : 'Spécifications identiques';
+
     return `
       <div class="similar-item${nonRoulant ? ' similar-item--nr' : ''}" data-vehicle-url="${esc(candidate.sourceUrl || '')}">
         <div class="similar-item__info">
           <div class="similar-item__name">
             ${esc(candidate.brand)} ${esc(candidate.model)}
             ${match.level === 'same_model' ? '<span class="badge-match">Match</span>' : ''}
+            ${scoreBadge}
             ${nonRoulant ? '<span class="badge-nr" title="Véhicule non roulant — explique un prix anormalement bas">NON ROULANT</span>' : ''}
           </div>
           <div class="similar-item__meta">
             ${candidate.year} \u2022 ${formatDistance(candidate.mileage)} \u2022 ${esc(candidate.city)}
           </div>
-          <div class="similar-item__meta">
-            ${match.reasons.slice(0, 3).join(' \u2022 ')}
+          <div class="similar-item__meta similar-item__deltas${deltas.length === 0 ? ' similar-item__deltas--ok' : ''}">
+            ${esc(deltaBits)}
           </div>
         </div>
         <div class="similar-item__prices">
@@ -3196,8 +3213,11 @@ function metricCard(label: string, value: string, icon: string): string {
   const iconMap: Record<string, string> = {
     price: '&#128176;', sold: '&#9989;', km: '&#128663;', location: '&#128205;', history: '&#128203;', visit: '&#128065;',
   };
+  // `data-metric-icon` lets the Duolingo-theme CSS tint each icon tile by
+  // kind (price=green, km=orange, history=purple, etc.) instead of the
+  // uniform grey fallback defined on `.metric__icon`.
   return `
-    <div class="metric">
+    <div class="metric" data-metric-icon="${esc(icon)}">
       <div class="metric__icon">${iconMap[icon] || ''}</div>
       <div>
         <div class="metric__label">${esc(label)}</div>
@@ -3420,6 +3440,116 @@ function formatPrice(value?: number): string {
 function formatDistance(value?: number): string {
   if (value == null || Number.isNaN(value)) return 'N/D';
   return `${numberFormatter.format(value)} km`;
+}
+
+/**
+ * Extract the trim/finition suffix from a VPauto version string.
+ *
+ * VPauto versions follow the pattern:
+ *   "<engine code> <power> ch <gearbox> [<n>] <trim>"
+ * e.g. "40 TFSI 207 ch S tronic 7 S Line" → "S Line"
+ *      "1.5 dCi 110 ch BVM6 Business"      → "Business"
+ *      "BlueHDi 100 ch BVM5 Active"        → "Active"
+ *
+ * Returns '' when the pattern doesn't match — the caller should treat that
+ * as "no trim diff to display" rather than guessing.
+ */
+function extractTrim(version: string | undefined | null): string {
+  if (!version) return '';
+  const afterCh = version.match(/\bch\s+(.+)$/i);
+  if (!afterCh) return '';
+  const after = afterCh[1].trim();
+  // Strip the gearbox token + optional ratio number that follows "ch"
+  const stripped = after.replace(
+    /^(?:S\s*tronic|DSG|EDC|EAT|BVA|BVM|CVT|tiptronic|automatique|manuelle|DCT|PowerShift|tronic)\s*\d*\s+/i,
+    '',
+  ).trim();
+  return stripped;
+}
+
+/**
+ * Build a list of human-readable spec differences between two snapshots.
+ *
+ * Used by the "Similaires disponibles ailleurs" card (`renderSimilarElsewhere`)
+ * to surface the *actionable* differences a bidder needs to see — the things
+ * that explain the price gap. We deliberately skip dimensions that are
+ * identical (showing "Même boîte" buys nothing) and order entries by impact
+ * on price: year, power, trim, fuel, gearbox, engine size, colour. The
+ * caller caps the visible list, so only the top diffs make it on screen.
+ */
+function buildSpecDelta(
+  candidate: VehicleSnapshot,
+  current: VehicleSnapshot,
+): string[] {
+  const parts: string[] = [];
+
+  // Year — most-buyer-relevant after price
+  const yearDiff = candidate.year - current.year;
+  if (yearDiff !== 0) {
+    const sign = yearDiff > 0 ? '+' : '';
+    const plural = Math.abs(yearDiff) > 1 ? 's' : '';
+    parts.push(`${sign}${yearDiff} an${plural}`);
+  }
+
+  // Power — primary price driver, already gated to ±20 % by the backend
+  const candPower = candidate.power;
+  const currPower = current.power;
+  if (candPower && currPower && candPower !== currPower) {
+    const diff = candPower - currPower;
+    parts.push(`${diff > 0 ? '+' : ''}${diff} ch`);
+  }
+
+  // Trim/finition — only when extractable on both sides
+  const candTrim = extractTrim(candidate.version);
+  const currTrim = extractTrim(current.version);
+  if (
+    candTrim
+    && currTrim
+    && candTrim.toLowerCase() !== currTrim.toLowerCase()
+  ) {
+    parts.push(`${candTrim} vs ${currTrim}`);
+  }
+
+  // Fuel — VPauto uses 2-letter codes (ES, GO, EH, …); shown raw because
+  // bidders recognise them and translation tables get stale fast
+  if (
+    candidate.fuel
+    && current.fuel
+    && candidate.fuel.toLowerCase() !== current.fuel.toLowerCase()
+  ) {
+    parts.push(`${candidate.fuel} vs ${current.fuel}`);
+  }
+
+  // Transmission — only when both populated and they differ
+  if (
+    candidate.transmission
+    && current.transmission
+    && candidate.transmission.toLowerCase() !== current.transmission.toLowerCase()
+  ) {
+    parts.push(`Boîte ${candidate.transmission} vs ${current.transmission}`);
+  }
+
+  // Engine size — usually correlated with power, so often redundant. Show
+  // only if power was equal but cylindrée differs (rare but informative)
+  if (
+    candidate.engineSize
+    && current.engineSize
+    && candidate.engineSize !== current.engineSize
+    && candPower === currPower
+  ) {
+    parts.push(`${candidate.engineSize} cc vs ${current.engineSize} cc`);
+  }
+
+  // Colour — last because least price-relevant
+  if (
+    candidate.color
+    && current.color
+    && candidate.color.toLowerCase() !== current.color.toLowerCase()
+  ) {
+    parts.push(`${candidate.color} vs ${current.color}`);
+  }
+
+  return parts;
 }
 
 function formatDate(value: string): string {
