@@ -345,29 +345,33 @@ export const api = {
 
   /** Get cross-auction history for a vehicle (all its passages across cities) */
   getCrossAuction(hashId: string) {
+    type CrossPassageDTO = {
+      snapshotId: number;
+      canonicalSnapshotId: number;
+      city: string;
+      saleDate: string;
+      saleTime: string | null;
+      status: string;
+      startingPrice: number | null;
+      soldPrice: number | null;
+      lotNumber: number | null;
+      mileage: number;
+      scrapedAt: string;
+      sourceUrl: string;
+      isSourceUrlStable: boolean;
+      openMode: 'vpauto' | 'local';
+      openReason: string;
+    };
     return request<{
       vehicleId: number;
       brand: string;
       model: string;
       year: number;
-      passages: {
-        snapshotId: number;
-        canonicalSnapshotId: number;
-        city: string;
-        saleDate: string;
-        saleTime: string | null;
-        status: string;
-        startingPrice: number | null;
-        soldPrice: number | null;
-        lotNumber: number | null;
-        mileage: number;
-        scrapedAt: string;
-        sourceUrl: string;
-        isSourceUrlStable: boolean;
-        openMode: 'vpauto' | 'local';
-        openReason: string;
-      }[];
+      passages: CrossPassageDTO[];
       firstStartingPrice: number | null;
+      /** Post-sale orphan passages dropped server-side, kept here so the
+       *  UI can render clickable chips toward their VPauto pages. */
+      postSaleTruncatedPassages?: CrossPassageDTO[];
     }>(`/api/vehicles/cross-auction/${hashId}`);
   },
 
@@ -388,6 +392,7 @@ export const api = {
         saleDate: string | null;
         sourceUrl: string;
         observations: string | null;
+        photoUrls: string[];
         yearMatch: boolean;
         modelMatch: boolean;
         mileageMatch: boolean;

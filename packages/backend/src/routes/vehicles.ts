@@ -6,7 +6,9 @@ import {
   buildPassagesForVehicle,
   buildPriceHistory,
   computeEvolution,
+  findFinalSoldDate,
   groupSnapshotsIntoPassages,
+  truncateAfterFinalSale,
 } from '../history.js';
 import { findExactVehicle, findMatches } from '../matching.js';
 import {
@@ -567,7 +569,12 @@ app.get('/history/:vehicleId', async (c) => {
   });
   const sortedGroups = groupSnapshotsIntoPassages(historySnapshots);
   const rawPassages: VehiclePassage[] = buildPassagesForVehicle(sortedGroups, historySnapshots);
-  const passages = applyPassageNavigation(sortedGroups, rawPassages);
+  const navigatedPassages = applyPassageNavigation(sortedGroups, rawPassages);
+
+  // Drop any "Disponible" passage scraped after the most recent sale —
+  // VPauto keeps stale listing pages reachable for a few days post-sale.
+  const { passages, truncatedPassages: postSaleTruncatedPassages } = truncateAfterFinalSale(navigatedPassages);
+
   const priceHistory = buildPriceHistory(passages);
   const mileageHistory = passages.map((p) => ({ date: p.date, mileage: p.mileage }));
   const evolution = computeEvolution(passages);
@@ -582,6 +589,7 @@ app.get('/history/:vehicleId', async (c) => {
     priceHistory,
     mileageHistory,
     evolution,
+    postSaleTruncatedPassages: postSaleTruncatedPassages.length > 0 ? postSaleTruncatedPassages : undefined,
   };
 
   return c.json<ApiResponse<VehicleHistory>>({ success: true, data: history });
@@ -1038,7 +1046,11 @@ app.get('/cross-auction/:hashId', async (c) => {
   const rawPassages = buildPassagesForVehicle(groups, historySnapshots);
   const resolvedPassages = applyPassageNavigation(groups, rawPassages);
 
-  const passages: {
+  // Drop any "Disponible" passage scraped after the most recent sale —
+  // mirrors what /history does, so the parcours UI matches.
+  const cutoffDate = findFinalSoldDate(resolvedPassages);
+
+  type CrossPassageDTO = {
     snapshotId: number;
     canonicalSnapshotId: number;
     city: string;
@@ -1054,12 +1066,15 @@ app.get('/cross-auction/:hashId', async (c) => {
     isSourceUrlStable: boolean;
     openMode: VehiclePassage['openMode'];
     openReason: string;
-  }[] = [];
+  };
+
+  const passages: CrossPassageDTO[] = [];
+  const postSaleTruncatedPassages: CrossPassageDTO[] = [];
 
   for (const [index, group] of groups.entries()) {
     const passage = resolvedPassages[index];
     const s = group.canonical;
-    passages.push({
+    const dto: CrossPassageDTO = {
       snapshotId: passage.snapshotId,
       canonicalSnapshotId: passage.canonicalSnapshotId,
       city: passage.city,
@@ -1075,7 +1090,12 @@ app.get('/cross-auction/:hashId', async (c) => {
       isSourceUrlStable: passage.isSourceUrlStable,
       openMode: passage.openMode,
       openReason: passage.openReason,
-    });
+    };
+    if (cutoffDate && passage.date && passage.date > cutoffDate) {
+      postSaleTruncatedPassages.push(dto);
+    } else {
+      passages.push(dto);
+    }
   }
 
   return c.json<ApiResponse<{
@@ -1083,8 +1103,9 @@ app.get('/cross-auction/:hashId', async (c) => {
     brand: string;
     model: string;
     year: number;
-    passages: typeof passages;
+    passages: CrossPassageDTO[];
     firstStartingPrice: number | null;
+    postSaleTruncatedPassages?: CrossPassageDTO[];
   }>>({
     success: true,
     data: {
@@ -1097,6 +1118,7 @@ app.get('/cross-auction/:hashId', async (c) => {
       firstStartingPrice: historySnapshots
         .filter(s => s.startingPrice != null)
         .sort((a, b) => a.scrapedAt.getTime() - b.scrapedAt.getTime())[0]?.startingPrice || null,
+      postSaleTruncatedPassages: postSaleTruncatedPassages.length > 0 ? postSaleTruncatedPassages : undefined,
     },
   });
 });
@@ -1158,6 +1180,7 @@ app.get('/similar-sold', async (c) => {
     saleDate: string | null;
     sourceUrl: string;
     observations: string | null;
+    photoUrls: string[];
     yearMatch: boolean;
     modelMatch: boolean;
     mileageMatch: boolean;
@@ -1181,6 +1204,10 @@ app.get('/similar-sold', async (c) => {
       saleDate: s.saleDate,
       sourceUrl: s.sourceUrl,
       observations: s.observations,
+      // First photo only — the sidepanel only renders a thumbnail. Sending
+      // the full array would inflate the response (~10 URLs × 8 results ×
+      // 100 bytes ≈ 8 kB) for no UI benefit.
+      photoUrls: parsePhotoUrls(s.photoUrls).slice(0, 1),
       yearMatch: year !== undefined ? Math.abs(s.year - year) <= YEAR_TOLERANCE : false,
       modelMatch: model ? s.model.toLowerCase().includes(model.split(/\s+/)[0].toLowerCase()) : false,
       mileageMatch: mileage !== undefined ? Math.abs(s.mileage - mileage) <= MILEAGE_TOLERANCE : false,

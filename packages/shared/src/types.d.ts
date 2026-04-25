@@ -113,6 +113,7 @@ export interface VehicleHistory {
         date: string;
         mileage: number;
     }[];
+    postSaleTruncatedPassages?: VehiclePassage[];
 }
 export type BadgeType = 'new' | 'seen' | 'price_drop' | 'price_up' | 'reappeared';
 export interface VehicleBadge {

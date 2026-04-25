@@ -1238,6 +1238,58 @@ a:hover { text-decoration: underline; }
   display: flex;
   flex-direction: column;
 }
+
+/*
+ * Mention shown at the bottom of "Historique de passages" and
+ * "Parcours multi-encheres" when the backend dropped post-sale
+ * orphan listings. Each dropped passage gets a clickable chip
+ * pointing to its VPauto page (which itself shows "Vente Live
+ * terminée"), so the user can verify the reason at a glance.
+ */
+.passages-truncated-note {
+  margin: 6px 14px 10px;
+  padding: 8px 10px;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.passages-truncated-note__head {
+  font-size: 11px;
+  font-style: italic;
+  color: var(--text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: baseline;
+}
+.passages-truncated-note__hint {
+  font-style: normal;
+  font-size: 10px;
+  opacity: 0.75;
+}
+.passages-truncated-note__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.passages-truncated-note__chips .timeline-link--button {
+  font-size: 10px;
+  padding: 3px 8px;
+  background: var(--surface-2, rgba(0, 0, 0, 0.04));
+  color: var(--text-muted);
+  border: 1px dashed var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.passages-truncated-note__chips .timeline-link--button:hover {
+  background: var(--accent-soft, rgba(99, 102, 241, 0.12));
+  color: var(--accent, #6366f1);
+  border-color: var(--accent, #6366f1);
+  border-style: solid;
+}
 .cross-item,
 .similar-item__info + .similar-item__prices,
 .similar-item {
@@ -3844,6 +3896,28 @@ body {
 .vehicle-card__info {
   min-width: 0;
   flex: 1;
+}
+
+/* Thumbnail rendered next to the title — visual triage signal for the
+   bidder (recognise model/colour at a glance). 56 px square fits the
+   row height without growing it; flex-shrink 0 prevents the photo from
+   collapsing on narrow viewports. The empty placeholder keeps the grid
+   aligned for snapshots without photo data. */
+.similar-item__photo {
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: var(--duo-ink-3, #d6d6d6);
+  border: 1.5px solid var(--line, rgba(0, 0, 0, 0.08));
+  align-self: flex-start;
+}
+.similar-item__photo--empty {
+  background:
+    linear-gradient(135deg, transparent 45%, rgba(0, 0, 0, 0.06) 45%, rgba(0, 0, 0, 0.06) 55%, transparent 55%),
+    var(--duo-ink-bg, #f1efe9);
+  border-style: dashed;
 }
 
 .similar-item__prices,

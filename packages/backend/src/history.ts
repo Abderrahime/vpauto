@@ -600,3 +600,52 @@ export function buildPassagesForVehicle(
   const vehicleSignals = aggregatePlaceholderSignals(allSnapshots);
   return groups.map((g, idx) => buildPassageFromGroup(g, idx, vehicleSignals));
 }
+
+/**
+ * VPauto regularly keeps a vehicle's listing page reachable for a few days
+ * after the auction ends — same hashId, but the page now reads
+ * "Vente Live terminée / Véhicule non disponible". Our scrapers happily
+ * record those orphan snapshots, so a sold vehicle can end up with later
+ * "Disponible" passages on top of its real adjudication.
+ *
+ * This helper drops any passage strictly newer than the most recent
+ * `status === 'sold'` passage. The cutoff is the LATEST sale date (handles
+ * the rare re-sale case where the same physical car is re-listed weeks
+ * later and re-sold — we keep both sales and only trim what comes after
+ * the second one). Ties on the same saleDate are kept (we drop only what's
+ * strictly after the cutoff).
+ *
+ * Returns the kept passages plus the count of dropped entries so the UI
+ * can surface a "+N passage post-vente masqué" mention.
+ */
+export function findFinalSoldDate(passages: VehiclePassage[]): string | null {
+  let cutoff: string | null = null;
+  for (const p of passages) {
+    if (p.status !== 'sold') continue;
+    if (!p.date) continue;
+    if (cutoff === null || p.date > cutoff) {
+      cutoff = p.date;
+    }
+  }
+  return cutoff;
+}
+
+export function truncateAfterFinalSale(passages: VehiclePassage[]): {
+  passages: VehiclePassage[];
+  truncatedPassages: VehiclePassage[];
+} {
+  const cutoff = findFinalSoldDate(passages);
+  if (!cutoff) {
+    return { passages, truncatedPassages: [] };
+  }
+  const kept: VehiclePassage[] = [];
+  const truncated: VehiclePassage[] = [];
+  for (const p of passages) {
+    if (p.date && p.date > cutoff) {
+      truncated.push(p);
+    } else {
+      kept.push(p);
+    }
+  }
+  return { passages: kept, truncatedPassages: truncated };
+}

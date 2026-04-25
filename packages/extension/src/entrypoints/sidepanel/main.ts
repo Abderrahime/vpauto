@@ -43,29 +43,32 @@ interface StoredPanelState {
   };
 }
 
+interface CrossAuctionPassage {
+  snapshotId: number;
+  canonicalSnapshotId: number;
+  city: string;
+  saleDate: string;
+  saleTime: string | null;
+  status: string;
+  startingPrice: number | null;
+  soldPrice: number | null;
+  lotNumber: number | null;
+  mileage: number;
+  scrapedAt: string;
+  sourceUrl: string;
+  isSourceUrlStable: boolean;
+  openMode: 'vpauto' | 'local';
+  openReason: string;
+}
+
 interface CrossAuctionData {
   vehicleId: number;
   brand: string;
   model: string;
   year: number;
-  passages: {
-    snapshotId: number;
-    canonicalSnapshotId: number;
-    city: string;
-    saleDate: string;
-    saleTime: string | null;
-    status: string;
-    startingPrice: number | null;
-    soldPrice: number | null;
-    lotNumber: number | null;
-    mileage: number;
-    scrapedAt: string;
-    sourceUrl: string;
-    isSourceUrlStable: boolean;
-    openMode: 'vpauto' | 'local';
-    openReason: string;
-  }[];
+  passages: CrossAuctionPassage[];
   firstStartingPrice: number | null;
+  postSaleTruncatedPassages?: CrossAuctionPassage[];
 }
 
 interface SimilarSoldData {
@@ -82,8 +85,10 @@ interface SimilarSoldData {
     saleDate: string | null;
     sourceUrl: string;
     observations: string | null;
+    photoUrls?: string[];
     yearMatch: boolean;
     modelMatch: boolean;
+    mileageMatch?: boolean;
   }[];
   stats: {
     count: number;
@@ -1911,6 +1916,54 @@ function enrichHistoryWithResolvedMap(
   };
 }
 
+/**
+ * Compact representation of a passage that the backend dropped because it
+ * was scraped after the most recent sale. We accept both the VehiclePassage
+ * shape (history endpoint, uses `date`) and the cross-auction inline shape
+ * (uses `saleDate`) so a single helper can serve both cards.
+ */
+type TruncatedPassageLike = {
+  snapshotId?: number | null;
+  city?: string | null;
+  date?: string | null;
+  saleDate?: string | null;
+  saleTime?: string | null;
+  sourceUrl?: string | null;
+  openMode?: string | null;
+};
+
+function renderPostSaleTruncatedNote(passages: TruncatedPassageLike[] | undefined): string {
+  if (!passages || passages.length === 0) return '';
+  const count = passages.length;
+  const label = count === 1
+    ? '1 passage post-vente masqué'
+    : `${count} passages post-vente masqués`;
+
+  const chips = passages.map((p) => {
+    const moment = formatPassageMoment({
+      saleDate: p.saleDate ?? p.date ?? null,
+      saleTime: p.saleTime ?? null,
+    });
+    const cityText = p.city ? `${p.city} · ` : '';
+    const buttonLabel = `${cityText}${moment} ↗`;
+    return renderHistoryOpenButton({
+      snapshotId: p.snapshotId ?? null,
+      sourceUrl: p.sourceUrl ?? null,
+      openMode: p.openMode ?? null,
+      label: buttonLabel,
+    });
+  }).join('');
+
+  return `
+    <div class="passages-truncated-note" title="VPauto laisse parfois la page d'annonce accessible quelques jours après la vente, avec la mention « Vente Live terminée / Véhicule non disponible ». Ces passages orphelins ne sont pas affichés.">
+      <div class="passages-truncated-note__head">
+        ${esc(label)} <span class="passages-truncated-note__hint">(annonce orpheline VPauto)</span>
+      </div>
+      <div class="passages-truncated-note__chips">${chips}</div>
+    </div>
+  `;
+}
+
 function renderHistorySection(history: VehicleHistory | null, vehicleId: number | null | undefined, snapshot: VehicleSnapshot): string {
   const historicalPassages = history?.passages.slice().reverse() || [];
 
@@ -1988,6 +2041,7 @@ function renderHistorySection(history: VehicleHistory | null, vehicleId: number 
     <section class="card">
       ${renderCardTitle('📅', 'Historique de passages', { count: historicalPassages.length, tone: 'yellow' })}
       <div class="timeline">${items}</div>
+      ${renderPostSaleTruncatedNote(history.postSaleTruncatedPassages)}
     </section>
   `;
 }
@@ -2048,6 +2102,7 @@ function renderCrossAuction(data: CrossAuctionData | null | undefined, snapshot:
     <section class="card">
       ${renderCardTitle('🌍', 'Parcours multi-encheres', { count: previousPassages.length, tone: 'purple' })}
       <div class="cross-list">${items}</div>
+      ${renderPostSaleTruncatedNote(data.postSaleTruncatedPassages)}
     </section>
   `;
 }
@@ -2143,8 +2198,10 @@ function renderSimilarInAuction(vehicles: Partial<VehicleSnapshot>[], current: V
     const nonRoulant = isNonRoulant(v);
     const statusLabel = v.status === 'sold' ? 'Vendu' : v.status === 'unsold' ? 'Invendu' : '';
     const statusColor = v.status === 'sold' ? 'green' : v.status === 'unsold' ? 'red' : '';
+    const altText = `${v.brand || ''} ${v.model || ''}`.trim();
     return `
       <div class="similar-item${nonRoulant ? ' similar-item--nr' : ''}" data-vehicle-url="${esc(v.sourceUrl || '')}">
+        ${renderThumbnail(v.photoUrls, altText)}
         <div class="similar-item__info">
           <div class="similar-item__name">
             ${esc(v.brand || '')} ${esc(v.model || '')}
@@ -2173,10 +2230,44 @@ function renderSimilarInAuction(vehicles: Partial<VehicleSnapshot>[], current: V
 
 function renderSimilarElsewhere(matches: MatchResult[] | null | undefined, current: VehicleSnapshot): string {
   const currentPrice = current.startingPrice || current.soldPrice || null;
+  // Defensive same-vehicle dedup. The backend already excludes the current
+  // `vehicleId`, but VPauto creates a NEW hashId every time it re-lists a car
+  // (e.g. invendu → repasse, non-roulant → roulant). The two listings live in
+  // distinct Vehicle rows until `merge-split-vehicles.ts` runs, so without a
+  // second-line defence here the same physical car shows up under
+  // "Similaires ailleurs" — observed on VW Golf 11396385 in LILLE.
+  //
+  // Defence layers, fastest checks first:
+  //   1. hashId equality (catches most direct dupes)
+  //   2. VPauto reference equality (catches the rare ref-reuse on relisting)
+  //   3. sourceUrl equality (catches the case where ref is missing both sides)
+  //   4. brand+model+year + odometer drift ≤ 500 km — two distinct cars of
+  //      the same trim never read the same odometer to the kilometre, so a
+  //      tight match here means it's the same physical vehicle that the
+  //      matcher hasn't yet been able to merge.
+  const sameVehicle = (snap: VehicleSnapshot): boolean => {
+    if (snap.hashId && current.hashId && snap.hashId === current.hashId) return true;
+    if (snap.reference && current.reference && snap.reference === current.reference) return true;
+    if (snap.sourceUrl && current.sourceUrl && snap.sourceUrl === current.sourceUrl) return true;
+    const brandMatch = (snap.brand || '').toUpperCase() === (current.brand || '').toUpperCase();
+    const modelMatch = (snap.model || '').toUpperCase() === (current.model || '').toUpperCase();
+    const yearMatch = snap.year === current.year;
+    const kmClose = Math.abs((snap.mileage || 0) - (current.mileage || 0)) <= 500;
+    return brandMatch && modelMatch && yearMatch && kmClose;
+  };
+  // Same-city filter — case-insensitive. The detail-page scraper Title-Cases
+  // the city ("LILLE" → "Lille") while the list-page scraper preserves the
+  // original UPPERCASE, so a strict !== comparison lets same-city dupes leak.
+  const normalizeCity = (city: string | undefined | null): string =>
+    (city || '').toUpperCase().trim();
+  const currentCity = normalizeCity(current.city);
   const filtered = (matches || [])
     .filter((match) => match.level !== 'exact')
-    .filter((match) => match.snapshot.hashId !== current.hashId)
-    .filter((match) => Boolean(match.snapshot.city) && match.snapshot.city !== current.city)
+    .filter((match) => !sameVehicle(match.snapshot))
+    .filter((match) => {
+      const candCity = normalizeCity(match.snapshot.city);
+      return Boolean(candCity) && candCity !== currentCity;
+    })
     .filter((match) => ['available', 'auction_live', 'unsold'].includes(match.snapshot.status))
     .sort((a, b) => {
       const levelScore = (m: MatchResult) => m.level === 'same_model' ? 2 : 1;
@@ -2262,6 +2353,7 @@ function renderSimilarElsewhere(matches: MatchResult[] | null | undefined, curre
 
     return `
       <div class="similar-item${nonRoulant ? ' similar-item--nr' : ''}" data-vehicle-url="${esc(candidate.sourceUrl || '')}">
+        ${renderThumbnail(candidate.photoUrls, `${candidate.brand} ${candidate.model}`)}
         <div class="similar-item__info">
           <div class="similar-item__name">
             ${esc(candidate.brand)} ${esc(candidate.model)}
@@ -2382,6 +2474,7 @@ function renderSimilarSold(data: SimilarSoldData | null | undefined, currentSnap
       : '';
     return `
       <div class="similar-item${nonRoulant ? ' similar-item--nr' : ''}" data-vehicle-url="${esc(v.sourceUrl)}">
+        ${renderThumbnail(v.photoUrls, `${v.brand} ${v.model}`)}
         <div class="similar-item__info">
           <div class="similar-item__name">
             ${esc(v.brand)} ${esc(v.model)}
@@ -3440,6 +3533,29 @@ function formatPrice(value?: number): string {
 function formatDistance(value?: number): string {
   if (value == null || Number.isNaN(value)) return 'N/D';
   return `${numberFormatter.format(value)} km`;
+}
+
+/**
+ * Render a square thumbnail from the first available photo URL, or a
+ * neutral placeholder when the snapshot has no photo. Used by the three
+ * similar-vehicles cards (in-auction, elsewhere, sold) so the bidder can
+ * visually triage candidates without reading specs.
+ *
+ * The wrapper element is always rendered (even when empty) so the row's
+ * grid template stays stable — the alternative would shift the title left
+ * for photo-less rows and look broken next to rows with thumbnails.
+ */
+function renderThumbnail(photoUrls: string[] | undefined | null, alt: string): string {
+  const url = (photoUrls && photoUrls.length > 0) ? photoUrls[0] : '';
+  if (!url) {
+    // Empty placeholder keeps the layout aligned. The CSS gives it a faint
+    // background so the user perceives "no photo available" rather than
+    // thinking the image just hasn't loaded yet.
+    return `<div class="similar-item__photo similar-item__photo--empty" aria-hidden="true"></div>`;
+  }
+  // `loading="lazy"` defers off-screen photos; `referrerpolicy="no-referrer"`
+  // avoids leaking the extension URL when the CDN inspects the Referer.
+  return `<img class="similar-item__photo" src="${esc(url)}" alt="${esc(alt)}" loading="lazy" referrerpolicy="no-referrer">`;
 }
 
 /**

@@ -213,6 +213,14 @@ export interface VehicleHistory {
   priceHistory: { date: string; price: number; label?: string }[];
   mileageHistory: { date: string; mileage: number }[];
   evolution: VehiclePriceEvolution;
+  /**
+   * "Disponible" passages dropped because they were scraped AFTER the most
+   * recent sale (orphan VPauto listings flagged "Vente Live terminée").
+   * Surfaced in the UI as small clickable chips so the user can verify
+   * VPauto's mention directly. `undefined` (not empty array) when nothing
+   * was dropped, to keep payloads small in the common case.
+   */
+  postSaleTruncatedPassages?: VehiclePassage[];
 }
 
 export interface VehicleHistorySnapshotResponse {

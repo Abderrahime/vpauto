@@ -8,10 +8,12 @@ import {
   buildPassagesForVehicle,
   buildPriceHistory,
   computeEvolution,
+  findFinalSoldDate,
   groupSnapshotsIntoPassages,
   pickLatestLiveBid,
   pickPassageSaleDate,
   pickStartingPrice,
+  truncateAfterFinalSale,
   type SnapshotForHistory,
 } from './history.js';
 
@@ -1218,5 +1220,185 @@ describe('computeEvolution with live-bid fallback', () => {
     expect(evo.evolutionAmount).toBe(2500);
     expect(evo.evolutionDirection).toBe('up');
     expect(evo.lastPassageSold).toBe(false);
+  });
+});
+
+describe('truncateAfterFinalSale (VW Golf 11408791 regression)', () => {
+  // Real case: VW Golf sold 28 100 € on 24 avr. 2026 at MARSEILLE,
+  // re-listed as "Disponible" on 27 avr. 2026 at LORIENT (orphan listing
+  // VPauto itself flags as "Vente Live terminée"). The 27 avr passage
+  // must disappear from the parcours and the historique.
+
+  it('drops a stale "Disponible" passage scraped after the final sale', () => {
+    const snaps = [
+      snap({
+        id: 1,
+        hashId: 'sale-marseille',
+        city: 'MARSEILLE',
+        saleDate: '2026-04-24',
+        scrapedAt: new Date('2026-04-24T15:00:00Z'),
+        soldPrice: 28100,
+        status: 'sold',
+      }),
+      snap({
+        id: 2,
+        hashId: 'orphan-lorient',
+        city: 'LORIENT',
+        saleDate: '2026-04-27',
+        scrapedAt: new Date('2026-04-27T09:00:00Z'),
+        startingPrice: 27000,
+        status: 'available',
+      }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = buildPassagesForVehicle(groups, snaps);
+    const result = truncateAfterFinalSale(passages);
+    expect(result.passages).toHaveLength(1);
+    expect(result.passages[0].city).toBe('MARSEILLE');
+    expect(result.passages[0].status).toBe('sold');
+    expect(result.truncatedPassages).toHaveLength(1);
+    expect(result.truncatedPassages[0].city).toBe('LORIENT');
+    expect(result.truncatedPassages[0].date).toBe('2026-04-27');
+    expect(result.truncatedPassages[0].sourceUrl).toBe('https://vpauto.fr/v/x');
+  });
+
+  it('keeps everything up to and including the sold passage on the same day', () => {
+    // Edge case: sale happened on 24 avr, scraped at 15:00 Z. Another
+    // passage on the SAME date must NOT be dropped (we only drop strictly
+    // newer dates), even if it was an "Invendu" mid-day.
+    const snaps = [
+      snap({
+        id: 1,
+        hashId: 'sameday-A',
+        city: 'LYON',
+        saleDate: '2026-04-24',
+        scrapedAt: new Date('2026-04-24T10:00:00Z'),
+        startingPrice: 27000,
+        status: 'unsold',
+      }),
+      snap({
+        id: 2,
+        hashId: 'sameday-B',
+        city: 'MARSEILLE',
+        saleDate: '2026-04-24',
+        scrapedAt: new Date('2026-04-24T15:00:00Z'),
+        soldPrice: 28100,
+        status: 'sold',
+      }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = buildPassagesForVehicle(groups, snaps);
+    const result = truncateAfterFinalSale(passages);
+    expect(result.passages).toHaveLength(2);
+    expect(result.truncatedPassages).toEqual([]);
+  });
+
+  it('caps at the LATEST sale when the car was re-sold weeks later', () => {
+    // Re-sale scenario: sold a first time, then the new owner re-listed
+    // and re-sold weeks later. Both sales are legitimate; we only trim
+    // any orphan listing scraped AFTER the second sale.
+    const snaps = [
+      snap({
+        id: 1,
+        hashId: 'sale-1',
+        city: 'PARIS',
+        saleDate: '2026-03-10',
+        scrapedAt: new Date('2026-03-10T15:00:00Z'),
+        soldPrice: 28000,
+        status: 'sold',
+      }),
+      snap({
+        id: 2,
+        hashId: 'sale-2',
+        city: 'LYON',
+        saleDate: '2026-04-24',
+        scrapedAt: new Date('2026-04-24T15:00:00Z'),
+        soldPrice: 27500,
+        status: 'sold',
+      }),
+      snap({
+        id: 3,
+        hashId: 'orphan',
+        city: 'NANTES',
+        saleDate: '2026-04-27',
+        scrapedAt: new Date('2026-04-27T09:00:00Z'),
+        startingPrice: 27000,
+        status: 'available',
+      }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = buildPassagesForVehicle(groups, snaps);
+    const result = truncateAfterFinalSale(passages);
+    expect(result.passages).toHaveLength(2);
+    expect(result.passages.map((p) => p.city)).toEqual(['PARIS', 'LYON']);
+    expect(result.truncatedPassages.map((p) => p.city)).toEqual(['NANTES']);
+  });
+
+  it('is a no-op when the vehicle has never been sold (only Invendu / Disponible)', () => {
+    const snaps = [
+      snap({
+        id: 1,
+        hashId: 'a',
+        city: 'PARIS',
+        saleDate: '2026-04-10',
+        scrapedAt: new Date('2026-04-10T15:00:00Z'),
+        startingPrice: 18000,
+        status: 'unsold',
+      }),
+      snap({
+        id: 2,
+        hashId: 'b',
+        city: 'LYON',
+        saleDate: '2026-04-20',
+        scrapedAt: new Date('2026-04-20T15:00:00Z'),
+        startingPrice: 17500,
+        status: 'available',
+      }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = buildPassagesForVehicle(groups, snaps);
+    const result = truncateAfterFinalSale(passages);
+    expect(result.passages).toHaveLength(2);
+    expect(result.truncatedPassages).toEqual([]);
+  });
+
+  it('findFinalSoldDate returns null when no sold passage exists', () => {
+    const snaps = [
+      snap({
+        id: 1,
+        hashId: 'a',
+        city: 'PARIS',
+        saleDate: '2026-04-10',
+        startingPrice: 18000,
+        status: 'unsold',
+      }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = buildPassagesForVehicle(groups, snaps);
+    expect(findFinalSoldDate(passages)).toBeNull();
+  });
+
+  it('findFinalSoldDate picks the most recent sale, not the first', () => {
+    const snaps = [
+      snap({
+        id: 1,
+        hashId: 'a',
+        city: 'PARIS',
+        saleDate: '2026-03-10',
+        soldPrice: 28000,
+        status: 'sold',
+      }),
+      snap({
+        id: 2,
+        hashId: 'b',
+        city: 'LYON',
+        saleDate: '2026-04-24',
+        soldPrice: 27500,
+        status: 'sold',
+      }),
+    ];
+    const groups = groupSnapshotsIntoPassages(snaps);
+    const passages = buildPassagesForVehicle(groups, snaps);
+    expect(findFinalSoldDate(passages)).toBe('2026-04-24');
   });
 });
