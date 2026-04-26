@@ -60,6 +60,7 @@ export interface VehicleSnapshot {
     scrapedAt: string;
     status: VehicleStatus;
     soldPrice?: number;
+    hasScreenshot?: boolean;
 }
 export type VehicleStatus = 'available' | 'auction_live' | 'sold' | 'unsold' | 'removed';
 export type MatchLevel = 'exact' | 'same_model' | 'similar';

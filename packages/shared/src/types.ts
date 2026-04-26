@@ -82,6 +82,14 @@ export interface VehicleSnapshot {
   // Status tracking
   status: VehicleStatus;
   soldPrice?: number;
+
+  /**
+   * Whether a screenshot of the VPauto detail page is stored on disk for
+   * this snapshot. Used by the local fiche historique as a fallback hero
+   * image when the VPauto URL is no longer reachable. Served via
+   * `/api/vehicles/screenshot/:snapshotId.jpg`.
+   */
+  hasScreenshot?: boolean;
 }
 
 export type VehicleStatus = 'available' | 'auction_live' | 'sold' | 'unsold' | 'removed';

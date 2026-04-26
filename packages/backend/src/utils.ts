@@ -114,5 +114,6 @@ export function snapshotToApi(s: Snapshot): VehicleSnapshot {
     scrapedAt: s.scrapedAt.toISOString(),
     status: s.status as VehicleStatus,
     soldPrice: s.soldPrice ?? undefined,
+    hasScreenshot: s.hasScreenshot,
   };
 }

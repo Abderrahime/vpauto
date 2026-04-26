@@ -301,6 +301,57 @@ async function handleVehiclePage() {
   if (persistence.vehicleId) {
     injectVehicleBanner(persistence.vehicleId, snapshot);
   }
+
+  // Capture a viewport screenshot on the FIRST scrape of this vehicle so the
+  // local fiche historique has a hero image when VPauto eventually 404s.
+  // We capture only when a NEW vehicle row was created (createdVehicle: true)
+  // and we got back a snapshotId — i.e. exactly once per hashId.
+  if (persistence.snapshotId && persistence.createdVehicle && !persistence.recoveredByLookup) {
+    void captureSnapshotScreenshot(persistence.snapshotId, snapshot.hashId).catch((err) => {
+      console.warn('[VPauto] captureSnapshotScreenshot threw:', err);
+    });
+  }
+}
+
+async function captureSnapshotScreenshot(snapshotId: number, hashId: string): Promise<void> {
+  // Scroll to top so the hero/photo area is in the visible viewport before
+  // the background calls captureVisibleTab. Wait a beat for layout to settle.
+  try {
+    window.scrollTo({ top: 0, behavior: 'auto' });
+  } catch {}
+  await new Promise((resolve) => setTimeout(resolve, 600));
+
+  const response = await browser.runtime.sendMessage({
+    type: 'CAPTURE_SCREENSHOT',
+    snapshotId,
+  }).catch((err: unknown) => {
+    console.warn('[VPauto] CAPTURE_SCREENSHOT sendMessage failed:', err);
+    return { error: err instanceof Error ? err.message : String(err) } as { error: string };
+  });
+
+  if ((response as { error?: string })?.error) {
+    const reason = (response as { error: string }).error;
+    console.warn('[VPauto] Screenshot capture failed:', reason);
+    sendDebug({
+      stage: 'detail_screenshot_failed',
+      pageType: 'detail',
+      url: window.location.href,
+      hashId,
+      reason,
+    });
+    return;
+  }
+
+  const bytes = (response as { data?: { bytes?: number } })?.data?.bytes;
+  console.log(`[VPauto] Screenshot saved for snapshot ${snapshotId}${bytes ? ` (${bytes} bytes)` : ''}`);
+  sendDebug({
+    stage: 'detail_screenshot_saved',
+    pageType: 'detail',
+    url: window.location.href,
+    hashId,
+    snapshotId,
+    reason: bytes ? `${bytes}_bytes` : 'ok',
+  });
 }
 
 // ── Vehicle list page ──────────────────────────────────────────────────────

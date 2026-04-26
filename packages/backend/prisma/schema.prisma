@@ -106,6 +106,12 @@ model Snapshot {
   status          String      @default("available") // available, auction_live, sold, unsold, removed
   soldPrice       Float?
 
+  /// Presence of an on-disk screenshot of the VPauto detail page captured at
+  /// scrape time. Stored at packages/backend/data/screenshots/<id>.jpg.
+  /// Used as a fallback hero image on the local fiche historique when the
+  /// VPauto page is no longer reachable (404).
+  hasScreenshot   Boolean     @default(false)
+
   @@index([vehicleId])
   @@index([brand, model])
   @@index([city])

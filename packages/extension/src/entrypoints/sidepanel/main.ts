@@ -1800,10 +1800,40 @@ function isCurrentAuctionPassage(
   return true;
 }
 
-function openHistorySnapshot(snapshotId: number) {
+function openHistorySnapshot(snapshotId: number, options: { fromVpauto404?: boolean } = {}) {
+  const params = new URLSearchParams({ snapshotId: String(snapshotId) });
+  if (options.fromVpauto404) {
+    params.set('fromVpauto404', '1');
+  }
   return browser.tabs.create({
-    url: browser.runtime.getURL(`/history-snapshot.html?snapshotId=${encodeURIComponent(String(snapshotId))}`),
+    url: browser.runtime.getURL(`/history-snapshot.html?${params.toString()}`),
   });
+}
+
+/**
+ * Probe a VPauto URL with a short HEAD timeout to detect 404s before we
+ * open the tab. Returns true when the URL looks reachable, false on 4xx/5xx
+ * responses, network failures, or timeouts. We default to "reachable" on
+ * "opaque" responses (no-cors falls back to opaque) so we don't redirect
+ * users to the local fallback when VPauto is actually fine.
+ */
+async function probeVpautoUrlAvailable(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(url, {
+      method: 'HEAD',
+      redirect: 'follow',
+      signal: AbortSignal.timeout(1500),
+    });
+    if (response.type === 'opaque' || response.type === 'opaqueredirect') {
+      return true;
+    }
+    if (response.status >= 400 && response.status < 600) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function openHistoryTarget(input: {
@@ -1814,7 +1844,24 @@ function openHistoryTarget(input: {
   const mode = input.openMode === 'vpauto' && input.sourceUrl ? 'vpauto' : 'local';
 
   if (mode === 'vpauto' && input.sourceUrl) {
-    void browser.tabs.create({ url: input.sourceUrl });
+    const url = input.sourceUrl;
+    const snapshotId = input.snapshotId;
+    void (async () => {
+      const reachable = await probeVpautoUrlAvailable(url);
+      if (reachable) {
+        void browser.tabs.create({ url });
+        return;
+      }
+      // VPauto returned 4xx or didn't respond — fall back to the local fiche
+      // and tag it with fromVpauto404 so the page surfaces a yellow banner.
+      if (snapshotId != null) {
+        void openHistorySnapshot(snapshotId, { fromVpauto404: true });
+        return;
+      }
+      // Last-resort: open VPauto anyway so the user sees the actual error
+      // rather than a silent no-op.
+      void browser.tabs.create({ url });
+    })();
     return;
   }
 

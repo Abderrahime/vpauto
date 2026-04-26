@@ -107,7 +107,60 @@ function setBackgroundDebug(patch: Partial<BackgroundDebugState>): void {
   });
 }
 
-async function handleRpcMessage(message: any): Promise<{ data?: any; error?: string }> {
+async function captureAndUploadScreenshot(input: {
+  tabId: number | undefined;
+  windowId: number | undefined;
+  snapshotId: number;
+}): Promise<{ data?: { snapshotId: number; bytes: number }; error?: string }> {
+  if (!Number.isFinite(input.snapshotId)) {
+    return { error: 'invalid_snapshot_id' };
+  }
+  if (input.tabId == null) {
+    return { error: 'missing_tab_id' };
+  }
+
+  // Sanity-check: only capture VPauto detail pages so we never accidentally
+  // upload, say, a banking tab opened in a parallel window.
+  let windowId = input.windowId;
+  try {
+    const tab = await chrome.tabs.get(input.tabId);
+    const url = tab.url || '';
+    if (!/^https:\/\/(www\.)?vpauto\.fr\//.test(url)) {
+      return { error: `tab_not_on_vpauto:${url}` };
+    }
+    if (windowId == null) windowId = tab.windowId;
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+
+  let dataUrl: string;
+  try {
+    dataUrl = await chrome.tabs.captureVisibleTab(windowId!, { format: 'jpeg', quality: 75 });
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
+    return { error: 'capture_returned_invalid_payload' };
+  }
+
+  const upload = await fetchApi<{ snapshotId: number; bytes: number }>(
+    `/api/vehicles/screenshot/${input.snapshotId}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ image: dataUrl }),
+    },
+  );
+  if (upload.error || !upload.data) {
+    return { error: upload.error || 'screenshot_upload_failed' };
+  }
+  console.log(`[VPauto BG] Screenshot uploaded for snapshot ${input.snapshotId} (${upload.data.bytes} bytes)`);
+  return { data: upload.data };
+}
+
+async function handleRpcMessage(message: any, sender?: chrome.runtime.MessageSender): Promise<{ data?: any; error?: string }> {
   if (message.type === 'PING_BG') {
     setBackgroundDebug({
       status: 'ping_ok',
@@ -174,6 +227,37 @@ async function handleRpcMessage(message: any): Promise<{ data?: any; error?: str
     return { data: { success: true, data: result.data } };
   }
 
+  if (message.type === 'CAPTURE_SCREENSHOT') {
+    setBackgroundDebug({
+      status: 'screenshot_started',
+      lastStage: 'screenshot_started',
+      lastError: null,
+      lastRequestId: message.requestId,
+    });
+    const result = await captureAndUploadScreenshot({
+      tabId: sender?.tab?.id,
+      windowId: sender?.tab?.windowId,
+      snapshotId: Number(message.snapshotId),
+    });
+    if (result.error) {
+      setBackgroundDebug({
+        status: 'screenshot_error',
+        lastStage: 'screenshot_error',
+        lastError: result.error,
+        lastRequestId: message.requestId,
+      });
+      console.warn(`[VPauto BG] CAPTURE_SCREENSHOT failed: ${result.error}`);
+      return { error: result.error };
+    }
+    setBackgroundDebug({
+      status: 'screenshot_success',
+      lastStage: 'screenshot_success',
+      lastError: null,
+      lastRequestId: message.requestId,
+    });
+    return { data: result.data };
+  }
+
   if (message.type === 'RUN_BATCH_SAVE') {
     const vehicles = Array.isArray(message.vehicles) ? message.vehicles as Partial<VehicleSnapshot>[] : [];
 
@@ -232,8 +316,13 @@ export default defineBackground(() => {
 
   // ── Message handler — Chrome native API for proper async sendResponse ──
   chrome.runtime.onMessage.addListener((message: any, sender: any, sendResponse: (r?: any) => void) => {
-    if (message.type === 'API_PROXY' || message.type === 'RUN_BATCH_SAVE' || message.type === 'PING_BG') {
-      void handleRpcMessage(message)
+    if (
+      message.type === 'API_PROXY' ||
+      message.type === 'RUN_BATCH_SAVE' ||
+      message.type === 'PING_BG' ||
+      message.type === 'CAPTURE_SCREENSHOT'
+    ) {
+      void handleRpcMessage(message, sender)
         .then((result) => sendResponse(result))
         .catch((error) => {
           const reason = error instanceof Error ? error.message : String(error);

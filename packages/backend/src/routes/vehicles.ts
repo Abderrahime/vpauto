@@ -1,4 +1,7 @@
 import { Hono } from 'hono';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { prisma } from '../db.js';
 import {
@@ -29,6 +32,27 @@ import type {
 } from '@vpauto/shared';
 
 const app = new Hono();
+
+// Screenshots are stored on disk to keep the SQLite DB lean.
+// Resolved relative to this source file so the same path works in both
+// `tsx watch src/index.ts` (dev) and `node dist/...` (build).
+const SCREENSHOT_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  'data',
+  'screenshots',
+);
+// 5 MB hard cap on a single screenshot upload — at JPEG q75, a viewport
+// shot of vpauto.fr is typically 200-400 KB, so 5 MB leaves a wide
+// safety margin while preventing accidental abuse.
+const SCREENSHOT_MAX_BYTES = 5 * 1024 * 1024;
+async function ensureScreenshotDir(): Promise<void> {
+  await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
+}
+function screenshotPathFor(snapshotId: number): string {
+  return path.join(SCREENSHOT_DIR, `${snapshotId}.jpg`);
+}
 
 function buildVehicleIdentity(vehicle: {
   reference: string | null;
@@ -593,6 +617,92 @@ app.get('/history/:vehicleId', async (c) => {
   };
 
   return c.json<ApiResponse<VehicleHistory>>({ success: true, data: history });
+});
+
+// ── Screenshot upload (extension scrapes a fresh hashId, captures the
+//    visible tab, posts the JPEG here so the local fiche historique can
+//    show a fallback hero image if VPauto later 404s the listing) ──
+app.post('/screenshot/:snapshotId', async (c) => {
+  const snapshotId = parseInt(c.req.param('snapshotId'));
+  if (!Number.isFinite(snapshotId)) {
+    return c.json<ApiResponse<null>>({ success: false, error: 'Invalid snapshotId' }, 400);
+  }
+
+  const snapshot = await prisma.snapshot.findUnique({ where: { id: snapshotId } });
+  if (!snapshot) {
+    return c.json<ApiResponse<null>>({ success: false, error: 'Snapshot not found' }, 404);
+  }
+
+  // Body shape: { image: 'data:image/jpeg;base64,...' } — accept either a
+  // full data URL or a bare base64 payload to keep the client side simple.
+  let body: { image?: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json<ApiResponse<null>>({ success: false, error: 'Invalid JSON body' }, 400);
+  }
+
+  const raw = body?.image;
+  if (typeof raw !== 'string' || raw.length === 0) {
+    return c.json<ApiResponse<null>>({ success: false, error: 'Missing image payload' }, 400);
+  }
+
+  const base64 = raw.startsWith('data:') ? raw.slice(raw.indexOf(',') + 1) : raw;
+  // Conservative byte estimate: 4 base64 chars ≈ 3 bytes. Reject early to
+  // avoid spending CPU decoding a multi-MB blob just to refuse it after.
+  if ((base64.length * 3) / 4 > SCREENSHOT_MAX_BYTES) {
+    return c.json<ApiResponse<null>>({ success: false, error: 'Screenshot exceeds 5 MB limit' }, 413);
+  }
+
+  let buffer: Buffer;
+  try {
+    buffer = Buffer.from(base64, 'base64');
+  } catch (error) {
+    return c.json<ApiResponse<null>>({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to decode base64',
+    }, 400);
+  }
+  if (buffer.length === 0 || buffer.length > SCREENSHOT_MAX_BYTES) {
+    return c.json<ApiResponse<null>>({ success: false, error: 'Decoded payload empty or oversized' }, 400);
+  }
+
+  await ensureScreenshotDir();
+  await fs.writeFile(screenshotPathFor(snapshotId), buffer);
+  await prisma.snapshot.update({
+    where: { id: snapshotId },
+    data: { hasScreenshot: true },
+  });
+
+  return c.json<ApiResponse<{ snapshotId: number; bytes: number }>>({
+    success: true,
+    data: { snapshotId, bytes: buffer.length },
+  });
+});
+
+// ── Serve a stored screenshot. Streams the JPEG directly so the
+//    history-snapshot fiche can <img src=...> it without going through
+//    the JSON API layer. ──
+app.get('/screenshot/:snapshotId', async (c) => {
+  const snapshotId = parseInt(c.req.param('snapshotId'));
+  if (!Number.isFinite(snapshotId)) {
+    return c.text('Invalid snapshotId', 400);
+  }
+
+  const filePath = screenshotPathFor(snapshotId);
+  let buffer: Buffer;
+  try {
+    buffer = await fs.readFile(filePath);
+  } catch {
+    return c.text('Screenshot not found', 404);
+  }
+
+  return c.body(new Uint8Array(buffer), 200, {
+    'Content-Type': 'image/jpeg',
+    // Snapshots are immutable once captured — any update of the fiche
+    // would create a NEW snapshotId. Cache aggressively.
+    'Cache-Control': 'public, max-age=31536000, immutable',
+  });
 });
 
 // ── Get one exact historical snapshot, reconstructed from the local DB ──
