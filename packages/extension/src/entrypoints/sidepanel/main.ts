@@ -750,14 +750,18 @@ function diffSnapshots(previous: VehicleSnapshot, next: VehicleSnapshot): FieldU
   // ── Media (photo count) ──
   const prevPhotos = previous.photoUrls?.length ?? 0;
   const nextPhotos = next.photoUrls?.length ?? 0;
-  if (prevPhotos !== nextPhotos) {
+  const photoDelta = nextPhotos - prevPhotos;
+  // VPauto frequently returns one fewer photo because of lazy-loading/CDN
+  // timing. We keep the backend's archived photos, and we also avoid counting
+  // exactly "-1 photo" as an import update. Larger drops still surface.
+  if (photoDelta !== 0 && photoDelta !== -1) {
     updates.push({
       field: 'photoUrls',
       label: 'Photos',
       before: `${prevPhotos} photo${prevPhotos > 1 ? 's' : ''}`,
       after: `${nextPhotos} photo${nextPhotos > 1 ? 's' : ''}`,
       direction: nextPhotos > prevPhotos ? 'up' : 'down',
-      delta: `${nextPhotos > prevPhotos ? '+' : ''}${nextPhotos - prevPhotos}`,
+      delta: `${photoDelta > 0 ? '+' : ''}${photoDelta}`,
     });
   }
 
