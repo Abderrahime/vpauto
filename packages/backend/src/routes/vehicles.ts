@@ -1055,19 +1055,27 @@ app.get('/history-snapshot/:snapshotId', async (c) => {
 
 // ── Get vehicle by reference or hashId ──
 app.get('/lookup', async (c) => {
-  const reference = c.req.query('reference');
-  const hashId = c.req.query('hashId');
+  const reference = c.req.query('reference')?.trim();
+  const hashId = c.req.query('hashId')?.trim();
 
   if (!reference && !hashId) {
     return c.json<ApiResponse<null>>({ success: false, error: 'Provide reference or hashId' }, 400);
   }
 
-  const vehicle = await prisma.vehicle.findFirst({
-    where: reference ? { reference } : { hashId },
-    include: {
-      snapshots: { orderBy: { scrapedAt: 'desc' }, take: 1 },
-    },
-  });
+  const findVehicleForLookup = (where: { reference?: string; hashId?: string }) =>
+    prisma.vehicle.findFirst({
+      where,
+      include: {
+        snapshots: { orderBy: { scrapedAt: 'desc' }, take: 1 },
+      },
+    });
+
+  // When both identifiers are supplied, don't let a stale/missing reference
+  // prevent lookup by hashId. Prefer the strongest match, then fall back to
+  // either stable identifier.
+  let vehicle = reference && hashId ? await findVehicleForLookup({ reference, hashId }) : null;
+  if (!vehicle && hashId) vehicle = await findVehicleForLookup({ hashId });
+  if (!vehicle && reference) vehicle = await findVehicleForLookup({ reference });
 
   if (!vehicle) {
     return c.json<ApiResponse<null>>({ success: true, data: null });
