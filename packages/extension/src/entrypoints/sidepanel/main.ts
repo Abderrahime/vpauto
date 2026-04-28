@@ -1152,14 +1152,16 @@ async function runSilentImport(state: StoredPanelState): Promise<void> {
 }
 
 // ── Capture orchestrator ──────────────────────────────────────────────
-// Drives a separate popup window through a list of vehicles, asking the
-// background to screenshot each one. Runs entirely in the side panel
-// because:
+// Drives a separate popup window through a list of vehicles, screenshotting
+// each one and uploading the JPEG to the backend. Runs entirely in the side
+// panel because:
 //   1. chrome.windows.create / chrome.tabs.update need an extension page
 //   2. the user needs visible progress + pause/cancel without giving up
 //      their main browser window
-// The actual capture+upload still happens in the background service
-// worker (ORCHESTRATED_CAPTURE message) — only the loop lives here.
+//   3. captureVisibleTab + the upload fetch live here too — under MV3 the
+//      background service worker can be killed at any moment, so any state
+//      we held there mid-iteration would be lost. The side panel has a
+//      stable lifetime while it's open and gives us a non-flaky owner.
 
 function patchCaptureJob(patch: Partial<CaptureJobState>): void {
   if (!captureJob) return;

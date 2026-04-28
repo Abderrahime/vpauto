@@ -287,41 +287,6 @@ async function handleRpcMessage(message: any, sender?: chrome.runtime.MessageSen
     return { data: result.data };
   }
 
-  if (message.type === 'ORCHESTRATED_CAPTURE') {
-    // Variant of CAPTURE_SCREENSHOT used by the side-panel-driven orchestrator
-    // that drives a separate popup window through a list of vehicles. The
-    // sender is the side panel (extension page, no `sender.tab`), so the
-    // tab/window ids must come from the message payload.
-    setBackgroundDebug({
-      status: 'orchestrated_capture_started',
-      lastStage: 'orchestrated_capture_started',
-      lastError: null,
-      lastRequestId: message.requestId,
-    });
-    const result = await captureAndUploadScreenshot({
-      tabId: Number(message.tabId),
-      windowId: Number(message.windowId),
-      snapshotId: Number(message.snapshotId),
-    });
-    if (result.error) {
-      setBackgroundDebug({
-        status: 'orchestrated_capture_error',
-        lastStage: 'orchestrated_capture_error',
-        lastError: result.error,
-        lastRequestId: message.requestId,
-      });
-      console.warn(`[VPauto BG] ORCHESTRATED_CAPTURE failed: ${result.error}`);
-      return { error: result.error };
-    }
-    setBackgroundDebug({
-      status: 'orchestrated_capture_success',
-      lastStage: 'orchestrated_capture_success',
-      lastError: null,
-      lastRequestId: message.requestId,
-    });
-    return { data: result.data };
-  }
-
   if (message.type === 'PROBE_VPAUTO_URL') {
     // Silent active probe of a VPauto vehicle URL — used by the sidepanel to
     // pre-flag "Parcours multi-enchères" passages whose VPauto fiche has been
@@ -449,7 +414,6 @@ export default defineBackground(() => {
       message.type === 'RUN_BATCH_SAVE' ||
       message.type === 'PING_BG' ||
       message.type === 'CAPTURE_SCREENSHOT' ||
-      message.type === 'ORCHESTRATED_CAPTURE' ||
       message.type === 'PROBE_VPAUTO_URL'
     ) {
       void handleRpcMessage(message, sender)
