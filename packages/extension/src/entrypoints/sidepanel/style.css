@@ -1341,6 +1341,92 @@ a:hover { text-decoration: underline; }
 }
 .cross-item__link-hint { color: var(--accent); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; }
 
+/* Cross-auction passage that VPauto returns 404 for. The card is tinted
+   amber, the existing "Ouvrir la fiche VPauto" button stays clickable so the
+   user can re-verify, and an inline thumbnail is rendered when we have a
+   captured screenshot on disk. Clicking the thumbnail opens the same
+   lightbox used by the top-of-panel VPauto-404 banner. */
+.cross-item--vpauto404 {
+  background: linear-gradient(180deg, var(--warn-soft) 0%, transparent 60%);
+}
+.cross-item__chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.cross-item__404-chip {
+  font-size: 9px !important;
+  padding: 2px 6px !important;
+  letter-spacing: 0.04em;
+  cursor: help;
+}
+.cross-item__capture {
+  display: block;
+  position: relative;
+  width: 100%;
+  margin-top: 8px;
+  padding: 0;
+  background: var(--ink);
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: zoom-in;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+.cross-item__capture:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(20, 21, 26, 0.18);
+}
+.cross-item__capture-img {
+  display: block;
+  width: 100%;
+  max-height: 160px;
+  object-fit: cover;
+  object-position: top center;
+}
+.cross-item__capture-zoom {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: rgba(20, 21, 26, 0.78);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 6px;
+  border-radius: 999px;
+}
+
+/* Discrete "Vérification VPauto…" badge shown only while the silent prober
+   is HEAD-checking cross-auction passage URLs. Sits between the section
+   title and the list, with a soft pulsing dot to make the activity feel
+   non-blocking. Disappears as soon as the last probe resolves. */
+.cross-probing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+}
+.cross-probing__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: cross-probing-pulse 1.4s ease-in-out infinite;
+}
+@keyframes cross-probing-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+.cross-probing__label {
+  color: var(--ink-2);
+}
+
 .similar-item__name { font-weight: 500; font-size: 12px; letter-spacing: -0.01em; color: var(--ink); }
 .similar-item__meta { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-3); margin-top: 2px; letter-spacing: 0.02em; }
 .similar-item__prices { text-align: right; white-space: nowrap; }
@@ -4574,4 +4660,371 @@ body {
   .btn--small {
     flex: 1 1 100%;
   }
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   VPauto 404 fallback — yellow banner + archived screenshot + lightbox.
+   Shown only when the content script lands on a VPauto fiche that VPauto
+   itself returned as 404 (page exists in our DB, source page is gone). The
+   banner sits at the very top of the panel so the user immediately sees the
+   "VPauto 404 — données archivées" context before scrolling through DB-only
+   data. The hero capture is clickable → opens the full-screen lightbox.
+   ─────────────────────────────────────────────────────────────────────────── */
+.vpauto404-banner {
+  margin: 0;
+  padding: 14px 16px;
+  background: var(--warn-soft);
+  border-bottom: 1px solid var(--warn);
+  display: grid;
+  gap: 8px;
+}
+.vpauto404-banner__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.vpauto404-banner__tag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--warn);
+  background: rgba(255, 255, 255, 0.5);
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--warn);
+}
+.vpauto404-banner__title {
+  font: 600 14px/1.3 var(--font-sans);
+  color: var(--ink);
+  margin: 0;
+}
+.vpauto404-banner__body {
+  font-size: 12px;
+  color: var(--ink-2);
+  line-height: 1.45;
+  margin: 0;
+}
+.vpauto404-banner__retry {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--warn);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.vpauto404-banner__retry:hover { color: var(--accent); }
+
+.vpauto404-hero {
+  margin: 0 0 12px;
+  border-bottom: 1px solid var(--line);
+  padding: 12px 14px 14px;
+  background: var(--surface-2);
+  display: grid;
+  gap: 8px;
+}
+.vpauto404-hero__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--ink-3);
+}
+.vpauto404-hero__btn {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 0;
+  background: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  cursor: zoom-in;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+.vpauto404-hero__btn:hover {
+  box-shadow: 0 6px 18px rgba(20, 21, 26, 0.18);
+  transform: translateY(-1px);
+}
+.vpauto404-hero__img {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  object-fit: cover;
+  object-position: top center;
+}
+.vpauto404-hero__zoom {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: rgba(20, 21, 26, 0.78);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  border-radius: 999px;
+}
+.vpauto404-hero__missing {
+  padding: 14px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: center;
+}
+
+/* Full-screen lightbox overlay — blocks pointer events on the rest of the
+   panel and traps Escape so the rest of the UI does not steal focus. */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 21, 26, 0.92);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 9999;
+}
+.lightbox[data-open='true'] { display: flex; }
+.lightbox__img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 8px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  object-fit: contain;
+}
+.lightbox__close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #fff;
+  font-size: 20px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lightbox__close:hover { background: rgba(255, 255, 255, 0.22); }
+
+/* ── Capture orchestrator ─────────────────────────────────────────── */
+/* Post-import bar with the three "📷 Nouveaux/Modifiés/Manquants"
+   buttons, sitting between the tracking summary and the import card
+   so the user can fire a capture run without scrolling. The job state
+   below the buttons mirrors the import-job pattern (progress bar,
+   stats line, error log) but stays visually distinct via the camera
+   accent color. */
+.capture-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  margin: 0 0 12px;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+}
+.capture-bar__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.capture-bar__head strong {
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+.capture-bar__hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex: 1 1 200px;
+}
+.capture-bar__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.capture-bar__buttons .btn { flex: 1 1 auto; min-width: 120px; }
+
+.capture-job {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--ink);
+  color: #fff;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.capture-job--done { border-color: var(--green); }
+.capture-job--error { border-color: var(--red); }
+.capture-job--cancelled { opacity: 0.85; }
+.capture-job--paused { border-color: var(--warn); }
+.capture-job__top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+.capture-job__top strong { font-size: 13px; }
+.capture-job__top span {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+.capture-job__progress {
+  height: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.capture-job__bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #fff);
+  transition: width 200ms ease;
+}
+.capture-job__stats {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+  opacity: 0.85;
+}
+.capture-job__stat--ok { color: var(--green); }
+.capture-job__stat--err { color: var(--red); }
+.capture-job__current {
+  font-size: 12px;
+  opacity: 0.9;
+}
+.capture-job__errors {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--red);
+  background: rgba(255, 60, 60, 0.08);
+  padding: 6px 8px;
+  border-radius: 6px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.capture-job__actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+/* ── Capture timeline (vehicle detail) ────────────────────────────── */
+/* Shown above the passages history when at least one capture exists.
+   Each row pairs the JPEG thumbnail with the diff reason ("Prix 14 900 €
+   → 13 500 €", "Première capture"…) so the user can scan how the
+   listing evolved over time without leaving the side panel. */
+.capture-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 14px 14px;
+}
+.capture-timeline__item {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 10px;
+  align-items: stretch;
+  padding: 8px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--paper);
+}
+.capture-timeline__thumb {
+  position: relative;
+  display: block;
+  padding: 0;
+  width: 96px;
+  height: 72px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--ink);
+  cursor: zoom-in;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+.capture-timeline__thumb:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(20, 21, 26, 0.18);
+}
+.capture-timeline__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top center;
+}
+.capture-timeline__zoom {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  background: rgba(20, 21, 26, 0.78);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 2px 5px;
+  border-radius: 999px;
+}
+.capture-timeline__meta {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+}
+.capture-timeline__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.capture-timeline__city {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.capture-timeline__price {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.capture-timeline__reason {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ── Cross-passage no-capture fallback ─────────────────────────────── */
+/* Shown inside a cross-auction item that VPauto returned 404 for AND for
+   which we never captured a screenshot. Replaces the silent empty branch
+   so the user understands the row is intentionally bare, not buggy. */
+.cross-item__no-capture {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(255, 196, 0, 0.08);
+  border: 1px dashed var(--warn);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
 }

@@ -12,8 +12,15 @@ export default defineConfig({
       48: 'icons/icon-48.png',
       128: 'icons/icon-128.png',
     },
-    permissions: ['storage', 'sidePanel'],
+    permissions: ['storage', 'sidePanel', 'tabs', 'windows', 'activeTab'],
+    // `<all_urls>` is required for `chrome.tabs.captureVisibleTab` —
+    // narrower host permissions like `https://vpauto.fr/*` are not accepted
+    // by Chrome for this API (it explicitly demands `<all_urls>` or
+    // `activeTab`, even when the captured tab matches a host permission).
+    // Without this entry the orchestrator's capture call rejects with
+    // "Either the '<all_urls>' or 'activeTab' permission is required".
     host_permissions: [
+      '<all_urls>',
       'https://vpauto.fr/*',
       'https://www.vpauto.fr/*',
       'https://cdn.vpauto.fr/*',

@@ -48,6 +48,12 @@ export interface SnapshotForHistory {
   technicalCheckUrl: string | null;
   sourceUrl: string;
   photoUrls: string; // JSON array string
+  /**
+   * On-disk screenshot flag — projected from the Snapshot row by
+   * loadHistorySnapshotsForIdentity. Only the cross-auction DTO uses it,
+   * so it's optional to keep the test fixtures small.
+   */
+  hasScreenshot?: boolean;
 }
 
 type Group = { snapshots: SnapshotForHistory[]; canonical: SnapshotForHistory };

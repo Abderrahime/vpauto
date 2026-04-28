@@ -133,19 +133,47 @@ async function captureAndUploadScreenshot(input: {
     return { error: error instanceof Error ? error.message : String(error) };
   }
 
+  // chrome.tabs.captureVisibleTab requires the target window to actually be
+  // rendered. macOS in particular stops painting backgrounded popup windows,
+  // so even though we open the popup focused, the user may have clicked back
+  // to their main window between iterations. Re-asserting `focused: true`
+  // forces macOS to paint the popup again before we capture.
+  //
+  // Wrapped in a 2 s timeout because chrome.windows.update has been observed
+  // to hang on macOS when the target window is in a transitional state — we
+  // don't want a stuck windows.update to cascade into the orchestrator's
+  // 30 s iteration timeout and look like a captureVisibleTab problem.
+  try {
+    await Promise.race([
+      chrome.windows.update(windowId!, { state: 'normal', focused: true }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('windows.update timeout')), 2000)),
+    ]);
+  } catch (error) {
+    console.warn(`[VPauto BG] windows.update before capture failed:`, error);
+  }
+
   let dataUrl: string;
   try {
-    dataUrl = await chrome.tabs.captureVisibleTab(windowId!, { format: 'jpeg', quality: 75 });
+    // captureVisibleTab is documented to be synchronous-ish but observed to
+    // hang silently on macOS when the target window is occluded. Race it
+    // against an 8 s timeout so a stuck call surfaces as an error instead of
+    // dragging out to the orchestrator's full 30 s budget.
+    dataUrl = await Promise.race<string>([
+      chrome.tabs.captureVisibleTab(windowId!, { format: 'jpeg', quality: 75 }),
+      new Promise<string>((_, reject) => setTimeout(() => reject(new Error('captureVisibleTab timeout')), 8000)),
+    ]);
   } catch (error) {
-    return {
-      error: error instanceof Error ? error.message : String(error),
-    };
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`[VPauto BG] captureVisibleTab failed for snapshot ${input.snapshotId} on window ${windowId}:`, reason);
+    return { error: `captureVisibleTab: ${reason}` };
   }
 
   if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
+    console.warn(`[VPauto BG] captureVisibleTab returned invalid payload for snapshot ${input.snapshotId}; type=${typeof dataUrl}, len=${typeof dataUrl === 'string' ? dataUrl.length : 'n/a'}`);
     return { error: 'capture_returned_invalid_payload' };
   }
 
+  console.log(`[VPauto BG] captureVisibleTab ok for snapshot ${input.snapshotId} (${dataUrl.length} chars), uploading…`);
   const upload = await fetchApi<{ snapshotId: number; bytes: number }>(
     `/api/vehicles/screenshot/${input.snapshotId}`,
     {
@@ -154,6 +182,7 @@ async function captureAndUploadScreenshot(input: {
     },
   );
   if (upload.error || !upload.data) {
+    console.warn(`[VPauto BG] Screenshot upload failed for snapshot ${input.snapshotId}: ${upload.error}`);
     return { error: upload.error || 'screenshot_upload_failed' };
   }
   console.log(`[VPauto BG] Screenshot uploaded for snapshot ${input.snapshotId} (${upload.data.bytes} bytes)`);
@@ -258,6 +287,105 @@ async function handleRpcMessage(message: any, sender?: chrome.runtime.MessageSen
     return { data: result.data };
   }
 
+  if (message.type === 'ORCHESTRATED_CAPTURE') {
+    // Variant of CAPTURE_SCREENSHOT used by the side-panel-driven orchestrator
+    // that drives a separate popup window through a list of vehicles. The
+    // sender is the side panel (extension page, no `sender.tab`), so the
+    // tab/window ids must come from the message payload.
+    setBackgroundDebug({
+      status: 'orchestrated_capture_started',
+      lastStage: 'orchestrated_capture_started',
+      lastError: null,
+      lastRequestId: message.requestId,
+    });
+    const result = await captureAndUploadScreenshot({
+      tabId: Number(message.tabId),
+      windowId: Number(message.windowId),
+      snapshotId: Number(message.snapshotId),
+    });
+    if (result.error) {
+      setBackgroundDebug({
+        status: 'orchestrated_capture_error',
+        lastStage: 'orchestrated_capture_error',
+        lastError: result.error,
+        lastRequestId: message.requestId,
+      });
+      console.warn(`[VPauto BG] ORCHESTRATED_CAPTURE failed: ${result.error}`);
+      return { error: result.error };
+    }
+    setBackgroundDebug({
+      status: 'orchestrated_capture_success',
+      lastStage: 'orchestrated_capture_success',
+      lastError: null,
+      lastRequestId: message.requestId,
+    });
+    return { data: result.data };
+  }
+
+  if (message.type === 'PROBE_VPAUTO_URL') {
+    // Silent active probe of a VPauto vehicle URL — used by the sidepanel to
+    // pre-flag "Parcours multi-enchères" passages whose VPauto fiche has been
+    // taken down (404). We use HEAD because VPauto returns a clean HTTP 404
+    // status for missing vehicles (verified curl); no body needed.
+    //
+    // Runs in the background service worker (not in the content script) so
+    // the host_permissions include cookies/CORS for vpauto.fr and a probe
+    // never blocks the page or leaves UI traces in the user's tabs.
+    const url = String(message.url || '');
+    const hashId = String(message.hashId || '');
+
+    setBackgroundDebug({
+      status: 'probe_started',
+      lastStage: 'probe_started',
+      lastMethod: 'HEAD',
+      lastPath: url,
+      lastError: null,
+      lastRequestId: message.requestId,
+    });
+
+    if (!/^https:\/\/(?:www\.)?vpauto\.fr\/vehicule\//.test(url)) {
+      const reason = 'invalid_vpauto_url';
+      setBackgroundDebug({
+        status: 'probe_error',
+        lastStage: 'probe_error',
+        lastError: reason,
+        lastRequestId: message.requestId,
+      });
+      return { error: reason };
+    }
+
+    try {
+      const response = await fetch(url, {
+        method: 'HEAD',
+        credentials: 'omit',
+        cache: 'no-cache',
+        redirect: 'follow',
+      });
+      const is404 = response.status === 404;
+      setBackgroundDebug({
+        status: 'probe_success',
+        lastStage: is404 ? 'probe_404' : 'probe_alive',
+        lastMethod: 'HEAD',
+        lastPath: url,
+        lastError: null,
+        lastRequestId: message.requestId,
+      });
+      return { data: { hashId, url, is404, status: response.status } };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      setBackgroundDebug({
+        status: 'probe_error',
+        lastStage: 'probe_error',
+        lastError: reason,
+        lastRequestId: message.requestId,
+      });
+      // Network errors are NOT 404s — return the error so the caller can
+      // decide whether to retry. We deliberately do not flip is404=true
+      // on a transient failure.
+      return { error: reason };
+    }
+  }
+
   if (message.type === 'RUN_BATCH_SAVE') {
     const vehicles = Array.isArray(message.vehicles) ? message.vehicles as Partial<VehicleSnapshot>[] : [];
 
@@ -320,7 +448,9 @@ export default defineBackground(() => {
       message.type === 'API_PROXY' ||
       message.type === 'RUN_BATCH_SAVE' ||
       message.type === 'PING_BG' ||
-      message.type === 'CAPTURE_SCREENSHOT'
+      message.type === 'CAPTURE_SCREENSHOT' ||
+      message.type === 'ORCHESTRATED_CAPTURE' ||
+      message.type === 'PROBE_VPAUTO_URL'
     ) {
       void handleRpcMessage(message, sender)
         .then((result) => sendResponse(result))

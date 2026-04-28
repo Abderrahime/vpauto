@@ -47,11 +47,60 @@ const SCREENSHOT_DIR = path.resolve(
 // shot of vpauto.fr is typically 200-400 KB, so 5 MB leaves a wide
 // safety margin while preventing accidental abuse.
 const SCREENSHOT_MAX_BYTES = 5 * 1024 * 1024;
+// Per-vehicle capture cap. The very first capture (chronologically) is
+// kept forever ("historique"). Beyond that, we only retain the 19 most
+// recent — older intermediate captures are pruned on each new upload.
+const CAPTURES_PER_VEHICLE_CAP = 20;
+// Cooldown between two captures of the same vehicle. A snapshot whose
+// hasScreenshot was set within the cooldown window is treated as
+// "up-to-date" by the capture planner.
+const CAPTURE_COOLDOWN_MINUTES = 60;
 async function ensureScreenshotDir(): Promise<void> {
   await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
 }
 function screenshotPathFor(snapshotId: number): string {
   return path.join(SCREENSHOT_DIR, `${snapshotId}.jpg`);
+}
+
+/**
+ * Enforce the per-vehicle capture cap.
+ *
+ * Rule: keep the *very first* capture (oldest hasScreenshot=true row)
+ * forever, plus the (CAP - 1) most recent ones. Anything in between gets
+ * pruned. We delete the JPEG from disk and clear hasScreenshot in DB so
+ * the row stays (price/status history is still useful) but the file no
+ * longer counts toward the cap.
+ *
+ * Called from the screenshot upload route AFTER the new file is written —
+ * any failure here is logged but never fails the upload (the new capture
+ * is already persisted).
+ */
+async function pruneCapturesBeyondCap(vehicleId: number): Promise<void> {
+  const captured = await prisma.snapshot.findMany({
+    where: { vehicleId, hasScreenshot: true },
+    orderBy: { scrapedAt: 'asc' },
+    select: { id: true },
+  });
+  if (captured.length <= CAPTURES_PER_VEHICLE_CAP) return;
+
+  const overflow = captured.length - CAPTURES_PER_VEHICLE_CAP;
+  // Always preserve the first (index 0). Drop from index 1 inward, oldest
+  // first, until the overflow is absorbed.
+  const toPrune = captured.slice(1, 1 + overflow);
+  for (const row of toPrune) {
+    try {
+      await fs.unlink(screenshotPathFor(row.id));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== 'ENOENT') {
+        console.warn(`[VPauto] Capture prune: failed to delete ${row.id}.jpg:`, err);
+      }
+    }
+    await prisma.snapshot.update({
+      where: { id: row.id },
+      data: { hasScreenshot: false },
+    });
+  }
 }
 
 function buildVehicleIdentity(vehicle: {
@@ -674,6 +723,12 @@ app.post('/screenshot/:snapshotId', async (c) => {
     data: { hasScreenshot: true },
   });
 
+  // Enforce per-vehicle cap. Fire-and-forget on errors so a transient
+  // FS/DB hiccup doesn't reject the upload that just succeeded.
+  pruneCapturesBeyondCap(snapshot.vehicleId).catch((err) => {
+    console.warn(`[VPauto] Capture prune failed for vehicle ${snapshot.vehicleId}:`, err);
+  });
+
   return c.json<ApiResponse<{ snapshotId: number; bytes: number }>>({
     success: true,
     data: { snapshotId, bytes: buffer.length },
@@ -702,6 +757,241 @@ app.get('/screenshot/:snapshotId', async (c) => {
     // Snapshots are immutable once captured — any update of the fiche
     // would create a NEW snapshotId. Cache aggressively.
     'Cache-Control': 'public, max-age=31536000, immutable',
+  });
+});
+
+// ── Plan a batch capture run ───────────────────────────────────────
+// Given the hashIds of vehicles currently visible in the VPauto import
+// list, partition them into:
+//   - new       → never captured AND first seen after `since` (typically
+//                 the start of the running import)
+//   - modified  → previously captured, but the latest snapshot differs
+//                 from the last captured one on at least one of:
+//                 (a) startingPrice, (b) status, (c) city OR saleDate
+//   - missing   → never captured AND first seen *before* `since`
+//                 (rattrapage candidates the user explicitly opts into)
+//   - skipped   → cooldown not elapsed, or latest snapshot has no photos
+//
+// The returned candidates carry the snapshotId of the row that the
+// extension should attach the new screenshot to (always the latest
+// snapshot of the vehicle), plus a short reason string for the UI.
+const capturePlanSchema = z.object({
+  hashIds: z.array(z.string().min(1)),
+  since: z.string().optional(),
+  cooldownMinutes: z.number().int().min(0).optional(),
+});
+
+type CaptureCandidate = {
+  vehicleId: number;
+  snapshotId: number;
+  hashId: string;
+  reference: string | null;
+  brand: string;
+  model: string;
+  version: string;
+  year: number;
+  city: string;
+  saleDate: string | null;
+  startingPrice: number | null;
+  status: string;
+  sourceUrl: string;
+  thumbUrl: string | null;
+  reason: string;
+};
+
+function describeModifiedReason(
+  latest: { startingPrice: number | null; status: string; city: string; saleDate: string | null },
+  previous: { startingPrice: number | null; status: string; city: string; saleDate: string | null },
+): string {
+  const parts: string[] = [];
+  if (latest.startingPrice !== previous.startingPrice) {
+    const fmt = (v: number | null) => (v == null ? '—' : `${v.toLocaleString('fr-FR')} €`);
+    parts.push(`Prix ${fmt(previous.startingPrice)} → ${fmt(latest.startingPrice)}`);
+  }
+  if (latest.status !== previous.status) {
+    parts.push(`Statut ${previous.status} → ${latest.status}`);
+  }
+  if (latest.city !== previous.city) {
+    parts.push(`Ville ${previous.city || '?'} → ${latest.city || '?'}`);
+  }
+  if (latest.saleDate !== previous.saleDate) {
+    parts.push(`Date ${previous.saleDate || '?'} → ${latest.saleDate || '?'}`);
+  }
+  return parts.join(' · ') || 'Modifié';
+}
+
+app.post('/capture/plan', async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json<ApiResponse<null>>({ success: false, error: 'invalid_json_body' }, 400);
+  }
+
+  const parsed = capturePlanSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json<ApiResponse<null>>({ success: false, error: 'invalid_payload' }, 400);
+  }
+
+  const { hashIds, since, cooldownMinutes } = parsed.data;
+  if (hashIds.length === 0) {
+    return c.json<ApiResponse<{ new: CaptureCandidate[]; modified: CaptureCandidate[]; missing: CaptureCandidate[]; skipped: number }>>({
+      success: true,
+      data: { new: [], modified: [], missing: [], skipped: 0 },
+    });
+  }
+
+  const sinceDate = since ? new Date(since) : null;
+  const cooldownMs = (cooldownMinutes ?? CAPTURE_COOLDOWN_MINUTES) * 60_000;
+  const cooldownCutoff = new Date(Date.now() - cooldownMs);
+
+  const vehicles = await prisma.vehicle.findMany({
+    where: { hashId: { in: hashIds } },
+    select: { id: true, hashId: true, reference: true, firstSeenAt: true, brand: true, model: true, version: true, year: true },
+  });
+
+  const newList: CaptureCandidate[] = [];
+  const modifiedList: CaptureCandidate[] = [];
+  const missingList: CaptureCandidate[] = [];
+  let skipped = 0;
+
+  for (const vehicle of vehicles) {
+    if (!vehicle.hashId) {
+      skipped++;
+      continue;
+    }
+
+    const latest = await prisma.snapshot.findFirst({
+      where: { vehicleId: vehicle.id },
+      orderBy: { scrapedAt: 'desc' },
+    });
+    if (!latest) {
+      skipped++;
+      continue;
+    }
+
+    const photos = parsePhotoUrls(latest.photoUrls);
+    if (photos.length === 0) {
+      skipped++;
+      continue;
+    }
+
+    // Cooldown — if the latest snapshot already has a screenshot AND it
+    // was scraped within the cooldown window, treat the vehicle as
+    // up-to-date and skip.
+    if (latest.hasScreenshot && latest.scrapedAt > cooldownCutoff) {
+      skipped++;
+      continue;
+    }
+
+    const lastCaptured = await prisma.snapshot.findFirst({
+      where: { vehicleId: vehicle.id, hasScreenshot: true },
+      orderBy: { scrapedAt: 'desc' },
+    });
+
+    const candidate: CaptureCandidate = {
+      vehicleId: vehicle.id,
+      snapshotId: latest.id,
+      hashId: vehicle.hashId,
+      reference: vehicle.reference ?? null,
+      brand: vehicle.brand,
+      model: vehicle.model,
+      version: vehicle.version,
+      year: vehicle.year,
+      city: latest.city,
+      saleDate: latest.saleDate,
+      startingPrice: latest.startingPrice,
+      status: latest.status,
+      sourceUrl: latest.sourceUrl,
+      thumbUrl: photos[0] ?? null,
+      reason: '',
+    };
+
+    if (!lastCaptured) {
+      const firstSeen = vehicle.firstSeenAt;
+      if (sinceDate && firstSeen >= sinceDate) {
+        candidate.reason = 'Nouveau véhicule';
+        newList.push(candidate);
+      } else {
+        candidate.reason = 'Jamais capturé';
+        missingList.push(candidate);
+      }
+      continue;
+    }
+
+    const priceChanged = latest.startingPrice !== lastCaptured.startingPrice;
+    const statusChanged = latest.status !== lastCaptured.status;
+    const cityChanged = latest.city !== lastCaptured.city;
+    const dateChanged = latest.saleDate !== lastCaptured.saleDate;
+
+    if (priceChanged || statusChanged || cityChanged || dateChanged) {
+      candidate.reason = describeModifiedReason(latest, lastCaptured);
+      modifiedList.push(candidate);
+    } else {
+      skipped++;
+    }
+  }
+
+  return c.json<ApiResponse<{ new: CaptureCandidate[]; modified: CaptureCandidate[]; missing: CaptureCandidate[]; skipped: number }>>({
+    success: true,
+    data: { new: newList, modified: modifiedList, missing: missingList, skipped },
+  });
+});
+
+// ── List all captures for a vehicle (timeline view) ────────────────
+// Returns every snapshot that carries a screenshot, ordered chronologically,
+// with a short reason describing why the capture exists relative to the
+// previous one ("Première capture", "Prix 14 900 € → 13 900 €"…).
+app.get('/captures/:vehicleId', async (c) => {
+  const vehicleId = parseInt(c.req.param('vehicleId'));
+  if (!Number.isFinite(vehicleId)) {
+    return c.json<ApiResponse<null>>({ success: false, error: 'Invalid vehicleId' }, 400);
+  }
+
+  const captured = await prisma.snapshot.findMany({
+    where: { vehicleId, hasScreenshot: true },
+    orderBy: { scrapedAt: 'asc' },
+    select: {
+      id: true,
+      scrapedAt: true,
+      city: true,
+      saleDate: true,
+      saleTime: true,
+      status: true,
+      startingPrice: true,
+      soldPrice: true,
+      sourceUrl: true,
+      hashId: true,
+    },
+  });
+
+  const captures = captured.map((row, index) => {
+    let reason = 'Première capture';
+    if (index > 0) {
+      const prev = captured[index - 1];
+      reason = describeModifiedReason(
+        { startingPrice: row.startingPrice, status: row.status, city: row.city, saleDate: row.saleDate },
+        { startingPrice: prev.startingPrice, status: prev.status, city: prev.city, saleDate: prev.saleDate },
+      );
+    }
+    return {
+      snapshotId: row.id,
+      scrapedAt: row.scrapedAt.toISOString(),
+      city: row.city,
+      saleDate: row.saleDate,
+      saleTime: row.saleTime,
+      status: row.status,
+      startingPrice: row.startingPrice,
+      soldPrice: row.soldPrice,
+      sourceUrl: row.sourceUrl,
+      hashId: row.hashId,
+      reason,
+    };
+  });
+
+  return c.json<ApiResponse<{ vehicleId: number; captures: typeof captures }>>({
+    success: true,
+    data: { vehicleId, captures },
   });
 });
 
@@ -1163,6 +1453,19 @@ app.get('/cross-auction/:hashId', async (c) => {
   type CrossPassageDTO = {
     snapshotId: number;
     canonicalSnapshotId: number;
+    /**
+     * VPauto hashId for THIS passage's vehicle URL. Required by the sidepanel
+     * to cross-reference the local `vpauto404Hashes` cache and flag passages
+     * whose VPauto fiche is known to 404 (without re-probing the network).
+     */
+    hashId: string | null;
+    /**
+     * Whether a screenshot of the VPauto fiche was captured at scrape time.
+     * Used by the sidepanel to render the inline thumbnail + lightbox link on
+     * 404'd passages — when this is false we fall back to the dead VPauto URL
+     * + local fiche button only.
+     */
+    hasScreenshot: boolean;
     city: string;
     saleDate: string;
     saleTime: string | null;
@@ -1187,6 +1490,8 @@ app.get('/cross-auction/:hashId', async (c) => {
     const dto: CrossPassageDTO = {
       snapshotId: passage.snapshotId,
       canonicalSnapshotId: passage.canonicalSnapshotId,
+      hashId: s.hashId || null,
+      hasScreenshot: s.hasScreenshot ?? false,
       city: passage.city,
       saleDate: passage.date,
       saleTime: passage.saleTime ?? null,

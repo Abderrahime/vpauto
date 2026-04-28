@@ -219,6 +219,125 @@ export default defineContentScript({
 
 // ── Vehicle detail page ────────────────────────────────────────────────────
 
+/**
+ * Persist a hashId in the global 404 cache (`chrome.storage.local`).
+ *
+ * The cache is keyed by hashId because that's the immutable identifier in a
+ * VPauto vehicle URL — `…/vehicule/<hashId>/<slug>`. We never overwrite the
+ * `detectedAt` timestamp once it's set, so the very first 404 sighting wins
+ * (subsequent visits would just keep returning 404 anyway).
+ *
+ * Read by the sidepanel at refresh time to mark cross-auction passages whose
+ * VPauto URL is known dead — even when the user has never opened that exact
+ * passage themselves. This is the "one user discovers it, every view benefits"
+ * mechanism that powers Phase I.5.
+ */
+async function rememberVpauto404Hash(hashId: string, vehicleId?: number | null): Promise<void> {
+  const stored = await browser.storage.local.get('vpauto404Hashes').catch(() => ({}));
+  const raw = (stored && typeof stored === 'object' && stored !== null)
+    ? (stored as Record<string, unknown>).vpauto404Hashes
+    : undefined;
+  const map: Record<string, { detectedAt: string; vehicleId?: number }> =
+    raw && typeof raw === 'object' ? { ...(raw as Record<string, { detectedAt: string; vehicleId?: number }>) } : {};
+
+  if (map[hashId]) return; // already known — keep the original detectedAt
+
+  map[hashId] = {
+    detectedAt: new Date().toISOString(),
+    ...(vehicleId ? { vehicleId } : {}),
+  };
+  await browser.storage.local.set({ vpauto404Hashes: map }).catch(() => {});
+}
+
+function isVpauto404Page(): boolean {
+  // VPauto's 404 detail page is identifiable by a `<div class="container404">`
+  // wrapping a `<h1>La page demandée n'existe pas.</h1>`. We check both for
+  // robustness — the class is the cheap fast path, the h1 text is the safety
+  // net if VPauto restyles the wrapper.
+  if (document.querySelector('.container404')) return true;
+  const h1 = document.querySelector('h1');
+  if (h1 && /la page demand[ée]e n['’]existe pas/i.test(h1.textContent || '')) {
+    return true;
+  }
+  return false;
+}
+
+async function handleVpauto404Page(): Promise<void> {
+  const url = window.location.href;
+  const match = url.match(VPAUTO_VEHICLE_URL_PATTERN);
+  const hashId = match?.[1];
+
+  console.log('[VPauto] ⚠️ VPauto 404 detected at', url, '— hashId =', hashId || '<none>');
+
+  if (!hashId) {
+    sendDebug({
+      stage: 'detail_vpauto_404_no_hash',
+      pageType: 'detail',
+      url,
+      reason: 'no_hashId_in_url',
+    });
+    await browser.storage.local.remove('currentVehicle').catch(() => {});
+    return;
+  }
+
+  sendDebug({
+    stage: 'detail_vpauto_404',
+    pageType: 'detail',
+    url,
+    hashId,
+  });
+
+  // Look up the latest snapshot in our local DB for this hashId. The lookup
+  // endpoint returns { vehicleId, totalSnapshots, lastSnapshot } so we hand
+  // that snapshot straight to the sidepanel as `currentVehicle.snapshot`.
+  const lookup = await api.lookup({ hashId }).catch((err) => {
+    console.warn('[VPauto] 404 lookup failed for hashId', hashId, err);
+    return null;
+  });
+
+  if (!lookup?.lastSnapshot) {
+    console.warn('[VPauto] 404 lookup returned no snapshot — clearing currentVehicle');
+    sendDebug({
+      stage: 'detail_vpauto_404_no_db_match',
+      pageType: 'detail',
+      url,
+      hashId,
+      reason: lookup ? 'lookup_returned_no_snapshot' : 'lookup_failed',
+    });
+    await browser.storage.local.remove('currentVehicle').catch(() => {});
+    return;
+  }
+
+  await browser.storage.local.set({
+    currentVehicle: {
+      snapshot: lookup.lastSnapshot,
+      vehicleId: lookup.vehicleId,
+      snapshotId: lookup.lastSnapshot.id ?? null,
+      isNew: false,
+      vpauto404: true,
+      vpauto404SourceUrl: url,
+    },
+  }).catch(() => {});
+
+  // Persist this hashId in the global 404 set so OTHER views (cross-auction
+  // passages, history table, …) can flag the same dead URL without ever
+  // visiting it. A 404 on VPauto is permanent — once we've seen the page
+  // disappear, we keep that knowledge forever (no TTL, no eviction).
+  await rememberVpauto404Hash(hashId, lookup.vehicleId).catch(() => {});
+
+  await recordVehicleVisit(lookup.lastSnapshot, lookup.vehicleId);
+
+  sendDebug({
+    stage: 'detail_vpauto_404_db_resolved',
+    pageType: 'detail',
+    url,
+    hashId,
+    brand: lookup.lastSnapshot.brand,
+    model: lookup.lastSnapshot.model,
+    backendVehicleId: lookup.vehicleId,
+  });
+}
+
 async function handleVehiclePage() {
   console.log('[VPauto] 🚗 Vehicle detail page detected');
   sendDebug({
@@ -226,6 +345,14 @@ async function handleVehiclePage() {
     pageType: 'detail',
     url: window.location.href,
   });
+
+  // VPauto serves a stable 404 page (.container404 + "La page demandée…")
+  // when an old hashId is no longer indexed. Detect it BEFORE attempting
+  // to scrape, otherwise we'd retry forever and confuse the side panel.
+  if (isVpauto404Page()) {
+    await handleVpauto404Page();
+    return;
+  }
 
   const snapshot = scrapeVehicleDetail();
   if (!snapshot || !snapshot.brand) {
@@ -358,8 +485,11 @@ async function captureSnapshotScreenshot(snapshotId: number, hashId: string): Pr
 
 async function handleListPage() {
   console.log('[VPauto] 📋 List page detected — waiting for cards...');
-  // Clear vehicle detail view — MUST await so side panel switches to list
-  await browser.storage.local.remove('currentVehicle').catch(() => {});
+  // Clear vehicle detail view — MUST await so side panel switches to list.
+  // Also drop the previous list's batch-tracking summary so the capture bar
+  // (which gates on `batchTrackingResult`) doesn't flash up with stale data
+  // from a different vente before the auto-import for THIS list completes.
+  await browser.storage.local.remove(['currentVehicle', 'batchTrackingResult']).catch(() => {});
 
   sendDebug({
     stage: 'list_detected',

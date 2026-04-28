@@ -1,7 +1,8 @@
 import { browser } from 'wxt/browser';
 import type { MatchResult, VehicleBadge, VehicleHistory, VehicleSnapshot } from '@vpauto/shared';
-import { buildPriceHistory, computeEvolution } from '@vpauto/shared';
+import { buildPriceHistory, computeEvolution, DEFAULT_API_URL } from '@vpauto/shared';
 import { api } from '../../lib/api';
+import type { CaptureCandidate, CaptureTimelineEntry } from '../../lib/api';
 import { scrapeRemotePage, scrapeVehicleDetailFromHtml } from '../../lib/scraper';
 import './style.css';
 
@@ -10,6 +11,15 @@ interface CurrentVehicleState {
   vehicleId?: number;
   snapshotId?: number;
   isNew?: boolean;
+  /**
+   * Set by the content script when the user lands on a VPauto fiche that
+   * VPauto itself returned as 404. The sidepanel renders a yellow banner +
+   * the locally archived screenshot at the top of the detail view, while the
+   * rest of the panel is built from the latest snapshot we have in DB.
+   */
+  vpauto404?: boolean;
+  /** VPauto URL that 404'd — kept for the "Réessayer" link in the banner. */
+  vpauto404SourceUrl?: string;
 }
 
 interface BatchTrackingResult {
@@ -31,6 +41,12 @@ interface StoredPanelState {
     lastSourceUrl?: string;
     label?: string;
   }>;
+  /**
+   * Map of hashIds known to 404 on VPauto, populated by content.ts whenever
+   * the user lands on a `.container404` page. Read at render time so that
+   * cross-auction passages can be flagged without re-probing the network.
+   */
+  vpauto404Hashes?: Vpauto404Map;
   backgroundDebug?: {
     startedAt?: string;
     status?: string;
@@ -46,6 +62,10 @@ interface StoredPanelState {
 interface CrossAuctionPassage {
   snapshotId: number;
   canonicalSnapshotId: number;
+  /** VPauto hashId — used to look up the global 404 cache. */
+  hashId?: string | null;
+  /** True when a screenshot was captured at scrape time and is on disk. */
+  hasScreenshot?: boolean;
   city: string;
   saleDate: string;
   saleTime: string | null;
@@ -60,6 +80,14 @@ interface CrossAuctionPassage {
   openMode: 'vpauto' | 'local';
   openReason: string;
 }
+
+/**
+ * Persistent map of VPauto hashIds known to return 404. Populated by the
+ * content script when the user lands on a `.container404` page; consumed by
+ * the sidepanel cross-auction renderer to mark dead passages with a chip
+ * and offer the screenshot lightbox + local fiche fallback.
+ */
+type Vpauto404Map = Record<string, { detectedAt: string; vehicleId?: number }>;
 
 interface CrossAuctionData {
   vehicleId: number;
@@ -201,6 +229,40 @@ interface FieldUpdate {
 
 type ImportChangeFilter = 'all' | ImportChangeEntry['kind'];
 
+/**
+ * Which bucket of the capture plan the user is currently capturing.
+ * - `new`     → vehicles never captured AND first seen during the running
+ *               import (default click target after a fresh import)
+ * - `modified`→ vehicles already captured but with a relevant change
+ *               (price / status / city or saleDate)
+ * - `missing` → "rattrapage" pass over vehicles never captured but first
+ *               seen before the import started
+ */
+type CaptureBucket = 'new' | 'modified' | 'missing';
+
+interface CaptureJobState {
+  status: 'idle' | 'planning' | 'running' | 'paused' | 'done' | 'error' | 'cancelled';
+  bucket: CaptureBucket | null;
+  total: number;
+  processed: number;
+  succeeded: number;
+  failed: number;
+  /** Per-iteration error log, capped at the last 5 entries to bound memory. */
+  errors: string[];
+  candidates: CaptureCandidate[];
+  cursorIndex: number;
+  /** ID of the popup window driving the capture loop, when one is open. */
+  windowId?: number;
+  /** ID of the active tab inside that window. */
+  tabId?: number;
+  currentLabel?: string;
+  lastMessage?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  abortRequested?: boolean;
+  pauseRequested?: boolean;
+}
+
 interface ImportJobState {
   status: 'idle' | 'preparing' | 'running' | 'done' | 'error' | 'cancelled';
   scope: ImportScope;
@@ -246,6 +308,22 @@ let showDebug = false;
 let hasRenderedOnce = false;
 let isRefreshing = false;
 let pendingRefresh = false;
+
+/**
+ * In-flight VPauto-URL probes (hashIds currently being HEAD-probed by the
+ * background). Module-level so a refresh that happens MID-probe doesn't
+ * redundantly re-probe the same URL — the prober skips any hashId already
+ * in this set. Cleared as each probe resolves.
+ */
+const inflightVpautoProbes = new Set<string>();
+
+/**
+ * True while at least one cross-auction passage is being probed. Drives the
+ * "Vérification VPauto…" indicator next to the section title and is checked
+ * by `renderCrossAuction` to render the badge — completely passive, no DOM
+ * mutation outside the normal render cycle.
+ */
+let crossAuctionProbing = false;
 let importOptions: ImportOptions = {
   scope: 'detected',
   mode: 'silent',
@@ -257,6 +335,25 @@ let importJob: ImportJobState | null = null;
 let importChangeQuery = '';
 let importChangeFilter: ImportChangeFilter = 'all';
 let importChangePage = 1;
+
+/**
+ * Module-level orchestrator state for the post-import capture run. Exists for
+ * the lifetime of the side panel — survives storage events but NOT a panel
+ * close (intentional: a half-finished capture run is not worth resuming
+ * across reloads since the popup window would have been closed too).
+ */
+let captureJob: CaptureJobState | null = null;
+// VPauto detail pages keep firing background analytics/iframe requests well
+// past the point where the visible content has rendered, so `tab.status` often
+// never reaches `'complete'`. We poll briefly and then proceed regardless —
+// `CAPTURE_RENDER_SETTLE_MS` after navigation is the real "is this paintable
+// yet" guard.
+const CAPTURE_TAB_LOAD_TIMEOUT_MS = 6000;
+const CAPTURE_RENDER_SETTLE_MS = 2500;
+// Hard cap per capture iteration. Without this, a stuck `chrome.tabs.captureVisibleTab`
+// call (e.g. popup window minimized to dock on macOS) or a slow screenshot upload
+// can hang the entire orchestrator on the first vehicle.
+const CAPTURE_ITERATION_TIMEOUT_MS = 30000;
 
 const IMPORT_CHANGE_PAGE_SIZE = 12;
 
@@ -1024,6 +1121,22 @@ async function runSilentImport(state: StoredPanelState): Promise<void> {
       currentLabel: undefined,
       lastMessage: `Import termine. ${importJob?.updated || 0} fiches mises a jour, ${importJob?.newVehicles || 0} nouvelles.`,
     };
+
+    // Persist a BatchTrackingResult so downstream surfaces (notably the capture
+    // bar, which gates on `state.batchTrackingResult` to avoid showing up before
+    // an import has run) treat the manual import as equivalent to the silent
+    // auto-import. Without this, "LANCER L'IMPORT" finishes successfully but
+    // the capture bar stays hidden because `tracking` is only ever written by
+    // the background's RUN_BATCH_SAVE flow.
+    const trackingFromManualImport: BatchTrackingResult = {
+      saved: importJob?.saved || 0,
+      newVehicles: importJob?.newVehicles || 0,
+      priceChanges: [],
+      disappeared: [],
+      timestamp: new Date().toISOString(),
+    };
+    void browser.storage.local.set({ batchTrackingResult: trackingFromManualImport }).catch(() => {});
+
     scheduleRefresh(0);
   } catch (error) {
     importJob = {
@@ -1036,6 +1149,452 @@ async function runSilentImport(state: StoredPanelState): Promise<void> {
     };
     scheduleRefresh(0);
   }
+}
+
+// ── Capture orchestrator ──────────────────────────────────────────────
+// Drives a separate popup window through a list of vehicles, asking the
+// background to screenshot each one. Runs entirely in the side panel
+// because:
+//   1. chrome.windows.create / chrome.tabs.update need an extension page
+//   2. the user needs visible progress + pause/cancel without giving up
+//      their main browser window
+// The actual capture+upload still happens in the background service
+// worker (ORCHESTRATED_CAPTURE message) — only the loop lives here.
+
+function patchCaptureJob(patch: Partial<CaptureJobState>): void {
+  if (!captureJob) return;
+  captureJob = { ...captureJob, ...patch };
+  scheduleRefresh(0);
+}
+
+function captureBucketLabel(bucket: CaptureBucket): string {
+  return bucket === 'new' ? 'nouveaux' : bucket === 'modified' ? 'modifies' : 'manquants';
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForTabComplete(tabId: number, timeoutMs = CAPTURE_TAB_LOAD_TIMEOUT_MS): Promise<void> {
+  // Poll instead of using onUpdated so the same logic works for both the
+  // initial popup load and subsequent chrome.tabs.update navigations.
+  //
+  // Importantly, we RESOLVE on timeout instead of rejecting. VPauto detail
+  // pages routinely keep `tab.status === 'loading'` for >20 s (background
+  // analytics, lazy iframes, persistent sockets) even though the visible
+  // content rendered seconds earlier. The CAPTURE_RENDER_SETTLE_MS delay
+  // applied right after this call is the real "ready to capture" guard;
+  // here we just want to avoid capturing a brand-new about:blank tab.
+  return new Promise((resolve) => {
+    const start = Date.now();
+    let cancelled = false;
+    const check = () => {
+      if (cancelled) return;
+      chrome.tabs.get(tabId).then((tab) => {
+        if (cancelled) return;
+        if (tab.status === 'complete') {
+          resolve();
+          return;
+        }
+        if (Date.now() - start > timeoutMs) {
+          // Page is still "loading" after the budget — proceed anyway, the
+          // settle delay will give the visible content time to render.
+          resolve();
+          return;
+        }
+        setTimeout(check, 250);
+      }).catch(() => {
+        // Tab disappeared (window closed, navigation crashed). Resolve so the
+        // outer try/catch around the capture call can surface the real error
+        // when sendOrchestratedCaptureMessage runs.
+        cancelled = true;
+        resolve();
+      });
+    };
+    check();
+  });
+}
+
+/**
+ * Take a screenshot of the popup tab and upload it to the backend.
+ *
+ * Originally this round-tripped through the background service worker
+ * (`ORCHESTRATED_CAPTURE` message), which is the textbook way to centralize
+ * privileged API calls. In practice that flow was unreliable: under Manifest
+ * V3 the SW can be torn down at any moment (idle timeout, memory pressure)
+ * and when it dies mid-`captureVisibleTab`, the side panel's `sendMessage`
+ * callback is never invoked — the orchestrator stalls 30 s on every vehicle
+ * even when individual operations (`windows.update`, `captureVisibleTab`,
+ * the upload `fetch`) had their own internal timeouts. The SW lifecycle
+ * itself is what we couldn't bound.
+ *
+ * The side panel is a regular extension page with full `chrome.tabs` access
+ * and a stable lifetime (alive while it's open), so doing the capture and
+ * upload directly here removes the SW middleman entirely.
+ */
+async function captureAndUploadFromPanel(payload: {
+  tabId: number;
+  windowId: number;
+  snapshotId: number;
+}): Promise<{ data?: { snapshotId: number; bytes: number }; error?: string }> {
+  // Sanity: confirm the popup tab is still on a vpauto.fr page before we
+  // capture, so a navigation gone wrong doesn't get us uploading e.g. the
+  // user's bank tab if windowId pointed somewhere unexpected.
+  let resolvedWindowId = payload.windowId;
+  try {
+    const tab = await chrome.tabs.get(payload.tabId);
+    const url = tab.url || '';
+    if (!/^https:\/\/(www\.)?vpauto\.fr\//.test(url)) {
+      return { error: `tab_not_on_vpauto:${url}` };
+    }
+    if (resolvedWindowId == null) resolvedWindowId = tab.windowId;
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+
+  // Bring the popup forward so macOS actually paints it before the capture.
+  // 2 s timeout because windows.update has been observed to hang on macOS.
+  try {
+    await Promise.race([
+      chrome.windows.update(resolvedWindowId!, { state: 'normal', focused: true }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('windows.update timeout')), 2000)),
+    ]);
+  } catch (err) {
+    console.warn('[VPauto SP] windows.update before capture failed:', err);
+  }
+
+  let dataUrl: string;
+  try {
+    dataUrl = await Promise.race<string>([
+      chrome.tabs.captureVisibleTab(resolvedWindowId!, { format: 'jpeg', quality: 75 }),
+      new Promise<string>((_, reject) => setTimeout(() => reject(new Error('captureVisibleTab timeout')), 8000)),
+    ]);
+  } catch (err) {
+    return { error: `captureVisibleTab: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
+    return { error: 'capture_returned_invalid_payload' };
+  }
+
+  // POST the JPEG straight to the backend. The side panel is a chrome-extension
+  // page so it can talk to http://localhost without mixed-content blocks, and
+  // we explicitly set a 15 s timeout so a hung backend bubbles up as an error
+  // and the loop advances instead of stalling.
+  const controller = new AbortController();
+  const uploadTimer = window.setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${DEFAULT_API_URL}/api/vehicles/screenshot/${payload.snapshotId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: dataUrl }),
+      signal: controller.signal,
+    });
+    window.clearTimeout(uploadTimer);
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      return { error: `HTTP ${res.status}: ${text.slice(0, 200)}` };
+    }
+    const json = await res.json() as { success?: boolean; data?: { snapshotId: number; bytes: number }; error?: string };
+    if (!json.success || !json.data) {
+      return { error: json.error || 'screenshot_upload_failed' };
+    }
+    return { data: json.data };
+  } catch (err) {
+    window.clearTimeout(uploadTimer);
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function planAndStartCapture(state: StoredPanelState, bucket: CaptureBucket): Promise<void> {
+  if (captureJob && (captureJob.status === 'planning' || captureJob.status === 'running')) {
+    return;
+  }
+
+  const list = state.currentVehicleList || [];
+  const hashIds = list.map((v) => v.hashId).filter(Boolean) as string[];
+
+  captureJob = {
+    status: 'planning',
+    bucket,
+    total: 0,
+    processed: 0,
+    succeeded: 0,
+    failed: 0,
+    errors: [],
+    candidates: [],
+    cursorIndex: 0,
+    startedAt: new Date().toISOString(),
+    lastMessage: 'Calcul du plan de capture...',
+  };
+  scheduleRefresh(0);
+
+  if (hashIds.length === 0) {
+    captureJob = {
+      ...captureJob,
+      status: 'error',
+      errors: ['Aucun vehicule dans la liste actuelle.'],
+      finishedAt: new Date().toISOString(),
+      lastMessage: 'Liste VPauto vide.',
+    };
+    scheduleRefresh(0);
+    return;
+  }
+
+  // `since` defines the line between "new" (first seen during the running
+  // import) and "missing" (first seen before). When no batch tracking
+  // result exists yet, fall back to the last 24 h so the very first
+  // capture run after install still has a meaningful split.
+  const since = state.batchTrackingResult?.timestamp
+    || new Date(Date.now() - 24 * 3600_000).toISOString();
+
+  const plan = await api.getCapturePlan(hashIds, since).catch(() => null);
+  if (!plan) {
+    captureJob = {
+      ...captureJob,
+      status: 'error',
+      errors: ['Impossible de calculer le plan de capture (backend hors ligne ?)'],
+      finishedAt: new Date().toISOString(),
+      lastMessage: 'Plan de capture indisponible.',
+    };
+    scheduleRefresh(0);
+    return;
+  }
+
+  const candidates = plan[bucket] || [];
+  captureJob = {
+    ...captureJob,
+    total: candidates.length,
+    candidates,
+    lastMessage: candidates.length
+      ? `${candidates.length} vehicule${candidates.length > 1 ? 's' : ''} a capturer.`
+      : `Aucun vehicule a capturer dans la categorie "${captureBucketLabel(bucket)}".`,
+  };
+  scheduleRefresh(0);
+
+  if (candidates.length === 0) {
+    captureJob = {
+      ...captureJob,
+      status: 'done',
+      finishedAt: new Date().toISOString(),
+    };
+    scheduleRefresh(0);
+    return;
+  }
+
+  // Open a fresh popup window — the orchestrator drives it via tabs.update.
+  // We open the popup focused on purpose: macOS does not paint background
+  // popup windows reliably, which causes `chrome.tabs.captureVisibleTab` to
+  // hang or return a transparent frame. The popup keeps focus for the
+  // duration of the run and the loop closes the window when it's done, so
+  // the user gets focus back automatically.
+  let win: chrome.windows.Window;
+  try {
+    win = await chrome.windows.create({
+      url: candidates[0].sourceUrl,
+      type: 'popup',
+      width: 1280,
+      height: 900,
+      focused: true,
+    });
+  } catch (err) {
+    captureJob = {
+      ...captureJob,
+      status: 'error',
+      errors: [err instanceof Error ? err.message : String(err)],
+      finishedAt: new Date().toISOString(),
+      lastMessage: 'Echec ouverture fenetre.',
+    };
+    scheduleRefresh(0);
+    return;
+  }
+
+  const tabId = win.tabs?.[0]?.id;
+  if (!win.id || !tabId) {
+    captureJob = {
+      ...captureJob,
+      status: 'error',
+      errors: ['Fenetre popup sans onglet exploitable.'],
+      finishedAt: new Date().toISOString(),
+      lastMessage: 'Echec ouverture fenetre.',
+    };
+    scheduleRefresh(0);
+    return;
+  }
+
+  captureJob = {
+    ...captureJob,
+    status: 'running',
+    windowId: win.id,
+    tabId,
+    lastMessage: `Capture 1/${candidates.length}...`,
+  };
+  scheduleRefresh(0);
+
+  await runCaptureLoop();
+}
+
+async function runCaptureLoop(): Promise<void> {
+  while (captureJob && captureJob.status === 'running') {
+    if (captureJob.abortRequested) {
+      const windowId = captureJob.windowId;
+      captureJob = {
+        ...captureJob,
+        status: 'cancelled',
+        finishedAt: new Date().toISOString(),
+        lastMessage: 'Capture interrompue.',
+      };
+      if (windowId != null) {
+        try { await chrome.windows.remove(windowId); } catch {}
+      }
+      scheduleRefresh(0);
+      return;
+    }
+
+    if (captureJob.pauseRequested) {
+      captureJob = {
+        ...captureJob,
+        status: 'paused',
+        pauseRequested: false,
+        lastMessage: 'En pause.',
+      };
+      scheduleRefresh(0);
+      return;
+    }
+
+    if (captureJob.cursorIndex >= captureJob.candidates.length) {
+      const windowId = captureJob.windowId;
+      captureJob = {
+        ...captureJob,
+        status: 'done',
+        finishedAt: new Date().toISOString(),
+        lastMessage: `Termine. ${captureJob.succeeded}/${captureJob.total} captures.`,
+      };
+      if (windowId != null) {
+        try { await chrome.windows.remove(windowId); } catch {}
+      }
+      scheduleRefresh(0);
+      return;
+    }
+
+    const candidate = captureJob.candidates[captureJob.cursorIndex];
+    const tabId = captureJob.tabId;
+    const windowId = captureJob.windowId;
+    if (tabId == null || windowId == null) {
+      captureJob = {
+        ...captureJob,
+        status: 'error',
+        errors: [...captureJob.errors, 'Onglet de capture introuvable.'].slice(-5),
+        finishedAt: new Date().toISOString(),
+        lastMessage: 'Onglet de capture perdu.',
+      };
+      scheduleRefresh(0);
+      return;
+    }
+
+    patchCaptureJob({
+      currentLabel: `${candidate.brand} ${candidate.model} ${candidate.version}`.trim()
+        + (candidate.city ? ` · ${candidate.city}` : ''),
+      lastMessage: `Capture ${captureJob.cursorIndex + 1}/${captureJob.total}`,
+    });
+
+    try {
+      // First iteration: the popup already opened on candidate[0].sourceUrl,
+      // so we skip the navigation round-trip. From the second on, we drive
+      // the same tab through chrome.tabs.update.
+      if (captureJob.cursorIndex > 0) {
+        await chrome.tabs.update(tabId, { url: candidate.sourceUrl });
+      }
+      await waitForTabComplete(tabId);
+      // Brief settle to let VPauto render images / fonts before the snapshot.
+      await sleep(CAPTURE_RENDER_SETTLE_MS);
+
+      // Re-check abort after the settle window — the user may have cancelled
+      // while we were waiting on a slow page load.
+      if (!captureJob || (captureJob as CaptureJobState).abortRequested) continue;
+
+      console.log(`[VPauto SP] Capture ${captureJob.cursorIndex + 1}/${captureJob.total} → snapshot ${candidate.snapshotId} (${candidate.brand} ${candidate.model})`);
+      const result = await captureAndUploadFromPanel({
+        tabId,
+        windowId,
+        snapshotId: candidate.snapshotId,
+      });
+      if (result.error) throw new Error(result.error);
+
+      console.log(`[VPauto SP] Capture ${captureJob.cursorIndex + 1}/${captureJob.total} ok (${result.data?.bytes ?? '?'} bytes)`);
+      if (!captureJob) return;
+      captureJob = {
+        ...captureJob,
+        processed: captureJob.processed + 1,
+        succeeded: captureJob.succeeded + 1,
+        cursorIndex: captureJob.cursorIndex + 1,
+      };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      console.warn(`[VPauto SP] Capture ${captureJob?.cursorIndex ?? '?'} failed for snapshot ${candidate.snapshotId} (${candidate.brand} ${candidate.model}): ${reason}`);
+      if (!captureJob) return;
+      captureJob = {
+        ...captureJob,
+        processed: captureJob.processed + 1,
+        failed: captureJob.failed + 1,
+        cursorIndex: captureJob.cursorIndex + 1,
+        errors: [...captureJob.errors, `${candidate.brand} ${candidate.model}: ${reason}`].slice(-5),
+      };
+    }
+    scheduleRefresh(0);
+  }
+}
+
+async function resumeCaptureJob(): Promise<void> {
+  if (!captureJob || captureJob.status !== 'paused') return;
+  captureJob = {
+    ...captureJob,
+    status: 'running',
+    pauseRequested: false,
+    lastMessage: `Capture ${captureJob.cursorIndex + 1}/${captureJob.total}`,
+  };
+  scheduleRefresh(0);
+  await runCaptureLoop();
+}
+
+function pauseCaptureJob(): void {
+  if (!captureJob || captureJob.status !== 'running') return;
+  captureJob.pauseRequested = true;
+  captureJob.lastMessage = 'Pause demandee...';
+  scheduleRefresh(0);
+}
+
+function cancelCaptureJob(): void {
+  if (!captureJob) return;
+  if (captureJob.status === 'paused') {
+    // Loop is parked — flip to cancelled directly and close the window.
+    const windowId = captureJob.windowId;
+    captureJob = {
+      ...captureJob,
+      status: 'cancelled',
+      finishedAt: new Date().toISOString(),
+      lastMessage: 'Capture interrompue.',
+    };
+    if (windowId != null) {
+      void chrome.windows.remove(windowId).catch(() => {});
+    }
+    scheduleRefresh(0);
+    return;
+  }
+  if (captureJob.status === 'running' || captureJob.status === 'planning') {
+    captureJob.abortRequested = true;
+    captureJob.lastMessage = 'Arret demande...';
+    scheduleRefresh(0);
+  }
+}
+
+function dismissCaptureJob(): void {
+  if (!captureJob) return;
+  if (captureJob.status === 'running' || captureJob.status === 'planning' || captureJob.status === 'paused') {
+    return;
+  }
+  captureJob = null;
+  scheduleRefresh(0);
 }
 
 async function refreshPanel(): Promise<void> {
@@ -1051,7 +1610,7 @@ async function refreshPanel(): Promise<void> {
 
   try {
     const [storage, health] = await Promise.all([
-      browser.storage.local.get(['currentVehicle', 'currentVehicleList', 'scrapeDebug', 'batchTrackingResult', 'backgroundDebug', 'vehicleVisits']),
+      browser.storage.local.get(['currentVehicle', 'currentVehicleList', 'scrapeDebug', 'batchTrackingResult', 'backgroundDebug', 'vehicleVisits', 'vpauto404Hashes']),
       api.healthCheck(),
     ]);
 
@@ -1076,6 +1635,7 @@ async function refreshPanel(): Promise<void> {
       let crossAuction: CrossAuctionData | null = null;
       let similarAvailable: MatchResult[] | null = null;
       let similarSold: SimilarSoldData | null = null;
+      let captureTimeline: CaptureTimelineEntry[] | null = null;
 
       if (!currentVehicle.vehicleId && (snapshot.reference || snapshot.hashId)) {
         const lookup = await api.lookup({
@@ -1132,6 +1692,11 @@ async function refreshPanel(): Promise<void> {
             api.getBadges(currentVehicle.vehicleId),
           ]).then(([h, b]) => { history = h; badges = b; })
         );
+        promises.push(
+          api.getCaptures(currentVehicle.vehicleId)
+            .then((d) => { captureTimeline = d?.captures ?? null; })
+            .catch(() => { captureTimeline = null; }),
+        );
       }
 
       if (snapshot.hashId) {
@@ -1159,14 +1724,30 @@ async function refreshPanel(): Promise<void> {
         batchTracking: state.batchTrackingResult,
         scrapeDebug: effectiveScrapeDebug,
         vehicleVisits: state.vehicleVisits,
+        vpauto404Hashes: state.vpauto404Hashes,
         backgroundDebug: effectiveBackgroundDebug,
         history,
         badges,
         crossAuction,
         similarAvailable,
         similarSold,
+        captureTimeline,
         isApiOnline,
       });
+
+      // Kick off the silent VPauto-URL prober AFTER the render so the user
+      // sees the cached state immediately. The prober writes any newly-
+      // discovered 404 hashIds to chrome.storage.local and triggers a
+      // re-render so chips + thumbnails appear progressively. Fire-and-
+      // forget — never blocks the panel.
+      const passagesForProbe = (crossAuction as CrossAuctionData | null)?.passages ?? [];
+      if (passagesForProbe.length > 0) {
+        void probeCrossAuctionPassages(
+          passagesForProbe,
+          state.vpauto404Hashes || {},
+          snapshot.hashId || null,
+        );
+      }
     } else {
       root.innerHTML = renderListState({
         ...state,
@@ -1468,6 +2049,77 @@ function bindActions(state: StoredPanelState): void {
       });
     });
   });
+
+  bindVpauto404Lightbox();
+
+  // Capture orchestrator buttons.
+  document.querySelectorAll<HTMLButtonElement>('[data-action="capture-bucket"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const bucket = btn.dataset.captureBucket as CaptureBucket | undefined;
+      if (!bucket) return;
+      void planAndStartCapture(state, bucket);
+    });
+  });
+  document.querySelector<HTMLButtonElement>('[data-action="capture-pause"]')
+    ?.addEventListener('click', () => pauseCaptureJob());
+  document.querySelector<HTMLButtonElement>('[data-action="capture-resume"]')
+    ?.addEventListener('click', () => void resumeCaptureJob());
+  document.querySelector<HTMLButtonElement>('[data-action="capture-cancel"]')
+    ?.addEventListener('click', () => cancelCaptureJob());
+  document.querySelector<HTMLButtonElement>('[data-action="capture-dismiss"]')
+    ?.addEventListener('click', () => dismissCaptureJob());
+}
+
+// VPauto 404 lightbox — open/close + Escape key. Re-bound on every refresh,
+// but the Escape handler is registered only once via a module-level guard
+// so multiple refreshes don't stack listeners on the document.
+let vpauto404EscapeBound = false;
+
+function bindVpauto404Lightbox(): void {
+  const overlay = document.querySelector<HTMLDivElement>('[data-vpauto404-lightbox]');
+  if (!overlay) return;
+  const img = overlay.querySelector<HTMLImageElement>('.lightbox__img');
+
+  document.querySelectorAll<HTMLButtonElement>('[data-action="open-vpauto404-lightbox"]').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.preventDefault();
+      const url = btn.dataset.screenshotUrl;
+      if (!url || !img) return;
+      img.src = url;
+      overlay.dataset.open = 'true';
+      document.body.style.overflow = 'hidden';
+    });
+  });
+
+  overlay.querySelectorAll<HTMLButtonElement>('[data-action="close-vpauto404-lightbox"]').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.preventDefault();
+      closeVpauto404Lightbox();
+    });
+  });
+
+  // Click on the dark backdrop (but not on the image) closes too.
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) closeVpauto404Lightbox();
+  });
+
+  if (!vpauto404EscapeBound) {
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      const live = document.querySelector<HTMLDivElement>('[data-vpauto404-lightbox][data-open="true"]');
+      if (live) closeVpauto404Lightbox();
+    });
+    vpauto404EscapeBound = true;
+  }
+}
+
+function closeVpauto404Lightbox(): void {
+  const overlay = document.querySelector<HTMLDivElement>('[data-vpauto404-lightbox]');
+  if (!overlay) return;
+  overlay.dataset.open = 'false';
+  const img = overlay.querySelector<HTMLImageElement>('.lightbox__img');
+  if (img) img.src = '';
+  document.body.style.overflow = '';
 }
 
 // ── Vehicle Detail View ──────────────────────────────────────────────────
@@ -1478,15 +2130,19 @@ function renderVehicleState(input: {
   batchTracking?: BatchTrackingResult;
   scrapeDebug?: ScrapeDebugState;
   vehicleVisits?: StoredPanelState['vehicleVisits'];
+  vpauto404Hashes?: Vpauto404Map;
   backgroundDebug?: StoredPanelState['backgroundDebug'];
   history: VehicleHistory | null;
   badges: VehicleBadge[] | null;
   crossAuction?: CrossAuctionData | null;
   similarAvailable?: MatchResult[] | null;
   similarSold?: SimilarSoldData | null;
+  /** All hasScreenshot=true snapshots for this vehicle, ordered chronologically. */
+  captureTimeline?: CaptureTimelineEntry[] | null;
   isApiOnline: boolean;
 }): string {
-  const { currentVehicle, history, badges, crossAuction, similarAvailable, similarSold, isApiOnline, scrapeDebug } = input;
+  const { currentVehicle, history, badges, crossAuction, similarAvailable, similarSold, captureTimeline, isApiOnline, scrapeDebug } = input;
+  const vpauto404Hashes = input.vpauto404Hashes || {};
   const currentList = input.currentVehicleList || [];
   const { snapshot, vehicleId, isNew } = currentVehicle;
   const visitKey = vehicleId
@@ -1585,6 +2241,7 @@ function renderVehicleState(input: {
     <div class="panel">
       ${renderHeader(isApiOnline, gamification)}
       <div class="panel-scroll">
+        ${currentVehicle.vpauto404 ? renderVpauto404Banner(snapshot, currentVehicle.vpauto404SourceUrl) : ''}
         ${renderTicker(snapshot)}
         ${renderVehicleHero(snapshot, vehicleId)}
 
@@ -1599,10 +2256,11 @@ function renderVehicleState(input: {
         ${renderPersistenceWarning(vehicleId, scrapeDebug)}
 
         ${renderBadgesSection(badges)}
-        ${renderCrossAuction(crossAuction, snapshot)}
+        ${renderCrossAuction(crossAuction, snapshot, vpauto404Hashes)}
         ${renderSimilarInAuction(similarInAuction, snapshot, currentList.length)}
         ${renderSimilarElsewhere(similarAvailable, snapshot)}
         ${renderSimilarSold(similarSold, snapshot)}
+        ${renderCaptureTimelineSection(captureTimeline)}
         ${renderHistorySection(enrichedHistory, vehicleId, snapshot)}
         ${renderPriceChart(enrichedHistory)}
         ${showDebug ? renderDebugCard(isApiOnline, input.currentVehicleList, scrapeDebug, input.backgroundDebug) : ''}
@@ -1611,6 +2269,7 @@ function renderVehicleState(input: {
       </div>
       ${renderActionsBar(true)}
       ${renderTweaksPanel()}
+      ${renderVpauto404Lightbox()}
     </div>
   `;
 }
@@ -1633,6 +2292,7 @@ function renderListState(state: StoredPanelState, isApiOnline: boolean): string 
         ${hasVehicles ? renderAuctionSummary(list) : ''}
         ${tracking ? renderTrackingAlerts(tracking) : ''}
         ${hasVehicles ? renderTrackingSummary(tracking) : ''}
+        ${hasVehicles && tracking ? renderCaptureBar(state) : ''}
         ${hasVehicles ? renderImportSection(state, isApiOnline) : ''}
         ${hasVehicles ? renderVehicleList(list) : renderEmptyState(isApiOnline)}
         ${showDebug ? renderDebugCard(isApiOnline, list, debug, state.backgroundDebug) : ''}
@@ -1800,40 +2460,10 @@ function isCurrentAuctionPassage(
   return true;
 }
 
-function openHistorySnapshot(snapshotId: number, options: { fromVpauto404?: boolean } = {}) {
-  const params = new URLSearchParams({ snapshotId: String(snapshotId) });
-  if (options.fromVpauto404) {
-    params.set('fromVpauto404', '1');
-  }
+function openHistorySnapshot(snapshotId: number) {
   return browser.tabs.create({
-    url: browser.runtime.getURL(`/history-snapshot.html?${params.toString()}`),
+    url: browser.runtime.getURL(`/history-snapshot.html?snapshotId=${encodeURIComponent(String(snapshotId))}`),
   });
-}
-
-/**
- * Probe a VPauto URL with a short HEAD timeout to detect 404s before we
- * open the tab. Returns true when the URL looks reachable, false on 4xx/5xx
- * responses, network failures, or timeouts. We default to "reachable" on
- * "opaque" responses (no-cors falls back to opaque) so we don't redirect
- * users to the local fallback when VPauto is actually fine.
- */
-async function probeVpautoUrlAvailable(url: string): Promise<boolean> {
-  try {
-    const response = await fetch(url, {
-      method: 'HEAD',
-      redirect: 'follow',
-      signal: AbortSignal.timeout(1500),
-    });
-    if (response.type === 'opaque' || response.type === 'opaqueredirect') {
-      return true;
-    }
-    if (response.status >= 400 && response.status < 600) {
-      return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function openHistoryTarget(input: {
@@ -1841,27 +2471,14 @@ function openHistoryTarget(input: {
   snapshotId?: number | null;
   sourceUrl?: string | null;
 }): void {
+  // Always open VPauto links DIRECTLY when openMode === 'vpauto'. If VPauto
+  // returns 404 the user lands on VPauto's own 404 page and the content
+  // script there flips the sidepanel into "VPauto-404 mode" — we no longer
+  // intercept the click ourselves.
   const mode = input.openMode === 'vpauto' && input.sourceUrl ? 'vpauto' : 'local';
 
   if (mode === 'vpauto' && input.sourceUrl) {
-    const url = input.sourceUrl;
-    const snapshotId = input.snapshotId;
-    void (async () => {
-      const reachable = await probeVpautoUrlAvailable(url);
-      if (reachable) {
-        void browser.tabs.create({ url });
-        return;
-      }
-      // VPauto returned 4xx or didn't respond — fall back to the local fiche
-      // and tag it with fromVpauto404 so the page surfaces a yellow banner.
-      if (snapshotId != null) {
-        void openHistorySnapshot(snapshotId, { fromVpauto404: true });
-        return;
-      }
-      // Last-resort: open VPauto anyway so the user sees the actual error
-      // rather than a silent no-op.
-      void browser.tabs.create({ url });
-    })();
+    void browser.tabs.create({ url: input.sourceUrl });
     return;
   }
 
@@ -2011,6 +2628,69 @@ function renderPostSaleTruncatedNote(passages: TruncatedPassageLike[] | undefine
   `;
 }
 
+function renderCaptureTimelineSection(captures: CaptureTimelineEntry[] | null | undefined): string {
+  if (!captures || captures.length === 0) {
+    return `
+      <section class="card">
+        ${renderCardTitle('📸', 'Historique des captures', { tone: 'blue' })}
+        <div class="card__empty">
+          Aucune capture pour ce vehicule. Lance une capture depuis la liste (Nouveaux / Modifies / Manquants) pour archiver une fiche.
+        </div>
+      </section>
+    `;
+  }
+
+  const items = captures.slice().reverse().map((c) => {
+    const dateLabel = c.saleDate ? formatDate(c.saleDate) : formatDate(c.scrapedAt.slice(0, 10));
+    const statusChip = c.status === 'sold'
+      ? '<span class="chip chip--green" style="font-size:9px;padding:2px 6px;">Vendu</span>'
+      : c.status === 'unsold'
+      ? '<span class="chip chip--red" style="font-size:9px;padding:2px 6px;">Invendu</span>'
+      : '<span class="chip chip--blue" style="font-size:9px;padding:2px 6px;">Disponible</span>';
+    const priceLine = c.soldPrice
+      ? `Adjuge ${formatPrice(c.soldPrice)}`
+      : c.startingPrice
+      ? `MAP ${formatPrice(c.startingPrice)}`
+      : '';
+
+    return `
+      <div class="capture-timeline__item">
+        <button
+          class="capture-timeline__thumb"
+          type="button"
+          data-action="open-vpauto404-lightbox"
+          data-screenshot-url="${esc(buildScreenshotUrl(c.snapshotId))}"
+          aria-label="Agrandir la capture"
+        >
+          <img
+            class="capture-timeline__img"
+            src="${esc(buildScreenshotUrl(c.snapshotId))}"
+            alt="Capture archivee"
+            loading="lazy"
+          />
+          <span class="capture-timeline__zoom">Agrandir</span>
+        </button>
+        <div class="capture-timeline__meta">
+          <div class="capture-timeline__head">
+            <strong>${esc(dateLabel)}</strong>
+            ${statusChip}
+          </div>
+          <div class="capture-timeline__city">${esc(c.city || 'Ville inconnue')}</div>
+          ${priceLine ? `<div class="capture-timeline__price">${esc(priceLine)}</div>` : ''}
+          <div class="capture-timeline__reason">${esc(c.reason)}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <section class="card">
+      ${renderCardTitle('📸', 'Historique des captures', { count: captures.length, tone: 'blue' })}
+      <div class="capture-timeline">${items}</div>
+    </section>
+  `;
+}
+
 function renderHistorySection(history: VehicleHistory | null, vehicleId: number | null | undefined, snapshot: VehicleSnapshot): string {
   const historicalPassages = history?.passages.slice().reverse() || [];
 
@@ -2093,7 +2773,11 @@ function renderHistorySection(history: VehicleHistory | null, vehicleId: number 
   `;
 }
 
-function renderCrossAuction(data: CrossAuctionData | null | undefined, snapshot: VehicleSnapshot): string {
+function renderCrossAuction(
+  data: CrossAuctionData | null | undefined,
+  snapshot: VehicleSnapshot,
+  vpauto404Hashes: Vpauto404Map = {},
+): string {
   const previousPassages = data?.passages.slice().reverse() || [];
 
   if (!data || previousPassages.length === 0) {
@@ -2112,6 +2796,14 @@ function renderCrossAuction(data: CrossAuctionData | null | undefined, snapshot:
     const statusLabel = p.status === 'sold' ? 'Vendu' : p.status === 'unsold' ? 'Invendu' : 'Disponible';
     const statusColor = p.status === 'sold' ? 'green' : p.status === 'unsold' ? 'red' : 'blue';
 
+    // 404 detection: prefer the explicit hashId from the DTO, fall back to
+    // extracting it from sourceUrl for older API responses that haven't been
+    // redeployed yet. Either way we look up the global cache populated by
+    // content.ts when the user lands on a `.container404` page.
+    const passageHashId = p.hashId || extractHashIdFromVpautoUrl(p.sourceUrl);
+    const is404 = Boolean(passageHashId && vpauto404Hashes[passageHashId]);
+    const screenshotAvailable = is404 && p.hasScreenshot && p.canonicalSnapshotId;
+
     let priceHtml = '';
     if (p.soldPrice) {
       priceHtml = `<span class="price-down" style="font-size:12px;">Adjuge ${formatPrice(p.soldPrice)}</span>`;
@@ -2120,16 +2812,49 @@ function renderCrossAuction(data: CrossAuctionData | null | undefined, snapshot:
       priceHtml = `${formatPrice(p.startingPrice)}`;
     }
 
+    // When the passage is 404'd AND we have a screenshot, render an inline
+    // thumbnail right below the meta block. The thumbnail itself is the
+    // lightbox trigger — clicking it enlarges the capture in the same modal
+    // used by the top-level VPauto-404 banner. When the passage is 404'd but
+    // no screenshot exists, we surface that explicitly so the user knows the
+    // fiche is gone forever (rather than wondering why the row is empty).
+    const screenshotBlock = screenshotAvailable
+      ? `
+        <button
+          class="cross-item__capture"
+          type="button"
+          data-action="open-vpauto404-lightbox"
+          data-screenshot-url="${esc(buildScreenshotUrl(p.canonicalSnapshotId))}"
+          aria-label="Agrandir la capture VPauto archivee de ce passage"
+        >
+          <img
+            class="cross-item__capture-img"
+            src="${esc(buildScreenshotUrl(p.canonicalSnapshotId))}"
+            alt="Capture archivee de la fiche VPauto"
+            loading="lazy"
+          />
+          <span class="cross-item__capture-zoom">Agrandir</span>
+        </button>`
+      : is404
+      ? `<div class="cross-item__no-capture" role="note">📷 Pas de capture pour ce passage</div>`
+      : '';
+
     return `
-      <div class="cross-item ${isCurrent ? 'cross-item--current' : ''}">
+      <div class="cross-item ${isCurrent ? 'cross-item--current' : ''}${is404 ? ' cross-item--vpauto404' : ''}">
         <div class="cross-item__header">
-          <span class="cross-item__city">${esc(p.city)}${isCurrent ? ' <span class="timeline-current-badge">Courant</span>' : ''}</span>
-          <span class="chip chip--${statusColor}" style="font-size:9px;padding:2px 6px;">${statusLabel}</span>
+          <span class="cross-item__city">
+            ${esc(p.city)}${isCurrent ? ' <span class="timeline-current-badge">Courant</span>' : ''}
+          </span>
+          <span class="cross-item__chips">
+            ${is404 ? '<span class="chip chip--amber cross-item__404-chip" title="VPauto a renvoye 404 — fiche archivee localement">VPauto 404</span>' : ''}
+            <span class="chip chip--${statusColor}" style="font-size:9px;padding:2px 6px;">${statusLabel}</span>
+          </span>
         </div>
         <div class="cross-item__detail">
           <span>${esc(formatPassageMoment({ saleDate: p.saleDate, saleTime: p.saleTime, scrapedAt: p.scrapedAt }))}</span>
           <span>${priceHtml}</span>
         </div>
+        ${screenshotBlock}
         <div class="cross-item__detail cross-item__detail--footer">
           <span>${formatDistance(p.mileage)}</span>
           <div class="cross-item__open">
@@ -2138,7 +2863,7 @@ function renderCrossAuction(data: CrossAuctionData | null | undefined, snapshot:
               sourceUrl: p.sourceUrl,
               openMode: p.openMode,
             })}
-            <span class="timeline-event__reason">${esc(formatHistoryOpenReason(p.openReason, p.openMode))}</span>
+            <span class="timeline-event__reason">${esc(is404 ? 'URL VPauto retourne 404 — clic pour verifier' : formatHistoryOpenReason(p.openReason, p.openMode))}</span>
           </div>
         </div>
       </div>
@@ -2148,10 +2873,121 @@ function renderCrossAuction(data: CrossAuctionData | null | undefined, snapshot:
   return `
     <section class="card">
       ${renderCardTitle('🌍', 'Parcours multi-encheres', { count: previousPassages.length, tone: 'purple' })}
+      ${crossAuctionProbing ? `
+        <div class="cross-probing" role="status" aria-live="polite">
+          <span class="cross-probing__dot"></span>
+          <span class="cross-probing__label">Verification VPauto en cours&hellip;</span>
+        </div>
+      ` : ''}
       <div class="cross-list">${items}</div>
       ${renderPostSaleTruncatedNote(data.postSaleTruncatedPassages)}
     </section>
   `;
+}
+
+/**
+ * Extract the hashId from a VPauto vehicle URL.
+ * Format: https://www.vpauto.fr/vehicule/<hashId>/<slug>.
+ * Used as fallback for cross-auction DTOs that don't yet ship the hashId field
+ * (e.g. when the extension is paired with an older backend build).
+ */
+function extractHashIdFromVpautoUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const match = url.match(/\/vehicule\/([a-f0-9]+)\//i);
+  return match?.[1] || null;
+}
+
+/**
+ * Silently probe every cross-auction passage URL we don't already have a
+ * 404-verdict for. Runs in the background service worker so VPauto doesn't
+ * see a real browser tab and the user sees nothing in their tab bar — only
+ * the side panel discreetly grows the "VPauto 404" chips and capture
+ * thumbnails as probes resolve.
+ *
+ * Concurrency capped at 3 to be polite with VPauto. We persist any new 404
+ * verdicts back to chrome.storage.local immediately, so a subsequent panel
+ * refresh sees them even if the user closes the tab mid-batch.
+ *
+ * `currentHashId` is excluded — the user is literally on that page, so it's
+ * obviously not 404 (or we'd already have flagged it via the content-script
+ * `.container404` detector).
+ */
+async function probeCrossAuctionPassages(
+  passages: CrossAuctionPassage[],
+  knownVpauto404Hashes: Vpauto404Map,
+  currentHashId: string | null,
+): Promise<void> {
+  // Build the queue: passages with a hashId, not already 404, not the current
+  // page, not already being probed by another concurrent refresh, and with a
+  // legitimate VPauto vehicle URL.
+  const toProbe: { hashId: string; url: string }[] = [];
+  const seenInBatch = new Set<string>();
+  for (const passage of passages) {
+    const hashId = passage.hashId || extractHashIdFromVpautoUrl(passage.sourceUrl);
+    if (!hashId) continue;
+    if (seenInBatch.has(hashId)) continue;
+    if (knownVpauto404Hashes[hashId]) continue;
+    if (inflightVpautoProbes.has(hashId)) continue;
+    if (currentHashId && hashId === currentHashId) continue;
+    if (!/^https:\/\/(?:www\.)?vpauto\.fr\/vehicule\//.test(passage.sourceUrl)) continue;
+
+    seenInBatch.add(hashId);
+    inflightVpautoProbes.add(hashId);
+    toProbe.push({ hashId, url: passage.sourceUrl });
+  }
+
+  if (toProbe.length === 0) return;
+
+  crossAuctionProbing = true;
+  // Re-render once to show the "Vérification VPauto…" indicator. We schedule
+  // it via the regular refresh path so all the other UI state stays coherent.
+  scheduleRefresh(0);
+
+  const discovered: Record<string, { detectedAt: string }> = {};
+  let cursor = 0;
+  const concurrency = 3;
+  const workers = Array.from({ length: Math.min(concurrency, toProbe.length) }, async () => {
+    while (cursor < toProbe.length) {
+      const item = toProbe[cursor++];
+      try {
+        const response = await api.probeVpautoUrl(item.url, item.hashId);
+        if (response?.data?.is404) {
+          discovered[item.hashId] = { detectedAt: new Date().toISOString() };
+        }
+      } catch (err) {
+        // Network failure — leave the hashId out of the cache so it gets
+        // re-probed next time the panel refreshes. We log to console only.
+        console.warn(`[VPauto probe] HEAD ${item.url} failed:`, err);
+      } finally {
+        inflightVpautoProbes.delete(item.hashId);
+      }
+    }
+  });
+
+  await Promise.all(workers);
+
+  if (Object.keys(discovered).length > 0) {
+    // Merge with whatever has been written to storage in the meantime — the
+    // content script may have flagged hashes from another tab while we were
+    // probing. Last-write-wins per key, but since we never overwrite an
+    // already-known hash, this is safe.
+    const stored = await browser.storage.local.get('vpauto404Hashes').catch(() => ({} as Record<string, unknown>));
+    const rawExisting = (stored as Record<string, unknown>).vpauto404Hashes;
+    const existing: Vpauto404Map = (rawExisting && typeof rawExisting === 'object')
+      ? rawExisting as Vpauto404Map
+      : {};
+    const merged: Vpauto404Map = { ...existing };
+    for (const [hashId, info] of Object.entries(discovered)) {
+      if (!merged[hashId]) merged[hashId] = info;
+    }
+    await browser.storage.local.set({ vpauto404Hashes: merged }).catch(() => {});
+  }
+
+  crossAuctionProbing = false;
+  // Trigger one final re-render so chips/thumbnails appear and the indicator
+  // disappears. Even if no 404 was discovered, we re-render to remove the
+  // "Vérification…" badge.
+  scheduleRefresh(0);
 }
 
 /** Find vehicles of same brand/model in the current auction list */
@@ -2778,6 +3614,84 @@ function renderTrackingSummary(tracking?: BatchTrackingResult): string {
   `;
 }
 
+function renderCaptureBar(state: StoredPanelState): string {
+  // The capture bar lives inside the post-import section so it only appears
+  // once the user has actually scraped a list. Buttons stay enabled even
+  // when an empty plan is likely — the planner is cheap and the user
+  // gets immediate feedback ("Aucun véhicule à capturer dans cette catégorie").
+  const list = state.currentVehicleList || [];
+  const job = captureJob;
+  const isWorking = !!job && (job.status === 'planning' || job.status === 'running');
+  const canStart = !isWorking && list.length > 0;
+
+  return `
+    <div class="capture-bar">
+      <div class="capture-bar__head">
+        <strong>📷 Captures VPauto</strong>
+        <span class="capture-bar__hint">
+          Detecte les vehicules nouveaux/modifies et capture leur fiche en arriere-plan.
+        </span>
+      </div>
+      <div class="capture-bar__buttons">
+        <button class="btn btn--primary" type="button" data-action="capture-bucket" data-capture-bucket="new" ${canStart ? '' : 'disabled'}>
+          📷 Nouveaux
+        </button>
+        <button class="btn btn--ghost" type="button" data-action="capture-bucket" data-capture-bucket="modified" ${canStart ? '' : 'disabled'}>
+          📷 Modifies
+        </button>
+        <button class="btn btn--ghost" type="button" data-action="capture-bucket" data-capture-bucket="missing" ${canStart ? '' : 'disabled'}>
+          📷 Manquants
+        </button>
+      </div>
+      ${renderCaptureJobState()}
+    </div>
+  `;
+}
+
+function renderCaptureJobState(): string {
+  if (!captureJob) return '';
+  const job = captureJob;
+  const percent = job.total > 0
+    ? Math.max(4, Math.min(100, Math.round((job.processed / job.total) * 100)))
+    : (job.status === 'planning' ? 8 : 100);
+  const bucketName = job.bucket ? captureBucketLabel(job.bucket) : '';
+
+  // Action buttons shown depending on status.
+  const buttons: string[] = [];
+  if (job.status === 'running') {
+    buttons.push(`<button class="btn btn--ghost btn--small" type="button" data-action="capture-pause">Pause</button>`);
+    buttons.push(`<button class="btn btn--ghost btn--small" type="button" data-action="capture-cancel">Arreter</button>`);
+  } else if (job.status === 'paused') {
+    buttons.push(`<button class="btn btn--primary btn--small" type="button" data-action="capture-resume">Reprendre</button>`);
+    buttons.push(`<button class="btn btn--ghost btn--small" type="button" data-action="capture-cancel">Arreter</button>`);
+  } else if (job.status === 'planning') {
+    buttons.push(`<button class="btn btn--ghost btn--small" type="button" data-action="capture-cancel">Annuler</button>`);
+  } else {
+    // done | error | cancelled — only "Fermer"
+    buttons.push(`<button class="btn btn--ghost btn--small" type="button" data-action="capture-dismiss">Fermer</button>`);
+  }
+
+  return `
+    <div class="capture-job capture-job--${job.status}">
+      <div class="capture-job__top">
+        <strong>${esc(job.lastMessage || 'Capture')}</strong>
+        <span>${esc(bucketName)} · ${esc(job.status)}</span>
+      </div>
+      <div class="capture-job__progress">
+        <div class="capture-job__bar" style="width:${percent}%"></div>
+      </div>
+      <div class="capture-job__stats">
+        <span>${job.processed}/${job.total || '?'}</span>
+        <span class="capture-job__stat--ok">${job.succeeded} ok</span>
+        <span class="capture-job__stat--err">${job.failed} echecs</span>
+      </div>
+      ${job.currentLabel ? `<div class="capture-job__current">${esc(job.currentLabel)}</div>` : ''}
+      ${job.errors.length ? `<div class="capture-job__errors">${job.errors.map((e) => `<div>${esc(e)}</div>`).join('')}</div>` : ''}
+      <div class="capture-job__actions">${buttons.join('')}</div>
+    </div>
+  `;
+}
+
 function renderVehicleList(list: Partial<VehicleSnapshot>[]): string {
   const sorted = [...list].sort((a, b) => (a.startingPrice ?? 0) - (b.startingPrice ?? 0));
   const displayed = sorted.slice(0, 50);
@@ -3059,6 +3973,72 @@ function renderActionsBar(hasSource: boolean): string {
       <button class="btn btn--ghost btn--small" type="button" data-action="toggle-debug" title="Diagnostic">
         ${showDebug ? 'Masquer' : 'Debug'}
       </button>
+    </div>
+  `;
+}
+
+// ── VPauto 404 fallback ──────────────────────────────────────────────────
+// When VPauto itself returns 404 for a fiche we have in DB, the content
+// script flips `vpauto404 = true` on the stored currentVehicle. We then
+// render two extra blocks at the top of the panel:
+//   1. a yellow banner explaining the situation + a "Réessayer sur VPauto"
+//      link to the original URL (in case the page comes back later)
+//   2. a hero capture of the VPauto fiche taken at scrape time (when
+//      `snapshot.hasScreenshot && snapshot.id` are present), wrapped in a
+//      button that opens the full-screen lightbox.
+// All other sections (metrics, history, similar, ...) continue to render
+// from the DB snapshot so the user still sees the full assistant view.
+
+function buildScreenshotUrl(snapshotId: number): string {
+  return `${DEFAULT_API_URL}/api/vehicles/screenshot/${snapshotId}`;
+}
+
+function renderVpauto404Banner(snapshot: VehicleSnapshot, sourceUrl?: string): string {
+  const retryUrl = sourceUrl || snapshot.sourceUrl;
+  const hasScreenshot = Boolean(snapshot.hasScreenshot && snapshot.id != null);
+  const hero = hasScreenshot
+    ? `
+      <button
+        class="vpauto404-hero__btn"
+        type="button"
+        data-action="open-vpauto404-lightbox"
+        data-screenshot-url="${esc(buildScreenshotUrl(snapshot.id as number))}"
+        aria-label="Agrandir la capture VPauto archivee"
+      >
+        <img
+          class="vpauto404-hero__img"
+          src="${esc(buildScreenshotUrl(snapshot.id as number))}"
+          alt="Capture archivee de la fiche VPauto"
+          loading="lazy"
+        />
+        <span class="vpauto404-hero__zoom">Agrandir</span>
+      </button>`
+    : `<div class="vpauto404-hero__missing">Pas de capture archivee pour ce passage.</div>`;
+
+  return `
+    <section class="vpauto404-banner" role="alert">
+      <div class="vpauto404-banner__head">
+        <span class="vpauto404-banner__tag">VPauto 404</span>
+        <h3 class="vpauto404-banner__title">La fiche VPauto n'est plus disponible</h3>
+      </div>
+      <p class="vpauto404-banner__body">
+        VPauto a renvoye une erreur 404 pour cette fiche. Les informations affichees
+        proviennent de la derniere capture stockee localement par l'extension.
+        ${retryUrl ? `<a class="vpauto404-banner__retry" href="${esc(retryUrl)}" target="_blank" rel="noreferrer">Reessayer sur VPauto</a>` : ''}
+      </p>
+    </section>
+    <section class="vpauto404-hero">
+      <div class="vpauto404-hero__label">Capture VPauto archivee</div>
+      ${hero}
+    </section>
+  `;
+}
+
+function renderVpauto404Lightbox(): string {
+  return `
+    <div class="lightbox" data-vpauto404-lightbox data-open="false" role="dialog" aria-modal="true" aria-label="Capture VPauto archivee">
+      <button class="lightbox__close" type="button" data-action="close-vpauto404-lightbox" aria-label="Fermer">×</button>
+      <img class="lightbox__img" alt="Capture VPauto archivee" />
     </div>
   `;
 }

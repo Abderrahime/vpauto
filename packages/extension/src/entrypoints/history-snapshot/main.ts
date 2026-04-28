@@ -1,5 +1,4 @@
 import type { VehicleHistorySnapshotResponse } from '@vpauto/shared';
-import { DEFAULT_API_URL } from '@vpauto/shared';
 import { api } from '../../lib/api';
 import './style.css';
 
@@ -21,9 +20,7 @@ const dateFormatter = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium' });
 void bootstrap();
 
 async function bootstrap(): Promise<void> {
-  const params = new URLSearchParams(window.location.search);
-  const snapshotId = params.get('snapshotId');
-  const fromVpauto404 = params.get('fromVpauto404') === '1';
+  const snapshotId = new URLSearchParams(window.location.search).get('snapshotId');
   const parsedId = snapshotId ? parseInt(snapshotId, 10) : NaN;
 
   if (!Number.isFinite(parsedId)) {
@@ -39,7 +36,7 @@ async function bootstrap(): Promise<void> {
     return;
   }
 
-  renderSnapshot(data, { fromVpauto404 });
+  renderSnapshot(data);
 }
 
 function renderLoading(snapshotId: number): void {
@@ -70,10 +67,7 @@ function renderError(message: string): void {
   `;
 }
 
-function renderSnapshot(
-  data: VehicleHistorySnapshotResponse,
-  options: { fromVpauto404: boolean },
-): void {
+function renderSnapshot(data: VehicleHistorySnapshotResponse): void {
   const { identity, snapshot, passageNumber, totalPassages, meta } = data;
   document.title = `Historique · ${identity.brand} ${identity.model}`;
 
@@ -96,30 +90,8 @@ function renderSnapshot(
     chip(formatStatus(snapshot.status), statusTone(snapshot.status)),
   ].filter(Boolean).join('');
 
-  // The hero capture is shown ONLY when VPauto returned 404 AND we have a
-  // local screenshot to display. When VPauto is reachable, the user is on
-  // the real page, so we don't pollute the local fiche with redundant
-  // imagery. When 404 but no screenshot exists, we keep the banner alone
-  // (we don't fabricate a fallback).
-  const screenshotUrl = options.fromVpauto404 && snapshot.hasScreenshot && snapshot.id
-    ? `${DEFAULT_API_URL}/api/vehicles/screenshot/${snapshot.id}`
-    : null;
-  const heroImage = screenshotUrl
-    ? renderHeroImage({
-        src: screenshotUrl,
-        alt: `Capture VPauto du snapshot #${snapshot.id ?? ''}`,
-        caption: 'Capture VPauto au moment du scrape · cliquer pour agrandir',
-      })
-    : '';
-
-  const vpauto404Banner = options.fromVpauto404
-    ? renderVpauto404Banner(snapshot.sourceUrl)
-    : '';
-
   root.innerHTML = `
     <main class="page">
-      ${vpauto404Banner}
-      ${heroImage}
       <section class="hero">
         <div class="hero__copy">
           <div class="hero__eyebrow">Fiche historique locale</div>
@@ -188,81 +160,7 @@ function renderSnapshot(
         <div class="photos">${photos}</div>
       </section>
     </main>
-    ${renderLightbox()}
   `;
-
-  if (screenshotUrl) {
-    wireHeroLightbox(screenshotUrl);
-  }
-}
-
-function renderHeroImage(input: { src: string; alt: string; caption: string }): string {
-  return `
-    <figure class="hero-image">
-      <button class="hero-image__trigger" type="button" data-hero-lightbox aria-label="Agrandir la capture VPauto">
-        <img class="hero-image__img" src="${esc(input.src)}" alt="${esc(input.alt)}" />
-        <span class="hero-image__zoom" aria-hidden="true">⤢</span>
-      </button>
-      <figcaption class="hero-image__caption">${esc(input.caption)}</figcaption>
-    </figure>
-  `;
-}
-
-function renderVpauto404Banner(sourceUrl: string | undefined): string {
-  const link = sourceUrl
-    ? `<a class="banner__link" href="${esc(sourceUrl)}" target="_blank" rel="noreferrer">Réessayer le lien VPauto ↗</a>`
-    : '';
-  return `
-    <aside class="banner banner--warn">
-      <strong>La fiche VPauto n'est plus disponible</strong>
-      <p>VPauto a renvoyé un 404 pour ce passage. Voici la version reconstruite depuis la capture locale réalisée au moment du scrape.</p>
-      ${link}
-    </aside>
-  `;
-}
-
-function renderLightbox(): string {
-  return `
-    <div class="lightbox" data-lightbox role="dialog" aria-modal="true" aria-label="Capture VPauto agrandie" hidden>
-      <button class="lightbox__close" type="button" data-lightbox-close aria-label="Fermer">×</button>
-      <img class="lightbox__img" data-lightbox-img alt="Capture VPauto en grand" />
-      <a class="lightbox__open-tab" data-lightbox-open-tab href="#" target="_blank" rel="noreferrer">Ouvrir dans un nouvel onglet ↗</a>
-    </div>
-  `;
-}
-
-function wireHeroLightbox(src: string): void {
-  const overlay = document.querySelector<HTMLDivElement>('[data-lightbox]');
-  const overlayImg = document.querySelector<HTMLImageElement>('[data-lightbox-img]');
-  const overlayLink = document.querySelector<HTMLAnchorElement>('[data-lightbox-open-tab]');
-  const closeBtn = document.querySelector<HTMLButtonElement>('[data-lightbox-close]');
-  const trigger = document.querySelector<HTMLButtonElement>('[data-hero-lightbox]');
-
-  if (!overlay || !overlayImg || !closeBtn || !trigger) return;
-
-  if (overlayLink) overlayLink.href = src;
-  overlayImg.src = src;
-
-  const open = (): void => {
-    overlay.hidden = false;
-    document.body.classList.add('lightbox-open');
-    closeBtn.focus();
-  };
-  const close = (): void => {
-    overlay.hidden = true;
-    document.body.classList.remove('lightbox-open');
-    trigger.focus();
-  };
-
-  trigger.addEventListener('click', open);
-  closeBtn.addEventListener('click', close);
-  overlay.addEventListener('click', (event) => {
-    // Click on the backdrop (not on the image or the open-tab link) closes.
-    if (event.target === overlay) close();
-  });
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !overlay.hidden) close();
-  });
 }
 
 function metric(label: string, value: string): string {

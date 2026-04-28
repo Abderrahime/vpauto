@@ -15,6 +15,44 @@ type ApiRequestResult<T> = {
   error: string | null;
 };
 
+/** A vehicle the user can capture in the running orchestrator session. */
+export type CaptureCandidate = {
+  vehicleId: number;
+  /** Snapshot the screenshot will be attached to (always the latest). */
+  snapshotId: number;
+  hashId: string;
+  reference: string | null;
+  brand: string;
+  model: string;
+  version: string;
+  year: number;
+  city: string;
+  saleDate: string | null;
+  startingPrice: number | null;
+  status: string;
+  sourceUrl: string;
+  /** First photo URL if available — used for the orchestrator thumbnail. */
+  thumbUrl: string | null;
+  /** Short FR sentence describing why this vehicle is in the bucket. */
+  reason: string;
+};
+
+/** One row in the per-vehicle capture timeline. */
+export type CaptureTimelineEntry = {
+  snapshotId: number;
+  scrapedAt: string;
+  city: string;
+  saleDate: string | null;
+  saleTime: string | null;
+  status: string;
+  startingPrice: number | null;
+  soldPrice: number | null;
+  sourceUrl: string;
+  hashId: string | null;
+  /** Auto-generated label: "Première capture", "Prix 14 900 € → 13 500 €"… */
+  reason: string;
+};
+
 let rpcCounter = 0;
 
 function toQueryString(params: Record<string, string | number | undefined | null>): string {
@@ -348,6 +386,10 @@ export const api = {
     type CrossPassageDTO = {
       snapshotId: number;
       canonicalSnapshotId: number;
+      /** VPauto hashId for THIS passage — used by the silent 404 prober. */
+      hashId: string | null;
+      /** True when an on-disk screenshot of the VPauto fiche is available. */
+      hasScreenshot: boolean;
       city: string;
       saleDate: string;
       saleTime: string | null;
@@ -408,5 +450,63 @@ export const api = {
 
   healthCheck() {
     return request<{ status: string }>('/api/health');
+  },
+
+  /**
+   * Plan a batch capture run.
+   *
+   * Sends the hashIds of the vehicles currently visible in the VPauto
+   * import list and gets back three buckets: vehicles never captured
+   * before AND first seen after `since` (new), vehicles already
+   * captured but with a relevant change (modified), and vehicles never
+   * captured AND first seen before `since` (missing/rattrapage).
+   *
+   * Cooldown defaults to 60 minutes server-side.
+   */
+  getCapturePlan(hashIds: string[], since?: string, cooldownMinutes?: number) {
+    return request<{
+      new: CaptureCandidate[];
+      modified: CaptureCandidate[];
+      missing: CaptureCandidate[];
+      skipped: number;
+    }>('/api/vehicles/capture/plan', {
+      method: 'POST',
+      body: JSON.stringify({ hashIds, since, cooldownMinutes }),
+    });
+  },
+
+  /** Timeline of all stored captures for a vehicle. */
+  getCaptures(vehicleId: number) {
+    return request<{
+      vehicleId: number;
+      captures: CaptureTimelineEntry[];
+    }>(`/api/vehicles/captures/${vehicleId}`);
+  },
+
+  /**
+   * Silently probe a VPauto vehicle URL via the background service worker.
+   * Returns `{ is404, status }` on success, `{ error }` on network failure.
+   *
+   * The probe runs in the background (not in the side panel) because the
+   * service worker has the host_permissions for vpauto.fr and the request
+   * never leaves a visible trace in the user's tabs. Used by the sidepanel
+   * to pre-flag dead "Parcours multi-enchères" passages without the user
+   * having to click through them one by one.
+   */
+  probeVpautoUrl(url: string, hashId: string) {
+    return requestViaBackgroundPort<{ hashId: string; url: string; is404: boolean; status: number }>({
+      type: 'PROBE_VPAUTO_URL',
+      url,
+      hashId,
+    }, 10000).then(async (response) => {
+      if (!response.error) return response;
+      // Port channel can sporadically fail under heavy refresh load; the
+      // sendMessage fallback uses Chrome's native one-shot RPC API.
+      return requestViaBackgroundMessage<{ hashId: string; url: string; is404: boolean; status: number }>({
+        type: 'PROBE_VPAUTO_URL',
+        url,
+        hashId,
+      }, 10000);
+    });
   },
 };

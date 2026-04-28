@@ -3,6 +3,9 @@ dist/
 .output/
 *.db
 *.db-journal
+*.db.bak-*
+*.sqbpro
+packages/backend/data/
 .env
 .env.local
 .turbo/
