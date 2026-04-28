@@ -240,6 +240,15 @@ type ImportChangeFilter = 'all' | ImportChangeEntry['kind'];
  */
 type CaptureBucket = 'new' | 'modified' | 'missing';
 
+interface CapturePlanCounts {
+  new: number;
+  modified: number;
+  missing: number;
+  skipped: number;
+  computedAt: string;
+  error?: string;
+}
+
 interface CaptureJobState {
   status: 'idle' | 'planning' | 'running' | 'paused' | 'done' | 'error' | 'cancelled';
   bucket: CaptureBucket | null;
@@ -284,6 +293,7 @@ interface ImportJobState {
   finishedAt?: string;
   errors: string[];
   changes: ImportChangeEntry[];
+  capturePlanCounts?: CapturePlanCounts;
   abortRequested?: boolean;
 }
 
@@ -528,35 +538,34 @@ function describeImportChange(
   changeEntry: ImportChangeEntry | null;
 } {
   if (!previous) {
-    return createdVehicle
-      ? {
-          isNew: true,
-          updated: false,
-          unchanged: false,
-          priceDirection: null,
-          statusChanged: false,
-          changeEntry: {
-            label,
-            kind: 'new',
-            detail: 'Nouveau vehicule enregistre.',
-            updates: buildNewVehicleSummary(next),
-            url,
-          },
-        }
-      : {
-          isNew: false,
-          updated: true,
-          unchanged: false,
-          priceDirection: null,
-          statusChanged: false,
-          changeEntry: {
-            label,
-            kind: 'updated',
-            detail: 'Vehicule rattache a un enregistrement existant.',
-            updates: [],
-            url,
-          },
-        };
+    if (createdVehicle) {
+      return {
+        isNew: true,
+        updated: false,
+        unchanged: false,
+        priceDirection: null,
+        statusChanged: false,
+        changeEntry: {
+          label,
+          kind: 'new',
+          detail: 'Nouveau vehicule enregistre.',
+          updates: buildNewVehicleSummary(next),
+          url,
+        },
+      };
+    }
+
+    // If the backend matched this scrape to an existing vehicle but the UI had
+    // no previous snapshot to compare, don't manufacture a fake "updated" row.
+    // Only a real field diff should count as an import update.
+    return {
+      isNew: false,
+      updated: false,
+      unchanged: true,
+      priceDirection: null,
+      statusChanged: false,
+      changeEntry: null,
+    };
   }
 
   // Full field-by-field diff. Order matters — this is the display order in
@@ -892,6 +901,50 @@ function patchImportJob(patch: Partial<ImportJobState>): void {
   scheduleRefresh(0);
 }
 
+function getCapturePlanSince(state: StoredPanelState): string {
+  // `since` defines the line between "new" (first seen during the running
+  // import) and "missing" (first seen before). Prefer the manual import start
+  // time when available: `batchTrackingResult` can be cleared when the list
+  // page reloads, while the import summary remains in the open side panel.
+  return (importJob?.status === 'done' ? importJob.startedAt : undefined)
+    || state.batchTrackingResult?.timestamp
+    || new Date(Date.now() - 24 * 3600_000).toISOString();
+}
+
+async function computeCapturePlanCounts(state: StoredPanelState): Promise<CapturePlanCounts | null> {
+  const hashIds = (state.currentVehicleList || [])
+    .map((vehicle) => vehicle.hashId)
+    .filter(Boolean) as string[];
+
+  if (hashIds.length === 0) return null;
+
+  const plan = await api.getCapturePlan(hashIds, getCapturePlanSince(state)).catch(() => null);
+  if (!plan) {
+    return {
+      new: 0,
+      modified: 0,
+      missing: 0,
+      skipped: 0,
+      computedAt: new Date().toISOString(),
+      error: 'Plan de capture indisponible.',
+    };
+  }
+
+  return {
+    new: plan.new.length,
+    modified: plan.modified.length,
+    missing: plan.missing.length,
+    skipped: plan.skipped,
+    computedAt: new Date().toISOString(),
+  };
+}
+
+function buildImportDoneMessage(job: ImportJobState, counts?: CapturePlanCounts | null): string {
+  const base = `Import termine. ${job.updated || 0} fiches mises a jour, ${job.newVehicles || 0} nouvelles.`;
+  if (!counts || counts.error) return base;
+  return `${base} ${counts.modified} capture${counts.modified > 1 ? 's' : ''} modifiee${counts.modified > 1 ? 's' : ''} a faire.`;
+}
+
 function normalizeSearchValue(value: string): string {
   return value
     .normalize('NFD')
@@ -1123,8 +1176,8 @@ async function runSilentImport(state: StoredPanelState): Promise<void> {
       status: 'done',
       finishedAt: new Date().toISOString(),
       currentLabel: undefined,
-      lastMessage: `Import termine. ${importJob?.updated || 0} fiches mises a jour, ${importJob?.newVehicles || 0} nouvelles.`,
     };
+    importJob.lastMessage = buildImportDoneMessage(importJob);
 
     // Persist a BatchTrackingResult so downstream surfaces (notably the capture
     // bar, which gates on `state.batchTrackingResult` to avoid showing up before
@@ -1140,6 +1193,15 @@ async function runSilentImport(state: StoredPanelState): Promise<void> {
       timestamp: new Date().toISOString(),
     };
     void browser.storage.local.set({ batchTrackingResult: trackingFromManualImport }).catch(() => {});
+
+    const capturePlanCounts = await computeCapturePlanCounts(state);
+    if (importJob && capturePlanCounts) {
+      importJob = {
+        ...importJob,
+        capturePlanCounts,
+        lastMessage: buildImportDoneMessage(importJob, capturePlanCounts),
+      };
+    }
 
     scheduleRefresh(0);
   } catch (error) {
@@ -1348,10 +1410,11 @@ async function planAndStartCapture(state: StoredPanelState, bucket: CaptureBucke
   }
 
   // `since` defines the line between "new" (first seen during the running
-  // import) and "missing" (first seen before). When no batch tracking
-  // result exists yet, fall back to the last 24 h so the very first
-  // capture run after install still has a meaningful split.
-  const since = state.batchTrackingResult?.timestamp
+  // import) and "missing" (first seen before). Prefer the manual import start
+  // time when available: `batchTrackingResult` can be cleared when the list
+  // page reloads, while the import summary remains in the open side panel.
+  const since = (importJob?.status === 'done' ? importJob.startedAt : undefined)
+    || state.batchTrackingResult?.timestamp
     || new Date(Date.now() - 24 * 3600_000).toISOString();
 
   const plan = await api.getCapturePlan(hashIds, since).catch(() => null);
@@ -1365,6 +1428,20 @@ async function planAndStartCapture(state: StoredPanelState, bucket: CaptureBucke
     };
     scheduleRefresh(0);
     return;
+  }
+
+  const freshCounts: CapturePlanCounts = {
+    new: plan.new.length,
+    modified: plan.modified.length,
+    missing: plan.missing.length,
+    skipped: plan.skipped,
+    computedAt: new Date().toISOString(),
+  };
+  if (importJob?.status === 'done') {
+    patchImportJob({
+      capturePlanCounts: freshCounts,
+      lastMessage: buildImportDoneMessage(importJob, freshCounts),
+    });
   }
 
   const candidates = plan[bucket] || [];
@@ -2288,6 +2365,9 @@ function renderListState(state: StoredPanelState, isApiOnline: boolean): string 
   const debug = state.scrapeDebug;
 
   const hasVehicles = list && list.length > 0;
+  const hasCaptureContext = Boolean(
+    tracking || (importJob?.status === 'done' && importJob.processed > 0),
+  );
   const gamification = buildListGamificationStats(list || [], tracking);
   const updatedAt = tracking?.timestamp || debug?.timestamp;
 
@@ -2298,7 +2378,7 @@ function renderListState(state: StoredPanelState, isApiOnline: boolean): string 
         ${hasVehicles ? renderAuctionSummary(list) : ''}
         ${tracking ? renderTrackingAlerts(tracking) : ''}
         ${hasVehicles ? renderTrackingSummary(tracking) : ''}
-        ${hasVehicles && tracking ? renderCaptureBar(state) : ''}
+        ${hasVehicles && hasCaptureContext ? renderCaptureBar(state) : ''}
         ${hasVehicles ? renderImportSection(state, isApiOnline) : ''}
         ${hasVehicles ? renderVehicleList(list) : renderEmptyState(isApiOnline)}
         ${showDebug ? renderDebugCard(isApiOnline, list, debug, state.backgroundDebug) : ''}
@@ -3627,8 +3707,13 @@ function renderCaptureBar(state: StoredPanelState): string {
   // gets immediate feedback ("Aucun véhicule à capturer dans cette catégorie").
   const list = state.currentVehicleList || [];
   const job = captureJob;
+  const counts = importJob?.capturePlanCounts;
   const isWorking = !!job && (job.status === 'planning' || job.status === 'running');
   const canStart = !isWorking && list.length > 0;
+  const labelWithCount = (label: string, bucket: CaptureBucket): string => {
+    if (!counts || counts.error) return label;
+    return `${label} (${counts[bucket]})`;
+  };
 
   return `
     <div class="capture-bar">
@@ -3640,13 +3725,13 @@ function renderCaptureBar(state: StoredPanelState): string {
       </div>
       <div class="capture-bar__buttons">
         <button class="btn btn--primary" type="button" data-action="capture-bucket" data-capture-bucket="new" ${canStart ? '' : 'disabled'}>
-          📷 Nouveaux
+          📷 ${labelWithCount('Nouveaux', 'new')}
         </button>
         <button class="btn btn--ghost" type="button" data-action="capture-bucket" data-capture-bucket="modified" ${canStart ? '' : 'disabled'}>
-          📷 Modifies
+          📷 ${labelWithCount('Modifies', 'modified')}
         </button>
         <button class="btn btn--ghost" type="button" data-action="capture-bucket" data-capture-bucket="missing" ${canStart ? '' : 'disabled'}>
-          📷 Manquants
+          📷 ${labelWithCount('Manquants', 'missing')}
         </button>
       </div>
       ${renderCaptureJobState()}
@@ -3876,6 +3961,7 @@ function renderImportJobState(): string {
     totalPages,
     currentPage,
   } = getVisibleImportChanges();
+  const capturePlanSummary = renderImportCapturePlanSummary(importJob.capturePlanCounts);
 
   return `
     <div class="import-job import-job--${importJob.status}">
@@ -3900,6 +3986,7 @@ function renderImportJobState(): string {
         <span>${importJob.priceDowns} baisses</span>
         <span>${importJob.statusChanges} statuts modifies</span>
       </div>
+      ${capturePlanSummary}
       ${importJob.currentLabel ? `<div class="import-job__current">${esc(importJob.currentLabel)}</div>` : ''}
       ${importJob.changes.length ? `
         <div class="import-job__toolbar">
@@ -3961,6 +4048,21 @@ function renderImportJobState(): string {
         ` : ''}
       ` : ''}
       ${importJob.errors.length ? `<div class="import-job__errors">${importJob.errors.map((error) => `<div>${esc(error)}</div>`).join('')}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderImportCapturePlanSummary(counts?: CapturePlanCounts): string {
+  if (!counts) return '';
+  if (counts.error) {
+    return `<div class="import-job__meta">Captures: ${esc(counts.error)}</div>`;
+  }
+
+  return `
+    <div class="import-job__meta">
+      Captures a faire: ${counts.modified} modifiee${counts.modified > 1 ? 's' : ''}
+      · ${counts.new} nouvelle${counts.new > 1 ? 's' : ''}
+      · ${counts.missing} manquante${counts.missing > 1 ? 's' : ''}
     </div>
   `;
 }
