@@ -176,6 +176,16 @@ npm run db:push --workspace @vpauto/backend
 pm2 restart vpauto-backend --update-env
 ```
 
+If the backend crashes with `ERR_UNKNOWN_FILE_EXTENSION ".ts"` for
+`packages/shared/src/index.ts`, pull the latest code and rebuild both packages:
+
+```bash
+git pull
+npm run build --workspace @vpauto/shared
+npm run build --workspace @vpauto/backend
+pm2 restart vpauto-backend --update-env
+```
+
 ## 10. Backup
 
 Minimum backup command:
