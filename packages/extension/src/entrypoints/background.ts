@@ -3,6 +3,7 @@ import { canAccess, getAccessHeaders, getExtensionAccess } from '../lib/access';
 import { getApiBaseUrl } from '../lib/config';
 
 const API = getApiBaseUrl();
+const BACKGROUND_FETCH_TIMEOUT_MS = 15000;
 
 type BatchTrackingResult = {
   saved: number;
@@ -23,12 +24,37 @@ type BackgroundDebugState = {
   lastRequestId?: string;
 };
 
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = BACKGROUND_FETCH_TIMEOUT_MS): Promise<Response> {
+  if (init.signal) {
+    return fetch(input, init);
+  }
+
+  const controller = new AbortController();
+  const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    globalThis.clearTimeout(timer);
+  }
+}
+
+function mergeHeaders(base: Record<string, string>, extra?: HeadersInit): HeadersInit {
+  const headers = new Headers(base);
+  if (extra) {
+    new Headers(extra).forEach((value, key) => headers.set(key, value));
+  }
+  return headers;
+}
+
 async function fetchApi<T>(path: string, options?: RequestInit): Promise<{ data: T | null; error: string | null }> {
   try {
     const accessHeaders = await getAccessHeaders();
-    const res = await fetch(`${API}${path}`, {
-      headers: { 'Content-Type': 'application/json', ...accessHeaders },
+    const res = await fetchWithTimeout(`${API}${path}`, {
       ...options,
+      headers: mergeHeaders({ 'Content-Type': 'application/json', ...accessHeaders }, options?.headers),
     });
 
     if (!res.ok) {
@@ -342,7 +368,7 @@ async function handleRpcMessage(message: any, sender?: chrome.runtime.MessageSen
     }
 
     try {
-      const response = await fetch(url, {
+      const response = await fetchWithTimeout(url, {
         method: 'HEAD',
         credentials: 'omit',
         cache: 'no-cache',

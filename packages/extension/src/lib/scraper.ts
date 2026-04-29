@@ -2,6 +2,24 @@ import type { VehicleSnapshot, VehicleStatus } from '@vpauto/shared';
 import { VPAUTO_BASE_URL, VPAUTO_VEHICLE_URL_PATTERN } from '@vpauto/shared';
 
 const UNSOLD_TEXT_RE = /n[''\u2019]a\s*pas\s*[eé]t[eé]\s*adjug[eé]|pas\s*[eé]t[eé]\s*adjug[eé]|pas\s*adjug[eé]|non\s*adjug[eé]|invendu|apr[eè]s[\s-]*vente|ordre\s+d[''\u2019]achat\s+d[''\u2019]apr[eè]s[\s-]*vente/i;
+const REMOTE_FETCH_TIMEOUT_MS = 15000;
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = REMOTE_FETCH_TIMEOUT_MS): Promise<Response> {
+  if (init.signal) {
+    return fetch(input, init);
+  }
+
+  const controller = new AbortController();
+  const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    globalThis.clearTimeout(timer);
+  }
+}
 
 /**
  * Strict "véhicule non roulant" detector.
@@ -163,7 +181,7 @@ export function detectPagination(): { currentPage: number; totalPages: number; b
  */
 export async function scrapeRemotePage(pageUrl: string): Promise<Partial<VehicleSnapshot>[]> {
   try {
-    const res = await fetch(pageUrl, { credentials: 'include' });
+    const res = await fetchWithTimeout(pageUrl, { credentials: 'include' });
     if (!res.ok) {
       console.warn(`[VPauto] Failed to fetch page: ${res.status} ${pageUrl}`);
       return [];
@@ -415,7 +433,7 @@ function extractSectionText(doc: Document, headingRe: RegExp): string | null {
  */
 export async function probeVehicleDocuments(detailPageUrl: string): Promise<VehicleDocProbeResult | null> {
   try {
-    const res = await fetch(detailPageUrl, { credentials: 'include' });
+    const res = await fetchWithTimeout(detailPageUrl, { credentials: 'include' });
     if (!res.ok) {
       console.warn(`[VPauto] probeVehicleDocuments: HTTP ${res.status} for ${detailPageUrl}`);
       return null;

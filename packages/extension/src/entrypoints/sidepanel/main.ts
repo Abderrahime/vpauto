@@ -394,6 +394,7 @@ const CAPTURE_RENDER_SETTLE_MS = 2500;
 // call (e.g. popup window minimized to dock on macOS) or a slow screenshot upload
 // can hang the entire orchestrator on the first vehicle.
 const CAPTURE_ITERATION_TIMEOUT_MS = 30000;
+const IMPORT_FETCH_TIMEOUT_MS = 15000;
 
 const IMPORT_CHANGE_PAGE_SIZE = 12;
 
@@ -423,6 +424,23 @@ function scheduleRefresh(delay = 150): void {
     }
     void refreshPanel();
   }, delay);
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = IMPORT_FETCH_TIMEOUT_MS): Promise<Response> {
+  if (init.signal) {
+    return fetch(input, init);
+  }
+
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 async function syncCurrentVehicleFromPanel(
@@ -1048,7 +1066,7 @@ async function importVehicleSilently(target: ImportTarget): Promise<{
 }> {
   let previousSnapshot: VehicleSnapshot | null = null;
 
-  const res = await fetch(target.url, { credentials: 'include' });
+  const res = await fetchWithTimeout(target.url, { credentials: 'include' });
   if (!res.ok) {
     return {
       ok: false,
