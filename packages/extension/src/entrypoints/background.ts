@@ -1,7 +1,8 @@
-import { DEFAULT_API_URL } from '@vpauto/shared';
-import type { VehicleSnapshot } from '@vpauto/shared';
+import type { VehicleSnapshot, VpautoPermission } from '@vpauto/shared';
+import { canAccess, getAccessHeaders, getExtensionAccess } from '../lib/access';
+import { getApiBaseUrl } from '../lib/config';
 
-const API = DEFAULT_API_URL;
+const API = getApiBaseUrl();
 
 type BatchTrackingResult = {
   saved: number;
@@ -24,8 +25,9 @@ type BackgroundDebugState = {
 
 async function fetchApi<T>(path: string, options?: RequestInit): Promise<{ data: T | null; error: string | null }> {
   try {
+    const accessHeaders = await getAccessHeaders();
     const res = await fetch(`${API}${path}`, {
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...accessHeaders },
       ...options,
     });
 
@@ -43,6 +45,15 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<{ data:
   } catch (error) {
     return { data: null, error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function requiredProxyPermission(path: string, method: string): VpautoPermission | null {
+  const upperMethod = method.toUpperCase();
+  if (upperMethod !== 'GET' && path.startsWith('/api/vehicles/snapshot')) return 'vehicles:write';
+  if (path.startsWith('/api/vehicles/batch-snapshot')) return 'vehicles:import';
+  if (path.startsWith('/api/vehicles/capture/plan')) return 'captures:plan';
+  if (path.startsWith('/api/vehicles/screenshot/')) return 'captures:run';
+  return null;
 }
 
 async function runBatchSave(vehicles: Partial<VehicleSnapshot>[]): Promise<BatchTrackingResult> {
@@ -209,6 +220,12 @@ async function handleRpcMessage(message: any, sender?: chrome.runtime.MessageSen
     const { path, options } = message;
     const method = options?.method || 'GET';
     const bodyLen = options?.body ? String(options.body).length : 0;
+    const access = await getExtensionAccess();
+    const requiredPermission = requiredProxyPermission(String(path || ''), String(method || 'GET'));
+
+    if (requiredPermission && !canAccess(access, requiredPermission)) {
+      return { error: `forbidden:${access.role}` };
+    }
 
     setBackgroundDebug({
       status: 'proxy_received',
@@ -257,6 +274,11 @@ async function handleRpcMessage(message: any, sender?: chrome.runtime.MessageSen
   }
 
   if (message.type === 'CAPTURE_SCREENSHOT') {
+    const access = await getExtensionAccess();
+    if (!canAccess(access, 'captures:run')) {
+      return { error: `forbidden:${access.role}` };
+    }
+
     setBackgroundDebug({
       status: 'screenshot_started',
       lastStage: 'screenshot_started',
@@ -352,6 +374,11 @@ async function handleRpcMessage(message: any, sender?: chrome.runtime.MessageSen
   }
 
   if (message.type === 'RUN_BATCH_SAVE') {
+    const access = await getExtensionAccess();
+    if (!canAccess(access, 'vehicles:import')) {
+      return { error: `forbidden:${access.role}` };
+    }
+
     const vehicles = Array.isArray(message.vehicles) ? message.vehicles as Partial<VehicleSnapshot>[] : [];
 
     setBackgroundDebug({

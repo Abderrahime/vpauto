@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import vehicleRoutes from './routes/vehicles.js';
 import watchlistRoutes from './routes/watchlist.js';
+import { authenticateCredentials, getRequestAccess } from './auth.js';
 
 const app = new Hono();
 
@@ -29,7 +30,7 @@ function resolveCorsOrigin(origin: string): string | null {
 app.use('*', cors({
   origin: resolveCorsOrigin,
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowHeaders: ['Content-Type'],
+  allowHeaders: ['Content-Type', 'Authorization', 'X-VPauto-Role', 'X-VPauto-Token'],
 }));
 
 // Request logging middleware
@@ -47,6 +48,16 @@ app.route('/api/vehicles', vehicleRoutes);
 app.route('/api/watchlist', watchlistRoutes);
 
 app.get('/api/health', (c) => c.json({ success: true, data: { status: 'ok', timestamp: new Date().toISOString() } }));
+app.get('/api/me', (c) => c.json({ success: true, data: getRequestAccess(c) }));
+app.post('/api/auth/login', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as { email?: unknown; password?: unknown };
+  const session = authenticateCredentials(body.email, body.password);
+  if (!session) {
+    return c.json({ success: false, error: 'invalid_credentials' }, 401);
+  }
+
+  return c.json({ success: true, data: session });
+});
 
 const port = parseInt(process.env.PORT || '3456');
 

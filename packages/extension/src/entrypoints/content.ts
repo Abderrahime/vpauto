@@ -2,6 +2,7 @@ import { VPAUTO_VEHICLE_URL_PATTERN } from '@vpauto/shared';
 import { scrapeVehicleDetail, scrapeVehicleList, waitForVehicleCards, detectPagination, scrapeRemotePage } from '../lib/scraper';
 import { api } from '../lib/api';
 import { injectBadges } from '../lib/badges';
+import { canAccess, getExtensionAccess } from '../lib/access';
 
 type VehicleVisitEntry = {
   count: number;
@@ -116,7 +117,28 @@ async function persistDetailSnapshot(snapshot: import('@vpauto/shared').VehicleS
   recoveredByLookup: boolean;
   error: string | null;
 }> {
-  console.log(`[VPauto] persistDetailSnapshot: Saving ${snapshot.brand} ${snapshot.model} (hashId=${snapshot.hashId}, ref=${snapshot.reference})`);
+  const access = await getExtensionAccess();
+  const canWrite = canAccess(access, 'vehicles:write');
+  console.log(`[VPauto] persistDetailSnapshot: ${canWrite ? 'Saving' : 'Read-only lookup'} ${snapshot.brand} ${snapshot.model} (hashId=${snapshot.hashId}, ref=${snapshot.reference}, role=${access.role})`);
+
+  if (!canWrite) {
+    const lookup = await api.lookup({
+      reference: snapshot.reference || undefined,
+      hashId: snapshot.hashId || undefined,
+    }).catch((err) => {
+      console.warn('[VPauto] persistDetailSnapshot: Read-only lookup failed:', err);
+      return null;
+    });
+
+    return {
+      vehicleId: lookup?.vehicleId ?? null,
+      snapshotId: lookup?.lastSnapshot?.id ?? null,
+      duplicate: !!lookup?.vehicleId,
+      createdVehicle: false,
+      recoveredByLookup: !!lookup?.vehicleId,
+      error: lookup?.vehicleId ? 'read_only_lookup' : 'read_only_no_match',
+    };
+  }
 
   const saveResult = await api.saveSnapshotDetailed(snapshot);
   console.log(`[VPauto] persistDetailSnapshot: saveResult =`, JSON.stringify({
@@ -531,6 +553,19 @@ async function handleListPage() {
 
   // Inject badges on visible cards (async, non-blocking)
   injectBadges(vehicles).catch(() => {});
+
+  const access = await getExtensionAccess();
+  if (!canAccess(access, 'vehicles:import')) {
+    console.log(`[VPauto] List enrichment disabled for role=${access.role}; badges remain active.`);
+    sendDebug({
+      stage: 'list_read_only',
+      pageType: 'list',
+      url: window.location.href,
+      vehicleCount: vehicles.length,
+      reason: `role=${access.role}`,
+    });
+    return;
+  }
 
   // Detect pagination and scrape remaining pages in background
   const { currentPage, totalPages, baseUrl } = detectPagination();

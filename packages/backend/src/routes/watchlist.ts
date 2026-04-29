@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { prisma } from '../db.js';
+import { requirePermission } from '../auth.js';
 import type { ApiResponse } from '@vpauto/shared';
 
 const app = new Hono();
@@ -19,7 +20,7 @@ app.get('/', async (c) => {
   return c.json<ApiResponse<typeof items>>({ success: true, data: items });
 });
 
-app.post('/:vehicleId', async (c) => {
+app.post('/:vehicleId', requirePermission('watchlist:write'), async (c) => {
   const vehicleId = parseInt(c.req.param('vehicleId'));
   const body = await c.req.json().catch(() => ({}));
 
@@ -40,7 +41,7 @@ app.post('/:vehicleId', async (c) => {
   return c.json<ApiResponse<typeof item>>({ success: true, data: item });
 });
 
-app.delete('/:vehicleId', async (c) => {
+app.delete('/:vehicleId', requirePermission('watchlist:write'), async (c) => {
   const vehicleId = parseInt(c.req.param('vehicleId'));
   await prisma.watchlist.delete({ where: { vehicleId } }).catch(() => null);
   return c.json<ApiResponse<null>>({ success: true });

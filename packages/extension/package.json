@@ -7,8 +7,13 @@
     "dev": "wxt",
     "dev:firefox": "wxt --browser firefox",
     "build": "wxt build",
+    "build:admin": "VITE_VPAUTO_EXTENSION_ROLE=owner VITE_VPAUTO_OUTPUT_DIR=.output-admin VITE_VPAUTO_API_URL=http://localhost:3456 wxt build",
+    "build:user": "VITE_VPAUTO_EXTENSION_ROLE=user VITE_VPAUTO_OUTPUT_DIR=.output-user VITE_VPAUTO_API_URL=${VITE_VPAUTO_API_URL:?Set VITE_VPAUTO_API_URL=https://api.your-domain.com} wxt build",
+    "build:user:local": "VITE_VPAUTO_EXTENSION_ROLE=user VITE_VPAUTO_OUTPUT_DIR=.output-user-local VITE_VPAUTO_API_URL=http://localhost:3456 wxt build",
     "build:firefox": "wxt build --browser firefox",
     "zip": "wxt zip",
+    "zip:admin": "VITE_VPAUTO_EXTENSION_ROLE=owner VITE_VPAUTO_OUTPUT_DIR=.output-admin VITE_VPAUTO_API_URL=http://localhost:3456 wxt zip",
+    "zip:user": "VITE_VPAUTO_EXTENSION_ROLE=user VITE_VPAUTO_OUTPUT_DIR=.output-user VITE_VPAUTO_API_URL=${VITE_VPAUTO_API_URL:?Set VITE_VPAUTO_API_URL=https://api.your-domain.com} wxt zip",
     "zip:firefox": "wxt zip --browser firefox",
     "test": "vitest run"
   },

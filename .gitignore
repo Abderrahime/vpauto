@@ -1,6 +1,9 @@
 node_modules/
 dist/
 .output/
+.output-admin/
+.output-user/
+.output-user-local/
 *.db
 *.db-journal
 *.db.bak-*

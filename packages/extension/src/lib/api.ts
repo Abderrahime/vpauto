@@ -1,4 +1,3 @@
-import { DEFAULT_API_URL } from '@vpauto/shared';
 import type {
   ApiResponse,
   VehicleSnapshot,
@@ -7,8 +6,11 @@ import type {
   MatchResult,
   VehicleHistorySnapshotResponse,
 } from '@vpauto/shared';
+import { getAccessHeaders } from './access';
+import type { VpautoAuthSession } from './access';
+import { getApiBaseUrl } from './config';
 
-const API_URL = DEFAULT_API_URL;
+const API_URL = getApiBaseUrl();
 
 type ApiRequestResult<T> = {
   data: T | null;
@@ -187,6 +189,10 @@ async function requestViaBackgroundMessage<T>(
 async function requestDetailed<T>(path: string, options?: RequestInit): Promise<ApiRequestResult<T>> {
   try {
     let json: ApiResponse<T>;
+    const headers = {
+      'Content-Type': 'application/json',
+      ...await getAccessHeaders(),
+    };
 
     if (isContentScript) {
       const bodyLen = options?.body ? String(options.body).length : 0;
@@ -197,8 +203,9 @@ async function requestDetailed<T>(path: string, options?: RequestInit): Promise<
         path,
         options: options ? {
           method: options.method,
+          headers,
           body: options.body,
-        } : undefined,
+        } : { headers },
       }, 15000);
 
       if (response.error) {
@@ -208,8 +215,9 @@ async function requestDetailed<T>(path: string, options?: RequestInit): Promise<
           path,
           options: options ? {
             method: options.method,
+            headers,
             body: options.body,
-          } : undefined,
+          } : { headers },
         }, 15000);
       }
 
@@ -227,7 +235,7 @@ async function requestDetailed<T>(path: string, options?: RequestInit): Promise<
     } else {
       // Direct fetch from extension pages (side panel, popup)
       const res = await fetch(`${API_URL}${path}`, {
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         ...options,
       });
       if (!res.ok) {
@@ -450,6 +458,17 @@ export const api = {
 
   healthCheck() {
     return request<{ status: string }>('/api/health');
+  },
+
+  getMe() {
+    return request<import('@vpauto/shared').VpautoAccessProfile>('/api/me');
+  },
+
+  login(email: string, password: string) {
+    return requestDetailed<VpautoAuthSession>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    });
   },
 
   /**

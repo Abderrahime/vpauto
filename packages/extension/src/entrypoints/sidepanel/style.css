@@ -1875,6 +1875,32 @@ a:hover { text-decoration: underline; }
   font-size: 11px;
   color: var(--ink);
 }
+.auth-form,
+.auth-panel {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px dotted var(--line);
+}
+.auth-account {
+  display: grid;
+  gap: 2px;
+  font-size: 12px;
+}
+.auth-account span {
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.auth-feedback {
+  margin: -4px 0 12px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.auth-feedback--ok { color: var(--good); }
+.auth-feedback--error { color: var(--bad); }
 .swatches { display: flex; gap: 4px; }
 .sw {
   width: 18px; height: 18px;

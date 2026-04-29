@@ -1,7 +1,18 @@
 import { browser } from 'wxt/browser';
 import type { MatchResult, VehicleBadge, VehicleHistory, VehicleSnapshot } from '@vpauto/shared';
-import { buildPriceHistory, computeEvolution, DEFAULT_API_URL } from '@vpauto/shared';
+import type { VpautoAccessProfile, VpautoPermission } from '@vpauto/shared';
+import { buildPriceHistory, computeEvolution } from '@vpauto/shared';
 import { api } from '../../lib/api';
+import {
+  canAccess,
+  clearAuthSession,
+  getAccessHeaders,
+  getAuthSession,
+  getExtensionAccess,
+  setAuthSession,
+} from '../../lib/access';
+import type { VpautoAuthSession } from '../../lib/access';
+import { getApiBaseUrl } from '../../lib/config';
 import type { CaptureCandidate, CaptureTimelineEntry } from '../../lib/api';
 import { scrapeRemotePage, scrapeVehicleDetailFromHtml } from '../../lib/scraper';
 import './style.css';
@@ -315,6 +326,21 @@ const dateFormatter = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium' });
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let countdownTimer: ReturnType<typeof setInterval> | null = null;
 let showDebug = false;
+let activeAccess: VpautoAccessProfile = {
+  role: 'owner',
+  permissions: [
+    'vehicles:read',
+    'vehicles:write',
+    'vehicles:import',
+    'captures:plan',
+    'captures:run',
+    'auction:summary',
+    'debug:view',
+    'watchlist:write',
+  ],
+};
+let activeAuthSession: VpautoAuthSession | null = null;
+let authFeedback: { tone: 'ok' | 'error'; text: string } | null = null;
 let hasRenderedOnce = false;
 let isRefreshing = false;
 let pendingRefresh = false;
@@ -346,6 +372,10 @@ let importChangeQuery = '';
 let importChangeFilter: ImportChangeFilter = 'all';
 let importChangePage = 1;
 
+function hasAccess(permission: VpautoPermission): boolean {
+  return canAccess(activeAccess, permission);
+}
+
 /**
  * Module-level orchestrator state for the post-import capture run. Exists for
  * the lifetime of the side panel — survives storage events but NOT a panel
@@ -371,7 +401,15 @@ void refreshPanel();
 
 browser.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local') return;
-  if (!changes.currentVehicle && !changes.currentVehicleList && !changes.scrapeDebug && !changes.batchTrackingResult && !changes.vehicleVisits) return;
+  if (
+    !changes.currentVehicle
+    && !changes.currentVehicleList
+    && !changes.scrapeDebug
+    && !changes.batchTrackingResult
+    && !changes.vehicleVisits
+    && !changes.vpautoExtensionRole
+    && !changes.vpautoAuthSession
+  ) return;
 
   scheduleRefresh();
 });
@@ -396,7 +434,9 @@ async function syncCurrentVehicleFromPanel(
   }
 
   const snapshot = currentVehicle.snapshot;
-  const saveResult = await api.saveSnapshotDetailed(snapshot);
+  const saveResult = hasAccess('vehicles:write')
+    ? await api.saveSnapshotDetailed(snapshot)
+    : { data: null, error: `read_only:${activeAccess.role}` };
 
   if (saveResult.data?.vehicleId) {
     const nextState: CurrentVehicleState = {
@@ -1062,6 +1102,33 @@ async function importVehicleSilently(target: ImportTarget): Promise<{
 }
 
 async function runSilentImport(state: StoredPanelState): Promise<void> {
+  if (!hasAccess('vehicles:import')) {
+    importJob = {
+      status: 'error',
+      scope: importOptions.scope,
+      mode: importOptions.mode,
+      total: 0,
+      processed: 0,
+      saved: 0,
+      duplicates: 0,
+      failed: 0,
+      newVehicles: 0,
+      updated: 0,
+      unchanged: 0,
+      priceUps: 0,
+      priceDowns: 0,
+      statusChanges: 0,
+      currentLabel: undefined,
+      lastMessage: 'Import reserve au role admin.',
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      errors: [`Role actif: ${activeAccess.role}`],
+      changes: [],
+    };
+    scheduleRefresh(0);
+    return;
+  }
+
   if (importJob && (importJob.status === 'preparing' || importJob.status === 'running')) {
     return;
   }
@@ -1352,9 +1419,9 @@ async function captureAndUploadFromPanel(payload: {
   const controller = new AbortController();
   const uploadTimer = window.setTimeout(() => controller.abort(), 15000);
   try {
-    const res = await fetch(`${DEFAULT_API_URL}/api/vehicles/screenshot/${payload.snapshotId}`, {
+    const res = await fetch(`${getApiBaseUrl()}/api/vehicles/screenshot/${payload.snapshotId}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...await getAccessHeaders() },
       body: JSON.stringify({ image: dataUrl }),
       signal: controller.signal,
     });
@@ -1375,6 +1442,28 @@ async function captureAndUploadFromPanel(payload: {
 }
 
 async function planAndStartCapture(state: StoredPanelState, bucket: CaptureBucket): Promise<void> {
+  if (!hasAccess('captures:run')) {
+    captureJob = {
+      status: 'error',
+      bucket,
+      total: 0,
+      processed: 0,
+      succeeded: 0,
+      failed: 0,
+      errors: [`Role actif: ${activeAccess.role}`],
+      currentLabel: undefined,
+      lastMessage: 'Capture reservee au role admin.',
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      candidates: [],
+      cursorIndex: 0,
+      abortRequested: false,
+      pauseRequested: false,
+    };
+    scheduleRefresh(0);
+    return;
+  }
+
   if (captureJob && (captureJob.status === 'planning' || captureJob.status === 'running')) {
     return;
   }
@@ -1692,10 +1781,18 @@ async function refreshPanel(): Promise<void> {
   }
 
   try {
-    const [storage, health] = await Promise.all([
+    const [storage, health, access, authSession] = await Promise.all([
       browser.storage.local.get(['currentVehicle', 'currentVehicleList', 'scrapeDebug', 'batchTrackingResult', 'backgroundDebug', 'vehicleVisits', 'vpauto404Hashes']),
       api.healthCheck(),
+      getExtensionAccess(),
+      getAuthSession(),
     ]);
+
+    activeAccess = access;
+    activeAuthSession = authSession;
+    if (!hasAccess('debug:view') && showDebug) {
+      showDebug = false;
+    }
 
     const state = storage as StoredPanelState;
     const isApiOnline = health !== null;
@@ -2015,6 +2112,38 @@ function applySavedUiPrefs(): void {
 
 applySavedUiPrefs();
 
+async function handleAuthLogin(form: HTMLFormElement): Promise<void> {
+  const email = form.querySelector<HTMLInputElement>('[data-auth-email]')?.value.trim() || '';
+  const password = form.querySelector<HTMLInputElement>('[data-auth-password]')?.value || '';
+  if (!email || !password) {
+    authFeedback = { tone: 'error', text: 'Email et mot de passe requis.' };
+    scheduleRefresh(0);
+    return;
+  }
+
+  authFeedback = null;
+  const result = await api.login(email, password);
+  if (!result.data) {
+    authFeedback = { tone: 'error', text: 'Connexion refusee.' };
+    scheduleRefresh(0);
+    return;
+  }
+
+  await setAuthSession(result.data);
+  activeAuthSession = result.data;
+  activeAccess = result.data.access;
+  authFeedback = { tone: 'ok', text: 'Connecte.' };
+  scheduleRefresh(0);
+}
+
+async function handleAuthLogout(): Promise<void> {
+  await clearAuthSession();
+  activeAuthSession = null;
+  activeAccess = await getExtensionAccess();
+  authFeedback = { tone: 'ok', text: 'Deconnecte.' };
+  scheduleRefresh(0);
+}
+
 function bindActions(state: StoredPanelState): void {
   // Refresh and Open-source buttons can appear twice (header icon + footer button);
   // bind every match so either triggers the action.
@@ -2031,6 +2160,7 @@ function bindActions(state: StoredPanelState): void {
 
   document.querySelector<HTMLButtonElement>('[data-action="toggle-debug"]')
     ?.addEventListener('click', () => {
+      if (!hasAccess('debug:view')) return;
       showDebug = !showDebug;
       void refreshPanel();
     });
@@ -2043,6 +2173,15 @@ function bindActions(state: StoredPanelState): void {
 
   bindTweaksPanel();
   startTickerCountdown();
+
+  document.querySelector<HTMLFormElement>('[data-auth-login]')
+    ?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      void handleAuthLogin(event.currentTarget as HTMLFormElement);
+    });
+
+  document.querySelector<HTMLButtonElement>('[data-action="auth-logout"]')
+    ?.addEventListener('click', () => void handleAuthLogout());
 
   document.querySelector<HTMLSelectElement>('[data-import-scope]')
     ?.addEventListener('change', (event) => {
@@ -2079,7 +2218,10 @@ function bindActions(state: StoredPanelState): void {
     });
 
   document.querySelector<HTMLButtonElement>('[data-action="start-import"]')
-    ?.addEventListener('click', () => void runSilentImport(state));
+    ?.addEventListener('click', () => {
+      if (!hasAccess('vehicles:import')) return;
+      void runSilentImport(state);
+    });
 
   document.querySelector<HTMLButtonElement>('[data-action="cancel-import"]')
     ?.addEventListener('click', () => cancelImportJob());
@@ -2138,6 +2280,7 @@ function bindActions(state: StoredPanelState): void {
   // Capture orchestrator buttons.
   document.querySelectorAll<HTMLButtonElement>('[data-action="capture-bucket"]').forEach((btn) => {
     btn.addEventListener('click', () => {
+      if (!hasAccess('captures:run')) return;
       const bucket = btn.dataset.captureBucket as CaptureBucket | undefined;
       if (!bucket) return;
       void planAndStartCapture(state, bucket);
@@ -2346,7 +2489,7 @@ function renderVehicleState(input: {
         ${renderCaptureTimelineSection(captureTimeline)}
         ${renderHistorySection(enrichedHistory, vehicleId, snapshot)}
         ${renderPriceChart(enrichedHistory)}
-        ${showDebug ? renderDebugCard(isApiOnline, input.currentVehicleList, scrapeDebug, input.backgroundDebug) : ''}
+        ${hasAccess('debug:view') && showDebug ? renderDebugCard(isApiOnline, input.currentVehicleList, scrapeDebug, input.backgroundDebug) : ''}
         ${renderGamificationSection(gamification)}
         ${renderUpdatedLine(updatedAt, isApiOnline)}
       </div>
@@ -2365,6 +2508,10 @@ function renderListState(state: StoredPanelState, isApiOnline: boolean): string 
   const debug = state.scrapeDebug;
 
   const hasVehicles = list && list.length > 0;
+  const canSeeAuctionTools = hasAccess('auction:summary');
+  const canImport = hasAccess('vehicles:import');
+  const canCapture = hasAccess('captures:run');
+  const canDebug = hasAccess('debug:view');
   const hasCaptureContext = Boolean(
     tracking || (importJob?.status === 'done' && importJob.processed > 0),
   );
@@ -2375,13 +2522,15 @@ function renderListState(state: StoredPanelState, isApiOnline: boolean): string 
     <div class="panel">
       ${renderHeader(isApiOnline, gamification)}
       <div class="panel-scroll">
-        ${hasVehicles ? renderAuctionSummary(list) : ''}
-        ${tracking ? renderTrackingAlerts(tracking) : ''}
-        ${hasVehicles ? renderTrackingSummary(tracking) : ''}
-        ${hasVehicles && hasCaptureContext ? renderCaptureBar(state) : ''}
-        ${hasVehicles ? renderImportSection(state, isApiOnline) : ''}
-        ${hasVehicles ? renderVehicleList(list) : renderEmptyState(isApiOnline)}
-        ${showDebug ? renderDebugCard(isApiOnline, list, debug, state.backgroundDebug) : ''}
+        ${hasVehicles && canSeeAuctionTools ? renderAuctionSummary(list) : ''}
+        ${tracking && canSeeAuctionTools ? renderTrackingAlerts(tracking) : ''}
+        ${hasVehicles && canSeeAuctionTools ? renderTrackingSummary(tracking) : ''}
+        ${hasVehicles && canCapture && hasCaptureContext ? renderCaptureBar(state) : ''}
+        ${hasVehicles && canImport ? renderImportSection(state, isApiOnline) : ''}
+        ${hasVehicles
+          ? (canSeeAuctionTools ? renderVehicleList(list) : renderUserListNotice(isApiOnline))
+          : renderEmptyState(isApiOnline)}
+        ${canDebug && showDebug ? renderDebugCard(isApiOnline, list, debug, state.backgroundDebug) : ''}
         ${renderUpdatedLine(updatedAt, isApiOnline)}
       </div>
       ${renderActionsBar(false)}
@@ -2393,7 +2542,10 @@ function renderListState(state: StoredPanelState, isApiOnline: boolean): string 
 // ── Shared Components ────────────────────────────────────────────────────
 
 function renderHeader(isApiOnline: boolean, stats?: Pick<GamificationStats, 'streak' | 'xp'>): string {
-  const statusLabel = isApiOnline ? 'Connecte · v2.4' : 'Hors ligne · mode local';
+  const roleLabel = activeAccess.role === 'owner' || activeAccess.role === 'admin'
+    ? ` · ${activeAccess.role}`
+    : '';
+  const statusLabel = `${isApiOnline ? 'Connecte' : 'Hors ligne'}${roleLabel} · v2.4`;
   const streak = Math.max(1, stats?.streak ?? 1);
   const xp = Math.max(0, stats?.xp ?? 0);
   return `
@@ -3864,6 +4016,17 @@ function renderEmptyState(isApiOnline: boolean): string {
   `;
 }
 
+function renderUserListNotice(isApiOnline: boolean): string {
+  return `
+    <section class="empty-hero">
+      <div class="empty-hero__icon">&#128663;</div>
+      <h2>Liste VPauto</h2>
+      <p>Ouvrez une fiche vehicule pour afficher l'analyse.</p>
+      <p class="empty-hero__status">${isApiOnline ? 'Backend connecte' : 'Backend hors ligne'}</p>
+    </section>
+  `;
+}
+
 function renderImportSection(state: StoredPanelState, isApiOnline: boolean): string {
   const list = state.currentVehicleList || [];
   const listUrl = state.scrapeDebug?.pageType === 'list' ? state.scrapeDebug.url : '';
@@ -4068,6 +4231,12 @@ function renderImportCapturePlanSummary(counts?: CapturePlanCounts): string {
 }
 
 function renderActionsBar(hasSource: boolean): string {
+  const debugButton = hasAccess('debug:view')
+    ? `<button class="btn btn--ghost btn--small" type="button" data-action="toggle-debug" title="Diagnostic">
+        ${showDebug ? 'Masquer' : 'Debug'}
+      </button>`
+    : '';
+
   return `
     <div class="actions-bar">
       <button class="btn btn--primary" type="button" data-action="refresh">
@@ -4078,9 +4247,7 @@ function renderActionsBar(hasSource: boolean): string {
         <span aria-hidden="true">🔗</span>
         Ouvrir
       </button>` : ''}
-      <button class="btn btn--ghost btn--small" type="button" data-action="toggle-debug" title="Diagnostic">
-        ${showDebug ? 'Masquer' : 'Debug'}
-      </button>
+      ${debugButton}
     </div>
   `;
 }
@@ -4098,7 +4265,7 @@ function renderActionsBar(hasSource: boolean): string {
 // from the DB snapshot so the user still sees the full assistant view.
 
 function buildScreenshotUrl(snapshotId: number): string {
-  return `${DEFAULT_API_URL}/api/vehicles/screenshot/${snapshotId}`;
+  return `${getApiBaseUrl()}/api/vehicles/screenshot/${snapshotId}`;
 }
 
 function renderVpauto404Banner(snapshot: VehicleSnapshot, sourceUrl?: string): string {
@@ -4333,15 +4500,53 @@ function formatShortPrice(v: number): string {
 }
 
 /**
- * Floating Tweaks panel — four controls (accent swatch, verdict preview,
- * density, paper mode). The panel is kept in the DOM on every render so
+ * Floating settings panel: account session plus visual preferences. The
+ * panel is kept in the DOM on every render so
  * its open/close state is driven by a single `.on` class toggle; all
  * settings persist via CSS custom properties / data-attributes on the
  * document root.
  */
+function renderAuthPanel(): string {
+  const role = activeAccess.role;
+  const feedback = authFeedback
+    ? `<div class="auth-feedback auth-feedback--${authFeedback.tone}">${esc(authFeedback.text)}</div>`
+    : '';
+
+  if (activeAuthSession?.email) {
+    return `
+      <h3>Compte</h3>
+      <div class="auth-panel">
+        <div class="auth-account">
+          <strong>${esc(activeAuthSession.email)}</strong>
+          <span>${esc(role)}</span>
+        </div>
+        <button class="btn btn--ghost btn--small" type="button" data-action="auth-logout">Deconnexion</button>
+      </div>
+      ${feedback}
+    `;
+  }
+
+  return `
+    <h3>Compte</h3>
+    <form class="auth-form" data-auth-login>
+      <label class="field">
+        <span class="field__label">Email</span>
+        <input class="field__control" type="email" autocomplete="username" data-auth-email>
+      </label>
+      <label class="field">
+        <span class="field__label">Mot de passe</span>
+        <input class="field__control" type="password" autocomplete="current-password" data-auth-password>
+      </label>
+      <button class="btn btn--primary btn--small" type="submit">Connexion</button>
+    </form>
+    ${feedback}
+  `;
+}
+
 function renderTweaksPanel(): string {
   return `
     <div class="tweaks" id="tweaks" role="dialog" aria-label="Tweaks">
+      ${renderAuthPanel()}
       <h3>Apparence</h3>
       <div class="tweak">
         <span>Accent</span>

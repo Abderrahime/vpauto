@@ -14,6 +14,7 @@ import {
   truncateAfterFinalSale,
 } from '../history.js';
 import { findExactVehicle, findMatches } from '../matching.js';
+import { requirePermission } from '../auth.js';
 import {
   isSpuriousStartingPrice,
   parsePhotoUrls,
@@ -33,16 +34,16 @@ import type {
 
 const app = new Hono();
 
-// Screenshots are stored on disk to keep the SQLite DB lean.
-// Resolved relative to this source file so the same path works in both
-// `tsx watch src/index.ts` (dev) and `node dist/...` (build).
-const SCREENSHOT_DIR = path.resolve(
+// Screenshots are stored on disk to keep the SQLite DB lean. In production,
+// set VPAUTO_SCREENSHOT_DIR to a persistent path outside the build directory.
+const DEFAULT_SCREENSHOT_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
   '..',
   'data',
   'screenshots',
 );
+const SCREENSHOT_DIR = path.resolve(process.env.VPAUTO_SCREENSHOT_DIR || DEFAULT_SCREENSHOT_DIR);
 // 5 MB hard cap on a single screenshot upload — at JPEG q75, a viewport
 // shot of vpauto.fr is typically 200-400 KB, so 5 MB leaves a wide
 // safety margin while preventing accidental abuse.
@@ -502,7 +503,7 @@ const snapshotSchema = z.object({
   soldPrice: z.number().optional(),
 });
 
-app.post('/snapshot', async (c) => {
+app.post('/snapshot', requirePermission('vehicles:write'), async (c) => {
   let body: unknown;
   try {
     body = await c.req.json();
@@ -671,7 +672,7 @@ app.get('/history/:vehicleId', async (c) => {
 // ── Screenshot upload (extension scrapes a fresh hashId, captures the
 //    visible tab, posts the JPEG here so the local fiche historique can
 //    show a fallback hero image if VPauto later 404s the listing) ──
-app.post('/screenshot/:snapshotId', async (c) => {
+app.post('/screenshot/:snapshotId', requirePermission('captures:run'), async (c) => {
   const snapshotId = parseInt(c.req.param('snapshotId'));
   if (!Number.isFinite(snapshotId)) {
     return c.json<ApiResponse<null>>({ success: false, error: 'Invalid snapshotId' }, 400);
@@ -820,7 +821,7 @@ function describeModifiedReason(
   return parts.join(' · ') || 'Modifié';
 }
 
-app.post('/capture/plan', async (c) => {
+app.post('/capture/plan', requirePermission('captures:plan'), async (c) => {
   let body: unknown;
   try {
     body = await c.req.json();
@@ -1222,7 +1223,7 @@ const listItemSchema = z.object({
   photoUrls: z.array(z.string()).default([]),
 });
 
-app.post('/batch-snapshot', async (c) => {
+app.post('/batch-snapshot', requirePermission('vehicles:import'), async (c) => {
   let body: { vehicles: unknown[] };
   try {
     body = await c.req.json() as { vehicles: unknown[] };
@@ -1691,7 +1692,7 @@ app.get('/similar-sold', async (c) => {
 });
 
 // ── Stats ──
-app.get('/stats', async (c) => {
+app.get('/stats', requirePermission('auction:summary'), async (c) => {
   const totalVehicles = await prisma.vehicle.count();
   const totalSnapshots = await prisma.snapshot.count();
   const cities = await prisma.snapshot.groupBy({
