@@ -11,6 +11,7 @@ import type { VpautoAuthSession } from './access';
 import { getApiBaseUrl } from './config';
 
 const API_URL = getApiBaseUrl();
+const DIRECT_FETCH_TIMEOUT_MS = 15000;
 
 type ApiRequestResult<T> = {
   data: T | null;
@@ -79,6 +80,31 @@ const isContentScript = typeof window !== 'undefined'
   && typeof location !== 'undefined'
   && !location.protocol.startsWith('chrome-extension')
   && !location.protocol.startsWith('moz-extension');
+
+function mergeHeaders(base: Record<string, string>, extra?: HeadersInit): HeadersInit {
+  const headers = new Headers(base);
+  if (extra) {
+    new Headers(extra).forEach((value, key) => headers.set(key, value));
+  }
+  return headers;
+}
+
+async function fetchWithTimeout(url: string, options: RequestInit): Promise<Response> {
+  if (options.signal) {
+    return fetch(url, options);
+  }
+
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), DIRECT_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    globalThis.clearTimeout(timeout);
+  }
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T | null> {
   const result = await requestDetailed<T>(path, options);
@@ -234,9 +260,9 @@ async function requestDetailed<T>(path: string, options?: RequestInit): Promise<
       json = response.data!;
     } else {
       // Direct fetch from extension pages (side panel, popup)
-      const res = await fetch(`${API_URL}${path}`, {
-        headers,
+      const res = await fetchWithTimeout(`${API_URL}${path}`, {
         ...options,
+        headers: mergeHeaders(headers, options?.headers),
       });
       if (!res.ok) {
         const text = await res.text().catch(() => '');
@@ -252,6 +278,10 @@ async function requestDetailed<T>(path: string, options?: RequestInit): Promise<
     }
     return { data: json.data ?? null, error: null };
   } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      console.warn(`[VPauto API] ${path}: timeout after ${DIRECT_FETCH_TIMEOUT_MS}ms`);
+      return { data: null, error: 'api_timeout' };
+    }
     console.error(`[VPauto API] ${path}: EXCEPTION:`, err);
     return { data: null, error: err instanceof Error ? err.message : String(err) };
   }

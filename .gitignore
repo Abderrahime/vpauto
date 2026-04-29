@@ -2,6 +2,7 @@ node_modules/
 dist/
 .output/
 .output-admin/
+.output-admin-prod/
 .output-user/
 .output-user-local/
 *.db
