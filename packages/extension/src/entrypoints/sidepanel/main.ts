@@ -1053,6 +1053,31 @@ function cancelImportJob(): void {
   scheduleRefresh(0);
 }
 
+async function checkBackendPermission(permission: VpautoPermission): Promise<{
+  ok: boolean;
+  access: VpautoAccessProfile | null;
+  error: string | null;
+}> {
+  const backendAccess = await api.getMe().catch(() => null);
+  if (!backendAccess) {
+    return {
+      ok: false,
+      access: null,
+      error: 'Backend inaccessible ou session invalide.',
+    };
+  }
+
+  if (!canAccess(backendAccess, permission)) {
+    return {
+      ok: false,
+      access: backendAccess,
+      error: `Backend refuse ${permission} pour le role ${backendAccess.role}. Connecte-toi avec un compte admin.`,
+    };
+  }
+
+  return { ok: true, access: backendAccess, error: null };
+}
+
 async function importVehicleSilently(target: ImportTarget): Promise<{
   ok: boolean;
   duplicate: boolean;
@@ -1141,6 +1166,38 @@ async function runSilentImport(state: StoredPanelState): Promise<void> {
       startedAt: new Date().toISOString(),
       finishedAt: new Date().toISOString(),
       errors: [`Role actif: ${activeAccess.role}`],
+      changes: [],
+    };
+    scheduleRefresh(0);
+    return;
+  }
+
+  const backendPermission = await checkBackendPermission('vehicles:import');
+  if (!backendPermission.ok) {
+    importJob = {
+      status: 'error',
+      scope: importOptions.scope,
+      mode: importOptions.mode,
+      total: 0,
+      processed: 0,
+      saved: 0,
+      duplicates: 0,
+      failed: 0,
+      newVehicles: 0,
+      updated: 0,
+      unchanged: 0,
+      priceUps: 0,
+      priceDowns: 0,
+      statusChanges: 0,
+      currentLabel: undefined,
+      lastMessage: 'Connexion admin requise.',
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      errors: [
+        backendPermission.error || 'Permission backend refusee.',
+        `Role extension: ${activeAccess.role}`,
+        `Role backend: ${backendPermission.access?.role || 'inconnu'}`,
+      ],
       changes: [],
     };
     scheduleRefresh(0);
@@ -2560,10 +2617,7 @@ function renderListState(state: StoredPanelState, isApiOnline: boolean): string 
 // ── Shared Components ────────────────────────────────────────────────────
 
 function renderHeader(isApiOnline: boolean, stats?: Pick<GamificationStats, 'streak' | 'xp'>): string {
-  const roleLabel = activeAccess.role === 'owner' || activeAccess.role === 'admin'
-    ? ` · ${activeAccess.role}`
-    : '';
-  const statusLabel = `${isApiOnline ? 'Connecte' : 'Hors ligne'}${roleLabel} · v2.4`;
+  const statusLabel = `${isApiOnline ? 'Connecte' : 'Hors ligne'} · ${activeAccess.role} · v2.4`;
   const streak = Math.max(1, stats?.streak ?? 1);
   const xp = Math.max(0, stats?.xp ?? 0);
   return `
