@@ -29,7 +29,7 @@ export default defineConfig({
   publicDir: 'public',
   outDir: outputDir,
   manifest: {
-    name: isAdminBuild ? 'VPauto Assistant Admin' : 'VPauto Assistant',
+    name: isAdminBuild ? 'VPauto Assistant Admin' : 'VPauto Assistant User',
     description: isAdminBuild
       ? 'Assistant interne VPauto - import, capture et enrichissement de donnees'
       : 'Assistant d\'analyse pour les encheres VPauto - historique, comparaison et alertes vehicules',
