@@ -2559,7 +2559,7 @@ function renderVehicleState(input: {
         ${renderBadgesSection(badges)}
         ${renderCrossAuction(crossAuction, snapshot, vpauto404Hashes)}
         ${renderSimilarInAuction(similarInAuction, snapshot, currentList.length)}
-        ${renderSimilarElsewhere(similarAvailable, snapshot)}
+        ${renderSimilarElsewhere(similarAvailable, snapshot, currentList)}
         ${renderSimilarSold(similarSold, snapshot)}
         ${renderCaptureTimelineSection(captureTimeline)}
         ${renderHistorySection(enrichedHistory, vehicleId, snapshot)}
@@ -2950,8 +2950,25 @@ function renderCaptureTimelineSection(captures: CaptureTimelineEntry[] | null | 
     `;
   }
 
-  const items = captures.slice().reverse().map((c) => {
-    const dateLabel = c.saleDate ? formatDate(c.saleDate) : formatDate(c.scrapedAt.slice(0, 10));
+  // Sort by `scrapedAt` DESC explicitly (latest capture first). The backend
+  // already returns captures ordered by `scrapedAt` ASC, but we want the most
+  // recent capture at the top of the timeline so the user sees their newest
+  // archive first.
+  const sortedCaptures = captures.slice().sort((a, b) => {
+    const ta = new Date(a.scrapedAt).getTime();
+    const tb = new Date(b.scrapedAt).getTime();
+    return tb - ta;
+  });
+
+  const items = sortedCaptures.map((c) => {
+    // Two distinct moments matter to the user:
+    //   - `scrapedAt`: when WE archived this fiche (the actual capture moment)
+    //   - `saleDate`:  when the auction was scheduled to take place
+    // The previous version only displayed saleDate, which made it impossible
+    // to tell when the screenshot was taken — surface scrapedAt prominently
+    // and keep saleDate as secondary context.
+    const captureLabel = formatDateTime(c.scrapedAt);
+    const saleLabel = c.saleDate ? formatDate(c.saleDate) : null;
     const statusChip = c.status === 'sold'
       ? '<span class="chip chip--green" style="font-size:9px;padding:2px 6px;">Vendu</span>'
       : c.status === 'unsold'
@@ -2982,9 +2999,10 @@ function renderCaptureTimelineSection(captures: CaptureTimelineEntry[] | null | 
         </button>
         <div class="capture-timeline__meta">
           <div class="capture-timeline__head">
-            <strong>${esc(dateLabel)}</strong>
+            <strong>Capturee le ${esc(captureLabel)}</strong>
             ${statusChip}
           </div>
+          ${saleLabel ? `<div class="capture-timeline__sale-date">Vente : ${esc(saleLabel)}</div>` : ''}
           <div class="capture-timeline__city">${esc(c.city || 'Ville inconnue')}</div>
           ${priceLine ? `<div class="capture-timeline__price">${esc(priceLine)}</div>` : ''}
           <div class="capture-timeline__reason">${esc(c.reason)}</div>
@@ -3035,25 +3053,41 @@ function renderHistorySection(history: VehicleHistory | null, vehicleId: number 
             openMode: p.openMode,
             openReason: p.openReason,
           }];
-      const eventRows = events.map((event, index) => `
-        <div class="timeline-event ${index === events.length - 1 ? 'timeline-event--latest' : ''}">
-          <div class="timeline-event__head">
-            <span class="timeline-event__moment">${esc(formatPassageMoment(event))}</span>
-            <span class="chip chip--${historyStatusTone(event.status)}">${esc(formatStatus(event.status))}</span>
+      // Within a passage, sort events by scrapedAt DESC so the most recent
+      // observation is on top — the user wants to read the timeline as
+      // "what's the latest state we have on this auction" first.
+      const sortedEvents = events.slice().sort((a, b) => {
+        const ta = a.scrapedAt ? new Date(a.scrapedAt).getTime() : 0;
+        const tb = b.scrapedAt ? new Date(b.scrapedAt).getTime() : 0;
+        return tb - ta;
+      });
+      const eventRows = sortedEvents.map((event, index) => {
+        // `scrapedAt` is the real "when did we observe this state" timestamp.
+        // `saleDate`/`saleTime` is the auction slot — shown separately so the
+        // user can correlate "I saw the price drop" vs "the auction was at".
+        const scrapedLabel = event.scrapedAt ? formatDateTime(event.scrapedAt) : null;
+        const saleLabel = formatPassageMoment({ saleDate: event.saleDate, saleTime: event.saleTime });
+        return `
+          <div class="timeline-event ${index === 0 ? 'timeline-event--latest' : ''}">
+            <div class="timeline-event__head">
+              <span class="timeline-event__moment">${scrapedLabel ? `Saisi le ${esc(scrapedLabel)}` : esc(saleLabel)}</span>
+              <span class="chip chip--${historyStatusTone(event.status)}">${esc(formatStatus(event.status))}</span>
+            </div>
+            ${scrapedLabel && saleLabel && saleLabel !== 'Date inconnue' ? `<div class="timeline-event__sale-date">Vente : ${esc(saleLabel)}</div>` : ''}
+            <div class="timeline-event__meta">
+              MAP observee: ${formatPrice(event.startingPrice ?? undefined)}${event.soldPrice ? ` · Adjuge: ${formatPrice(event.soldPrice)}` : ''}${event.mileage ? ` · ${formatDistance(event.mileage)}` : ''}
+            </div>
+            <div class="timeline-event__actions">
+              ${renderHistoryOpenButton({
+                snapshotId: event.snapshotId,
+                sourceUrl: event.sourceUrl,
+                openMode: event.openMode,
+              })}
+              <span class="timeline-event__reason">${esc(formatHistoryOpenReason(event.openReason, event.openMode))}</span>
+            </div>
           </div>
-          <div class="timeline-event__meta">
-            MAP observee: ${formatPrice(event.startingPrice ?? undefined)}${event.soldPrice ? ` · Adjuge: ${formatPrice(event.soldPrice)}` : ''}${event.mileage ? ` · ${formatDistance(event.mileage)}` : ''}
-          </div>
-          <div class="timeline-event__actions">
-            ${renderHistoryOpenButton({
-              snapshotId: event.snapshotId,
-              sourceUrl: event.sourceUrl,
-              openMode: event.openMode,
-            })}
-            <span class="timeline-event__reason">${esc(formatHistoryOpenReason(event.openReason, event.openMode))}</span>
-          </div>
-        </div>
-      `).join('');
+        `;
+      }).join('');
       return `
         <div class="timeline-item ${isCurrent ? 'timeline-item--current' : ''}">
           <div class="timeline-dot"></div>
@@ -3421,7 +3455,11 @@ function renderSimilarInAuction(vehicles: Partial<VehicleSnapshot>[], current: V
   `;
 }
 
-function renderSimilarElsewhere(matches: MatchResult[] | null | undefined, current: VehicleSnapshot): string {
+function renderSimilarElsewhere(
+  matches: MatchResult[] | null | undefined,
+  current: VehicleSnapshot,
+  currentAuctionList: Partial<VehicleSnapshot>[] = [],
+): string {
   const currentPrice = current.startingPrice || current.soldPrice || null;
   // Defensive same-vehicle dedup. The backend already excludes the current
   // `vehicleId`, but VPauto creates a NEW hashId every time it re-lists a car
@@ -3448,19 +3486,25 @@ function renderSimilarElsewhere(matches: MatchResult[] | null | undefined, curre
     const kmClose = Math.abs((snap.mileage || 0) - (current.mileage || 0)) <= 500;
     return brandMatch && modelMatch && yearMatch && kmClose;
   };
-  // Same-city filter — case-insensitive. The detail-page scraper Title-Cases
-  // the city ("LILLE" → "Lille") while the list-page scraper preserves the
-  // original UPPERCASE, so a strict !== comparison lets same-city dupes leak.
-  const normalizeCity = (city: string | undefined | null): string =>
-    (city || '').toUpperCase().trim();
-  const currentCity = normalizeCity(current.city);
+  // "Ailleurs" was historically defined as "different city from the current
+  // vehicle". That filter was asymmetric: A and C in LORIENT both got hidden
+  // from each other, but B in ROUEN saw both. The user perceived (correctly)
+  // that the relation was broken — if I'm looking at A I should still see C
+  // even when they share a city, because they belong to two different sale
+  // events.
+  //
+  // The right semantic is "not in the same auction batch". Vehicles in the
+  // current auction list are already shown in `renderSimilarInAuction` above,
+  // so we just exclude any candidate whose hashId is in `currentAuctionList`
+  // — anything else (same city OR different city, different sale event) is
+  // legitimate competition and shows up here.
+  const auctionHashIds = new Set(
+    currentAuctionList.map((v) => v.hashId).filter(Boolean) as string[],
+  );
   const filtered = (matches || [])
     .filter((match) => match.level !== 'exact')
     .filter((match) => !sameVehicle(match.snapshot))
-    .filter((match) => {
-      const candCity = normalizeCity(match.snapshot.city);
-      return Boolean(candCity) && candCity !== currentCity;
-    })
+    .filter((match) => !match.snapshot.hashId || !auctionHashIds.has(match.snapshot.hashId))
     .filter((match) => ['available', 'auction_live', 'unsold'].includes(match.snapshot.status))
     .sort((a, b) => {
       const levelScore = (m: MatchResult) => m.level === 'same_model' ? 2 : 1;
@@ -4016,6 +4060,13 @@ function renderVehicleList(list: Partial<VehicleSnapshot>[]): string {
   const unsoldCount = list.filter(v => v.status === 'unsold').length;
   const availableCount = list.length - soldCount - unsoldCount;
   const nonRoulantCount = list.filter(v => isNonRoulant(v)).length;
+  // Tristate: only count vehicles whose CT signal is explicitly known.
+  // `undefined` (badge not detected) is excluded so the displayed totals
+  // never silently inflate "CT manquants" with cards we just couldn't
+  // parse — the absent count tells the user "we know about X, we're
+  // unsure about the rest".
+  const ctMissingCount = list.filter(v => v.ctAvailable === false).length;
+  const ctOkCount = list.filter(v => v.ctAvailable === true).length;
 
   const items = displayed.map(v => {
     const name = [v.brand, v.model].filter(Boolean).join(' ') || 'Vehicule';
@@ -4031,6 +4082,15 @@ function renderVehicleList(list: Partial<VehicleSnapshot>[]): string {
     const nonRoulant = isNonRoulant(v);
     const statusClass = isSold ? ' vehicle-card--sold' : isUnsold ? ' vehicle-card--unsold' : '';
     const nrClass = nonRoulant ? ' vehicle-card--nr' : '';
+
+    // Same colour vocabulary as VPauto's own list page so the user gets
+    // an instant visual match: red pill for missing CT, green pill for
+    // available, no pill at all when we couldn't tell.
+    const ctChip = v.ctAvailable === false
+      ? '<span class="vehicle-card__ct vehicle-card__ct--missing" title="Contrôle Technique indisponible sur VPauto">CT indispo</span>'
+      : v.ctAvailable === true
+      ? '<span class="vehicle-card__ct vehicle-card__ct--ok" title="Contrôle Technique disponible sur VPauto">CT OK</span>'
+      : '';
 
     // Live bid ("Enchère en cours") is displayed distinctly from the MAP.
     // When an auction is currently running, VPauto's list card shows the
@@ -4052,6 +4112,7 @@ function renderVehicleList(list: Partial<VehicleSnapshot>[]): string {
         <div class="vehicle-card__info">
           <div class="vehicle-card__name">${esc(name)}${nonRoulant ? ' <span class="badge-nr">NR</span>' : ''}</div>
           <div class="vehicle-card__meta">${esc(meta.join(' \u2022 '))}</div>
+          ${ctChip}
         </div>
         <div class="vehicle-card__pricing">${priceDisplay}</div>
       </div>
@@ -4065,6 +4126,8 @@ function renderVehicleList(list: Partial<VehicleSnapshot>[]): string {
     soldCount > 0 ? `${soldCount} adjuges` : '',
     unsoldCount > 0 ? `${unsoldCount} invendus` : '',
     nonRoulantCount > 0 ? `${nonRoulantCount} non roulants` : '',
+    ctMissingCount > 0 ? `${ctMissingCount} CT indispo` : '',
+    ctOkCount > 0 && ctMissingCount === 0 ? `${ctOkCount} CT OK` : '',
   ].filter(Boolean).join(' \u2022 ');
 
   return `

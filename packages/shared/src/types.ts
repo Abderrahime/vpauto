@@ -90,6 +90,21 @@ export interface VehicleSnapshot {
    * `/api/vehicles/screenshot/:snapshotId.jpg`.
    */
   hasScreenshot?: boolean;
+
+  /**
+   * Whether VPauto displays a "CT disponible" badge for this vehicle on the
+   * auction list page. Three-valued:
+   *   - `true`  → green "CT disponible" pill seen on the list card
+   *   - `false` → red "CT indisponible" pill seen on the list card
+   *   - `undefined` → badge not detected (older listings, scraper miss,
+   *     or vehicle not yet scraped from a list page)
+   *
+   * Scraped from the auction-list DOM only; the detail page exposes a
+   * richer "CT OK · 04/2026" / "CT · 2 défauts mineurs" label that we
+   * intentionally don't track here yet — the binary signal is enough for
+   * a list-card chip and a "missing CT" auction-summary stat.
+   */
+  ctAvailable?: boolean | null;
 }
 
 export type VehicleStatus = 'available' | 'auction_live' | 'sold' | 'unsold' | 'removed';

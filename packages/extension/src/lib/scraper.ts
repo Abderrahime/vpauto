@@ -646,6 +646,23 @@ export function scrapeVehicleListFromDocument(doc: Document): Partial<VehicleSna
         ? undefined
         : startingPrice;
 
+      // ── Contrôle Technique badge ──
+      // VPauto list cards expose a binary CT pill ("CT disponible" green /
+      // "CT indisponible" red) next to the "Actions" button. The pill is
+      // typically rendered OUTSIDE the `<a>` link wrapper (inside the same
+      // card container, but as a sibling div), so reading from `fullText`
+      // alone misses it. Walk up to the closest plausible card root and
+      // search there. Order matters: check "indisponible" first because
+      // "disponible" is a substring of it.
+      const cardRoot = a.closest('article, li, [class*="card"], [class*="vehicule"], [class*="lot"]') || a.parentElement;
+      const ctSearchText = cardRoot?.textContent || fullText;
+      let ctAvailable: boolean | null | undefined;
+      if (/CT\s+indisponible/i.test(ctSearchText)) {
+        ctAvailable = false;
+      } else if (/CT\s+disponible/i.test(ctSearchText)) {
+        ctAvailable = true;
+      }
+
       const vehicle: Partial<VehicleSnapshot> = {
         hashId, brand, model, version: model,
         year, mileage, city, lotNumber,
@@ -662,6 +679,7 @@ export function scrapeVehicleListFromDocument(doc: Document): Partial<VehicleSna
       if (currentAuctionPrice) vehicle.currentAuctionPrice = currentAuctionPrice;
       if (soldPrice) vehicle.soldPrice = soldPrice;
       if (observations) vehicle.observations = observations;
+      if (ctAvailable !== undefined) vehicle.ctAvailable = ctAvailable;
 
       vehicles.push(vehicle);
     } catch {

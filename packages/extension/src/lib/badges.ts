@@ -141,6 +141,8 @@ async function getOrProbe(hashId: string, detailPageUrl: string): Promise<Vehicl
  */
 export async function injectBadges(vehicles: Partial<VehicleSnapshot>[]): Promise<void> {
   const listItems = document.querySelectorAll('a[href*="/vehicule/"]');
+  const firstListItem = listItems[0];
+  if (firstListItem) ensureDocDesignSwitcher(firstListItem);
 
   for (const item of listItems) {
     const href = (item as HTMLAnchorElement).getAttribute('href') || '';
@@ -274,6 +276,8 @@ function injectBadgeOverlay(card: HTMLElement, badges: VehicleBadge[]): void {
 type DocKind = 'ct' | 'be' | 'se' | 'db' | 'obs' | 'eq' | 'tech';
 type DocButtonState = 'checking' | 'confirmed' | 'missing' | 'fallback';
 type DocButtonVariant = 'badge' | 'menu';
+type DocTone = 'ok' | 'warn' | 'bad' | 'info';
+type DocDesignMode = 'a' | 'b' | 'c';
 
 type DocButtonConfig = {
   kind: DocKind;
@@ -287,9 +291,24 @@ type DocButtonConfig = {
    */
   confirmedText: string | null;
   state: DocButtonState;
+  summary?: string | null;
+  tone?: DocTone;
   /** Detail page URL — used as a fallback "open in new tab" target. */
   detailPageUrl: string;
 };
+
+const DOC_DESIGN_STORAGE_KEY = 'vpautoDocDesignMode';
+
+function getDocDesignMode(): DocDesignMode {
+  const stored = localStorage.getItem(DOC_DESIGN_STORAGE_KEY);
+  return stored === 'b' || stored === 'c' ? stored : 'a';
+}
+
+function setDocDesignMode(mode: DocDesignMode): void {
+  localStorage.setItem(DOC_DESIGN_STORAGE_KEY, mode);
+  document.documentElement.dataset.vpautoDocDesign = mode;
+  updateDocDesignSwitcher(mode);
+}
 
 /** True for kinds whose preview is text extracted from the detail page. */
 function isTextKind(kind: DocKind): boolean {
@@ -311,25 +330,35 @@ function shortDocLabel(kind: DocKind): string {
 
 function docIcon(kind: DocKind): string {
   switch (kind) {
-    case 'ct': return 'CT';
-    case 'be': return 'BE';
-    case 'se': return 'SE';
-    case 'db': return 'BAT';
-    case 'obs': return 'OBS';
-    case 'eq': return 'EQ';
-    case 'tech': return 'CAR';
+    case 'ct': return '🔎';
+    case 'be': return '📄';
+    case 'se': return '🔩';
+    case 'db': return '🔋';
+    case 'obs': return '📋';
+    case 'eq': return '🔧';
+    case 'tech': return '📊';
     default: return shortDocLabel(kind);
   }
 }
 
-function badgeLabelForState(state: DocButtonState): string {
-  switch (state) {
-    case 'confirmed': return 'CT disponible';
+function badgeLabelForState(config: DocButtonConfig): string {
+  switch (config.state) {
+    case 'confirmed': return config.summary || 'CT disponible';
     case 'missing': return 'CT indisponible';
     case 'fallback': return 'Vérifier sur la fiche';
     case 'checking':
     default: return 'Analyse CT…';
   }
+}
+
+function compactCtLabelForState(config: DocButtonConfig): string {
+  if (config.state === 'confirmed') {
+    if (config.summary?.includes('OK')) return 'CT OK';
+    return 'CT';
+  }
+  if (config.state === 'missing') return 'CT';
+  if (config.state === 'fallback') return 'CT';
+  return 'CT';
 }
 
 function menuMetaForState(kind: DocKind, state: DocButtonState): string {
@@ -372,13 +401,17 @@ function renderDocButtonState(button: HTMLButtonElement, config: DocButtonConfig
 
   button.dataset.vpautoState = config.state;
   button.dataset.vpautoCtState = config.state;
+  button.dataset.vpautoTone = config.tone || '';
   button.disabled = isDisabled;
   button.title = buttonTitleForState(config);
   button.setAttribute('aria-disabled', isDisabled ? 'true' : 'false');
 
   if (variant === 'badge') {
     const label = button.querySelector<HTMLElement>('.vpauto-ct-badge__label');
-    if (label) label.textContent = badgeLabelForState(config.state);
+    if (label) {
+      label.textContent = badgeLabelForState(config);
+      label.dataset.vpautoCompactLabel = compactCtLabelForState(config);
+    }
   } else {
     const label = button.querySelector<HTMLElement>('.vpauto-doc-menu-item__label');
     const meta = button.querySelector<HTMLElement>('.vpauto-doc-menu-item__meta');
@@ -393,6 +426,85 @@ function renderDocButtonState(button: HTMLButtonElement, config: DocButtonConfig
   }
 
   syncDocDockSummary(button);
+}
+
+function deriveCtSummary(
+  result: VehicleDocProbeResult,
+  v: Partial<VehicleSnapshot>,
+): { label: string; tone: DocTone } | null {
+  const candidates = [
+    v.observations || '',
+    result.observationsText || '',
+    result.technicalSpecsText || '',
+  ].filter(Boolean).join('\n');
+  const normalized = candidates.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+  const minorMatch = normalized.match(/(\d+)\s+(?:defauts?|defaillances?)\s+mineur/);
+  if (minorMatch) {
+    const count = Number(minorMatch[1]);
+    const plural = count > 1 ? 's' : '';
+    return { label: `CT · ${count} défaut${plural} mineur${plural}`, tone: 'warn' };
+  }
+
+  if (/defaillances?\s+mineures?/.test(normalized)) {
+    return { label: 'CT · défauts mineurs', tone: 'warn' };
+  }
+
+  if (/\bct\s*(?:ok|valide)\b|controle\s+technique\s+(?:ok|valide)/.test(normalized)) {
+    return { label: 'CT OK', tone: 'ok' };
+  }
+
+  return null;
+}
+
+function updateDocDesignSwitcher(mode: DocDesignMode = getDocDesignMode()): void {
+  const switcher = document.querySelector<HTMLElement>('.vpauto-doc-design-switcher');
+  if (!switcher) return;
+
+  switcher.querySelectorAll<HTMLButtonElement>('[data-vpauto-design-option]').forEach((button) => {
+    const active = button.dataset.vpautoDesignOption === mode;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+
+  const label = switcher.querySelector<HTMLElement>('.vpauto-doc-design-switcher__note');
+  if (!label) return;
+  if (mode === 'b') {
+    label.textContent = 'Option B : icônes compactes, plus rapide à scanner';
+  } else if (mode === 'c') {
+    label.textContent = 'Option C : actuel multi-pills, gardé pour comparaison';
+  } else {
+    label.textContent = 'Recommandé : max signal, min bruit';
+  }
+}
+
+function ensureDocDesignSwitcher(anchor: Element): void {
+  document.documentElement.dataset.vpautoDocDesign = getDocDesignMode();
+  if (document.querySelector('.vpauto-doc-design-switcher')) {
+    updateDocDesignSwitcher();
+    return;
+  }
+
+  const list = anchor.closest('ul, ol, section, main') || anchor.parentElement;
+  if (!list?.parentElement) return;
+
+  const switcher = document.createElement('div');
+  switcher.className = 'vpauto-doc-design-switcher';
+  switcher.innerHTML = `
+    <span class="vpauto-doc-design-switcher__title">Comparer les designs :</span>
+    <button type="button" class="vpauto-doc-design-switcher__button" data-vpauto-design-option="a" aria-pressed="false">
+      🏆 Option A — Badge CT + ⋯
+    </button>
+    <button type="button" class="vpauto-doc-design-switcher__button" data-vpauto-design-option="b" aria-pressed="false">
+      Option B — Icônes compactes
+    </button>
+    <button type="button" class="vpauto-doc-design-switcher__button" data-vpauto-design-option="c" aria-pressed="false">
+      Option C — Actuel (multi-pills)
+    </button>
+    <span class="vpauto-doc-design-switcher__note"></span>
+  `;
+  list.parentElement.insertBefore(switcher, list);
+  updateDocDesignSwitcher();
 }
 
 /** Close any open doc popup on other cards (or on this one if not excluded). */
@@ -654,6 +766,9 @@ function addDocumentButtons(
 
     if (result.hasCt && result.ctUrl) {
       ctConfig.confirmedUrl = result.ctUrl;
+      const summary = deriveCtSummary(result, v);
+      ctConfig.summary = summary?.label || null;
+      ctConfig.tone = summary?.tone || 'ok';
       applyConfirmedState(ctButton, ctConfig);
     } else {
       applyMissingState(ctButton, ctConfig);
@@ -907,7 +1022,9 @@ function openDocPopup(
   const popup = document.createElement('div');
   popup.className = 'vpauto-doc-popup';
   popup.dataset.vpautoDocKind = config.kind;
-  const resultTone = config.kind === 'ct' ? 'vpauto-doc-result--ok' : 'vpauto-doc-result--info';
+  const resultTone = config.kind === 'ct'
+    ? `vpauto-doc-result--${config.tone === 'warn' ? 'warn' : 'ok'}`
+    : 'vpauto-doc-result--info';
   popup.innerHTML = `
     <div class="vpauto-doc-popup__surface">
       ${buildPopupHeader(v, config.kind)}
@@ -940,10 +1057,12 @@ function openDocPopup(
   card.appendChild(popup);
   button.setAttribute('aria-expanded', 'true');
 
-  popup.querySelector<HTMLButtonElement>('.vpauto-doc-close')?.addEventListener('click', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    removeDocPopup(button);
+  popup.querySelectorAll<HTMLButtonElement>('.vpauto-doc-close').forEach((closeButton) => {
+    closeButton.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      removeDocPopup(button);
+    });
   });
 }
 
@@ -993,10 +1112,12 @@ function openTextPopup(
   card.appendChild(popup);
   button.setAttribute('aria-expanded', 'true');
 
-  popup.querySelector<HTMLButtonElement>('.vpauto-doc-close')?.addEventListener('click', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    removeDocPopup(button);
+  popup.querySelectorAll<HTMLButtonElement>('.vpauto-doc-close').forEach((closeButton) => {
+    closeButton.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      removeDocPopup(button);
+    });
   });
 }
 
@@ -1049,6 +1170,75 @@ if (!document.getElementById('vpauto-ct-popup-style')) {
   const style = document.createElement('style');
   style.id = 'vpauto-ct-popup-style';
   style.textContent = `
+    .vpauto-doc-design-switcher {
+      margin: 12px 16px;
+      padding: 10px 12px;
+      border: 2px solid #e2e5ea;
+      border-radius: 12px;
+      background: #ffffff;
+      box-shadow: 0 2px 0 #e2e5ea;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      font-family: 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      color: #1a1a2e;
+      position: relative;
+      z-index: 20;
+    }
+
+    .vpauto-doc-design-switcher__title {
+      font-size: 13px;
+      font-weight: 900;
+      color: #4a4a5a;
+    }
+
+    .vpauto-doc-design-switcher__button {
+      min-height: 34px;
+      border: 2px solid #e2e5ea;
+      border-radius: 999px;
+      padding: 7px 13px;
+      background: #ffffff;
+      color: #6b7280;
+      box-shadow: 0 2px 0 #e2e5ea;
+      font: 900 12px/1 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      cursor: pointer;
+      transition: transform 140ms ease, filter 140ms ease, border-color 140ms ease, color 140ms ease, background 140ms ease;
+    }
+
+    .vpauto-doc-design-switcher__button:hover {
+      filter: brightness(0.97);
+      transform: translateY(-1px);
+    }
+
+    .vpauto-doc-design-switcher__button.is-active {
+      background: #e6f9eb;
+      color: #1e8a37;
+      border-color: #1e8a37;
+      box-shadow: 0 2px 0 #1e8a37;
+    }
+
+    .vpauto-doc-design-switcher__button[data-vpauto-design-option="b"].is-active {
+      background: #fff0d6;
+      color: #cc6f00;
+      border-color: #cc6f00;
+      box-shadow: 0 2px 0 #cc6f00;
+    }
+
+    .vpauto-doc-design-switcher__button[data-vpauto-design-option="c"].is-active {
+      background: #fde8e5;
+      color: #b5200a;
+      border-color: #b5200a;
+      box-shadow: 0 2px 0 #b5200a;
+    }
+
+    .vpauto-doc-design-switcher__note {
+      margin-left: auto;
+      font-size: 12px;
+      font-weight: 900;
+      color: #4a4a5a;
+    }
+
     .vpauto-doc-dock {
       position: absolute;
       right: 10px;
@@ -1127,6 +1317,13 @@ if (!document.getElementById('vpauto-ct-popup-style')) {
       color: #1e8a37;
       border-color: #1e8a37;
       box-shadow: 0 2px 0 #1e8a37;
+    }
+
+    .vpauto-ct-badge[data-vpauto-state="confirmed"][data-vpauto-tone="warn"] {
+      background: #fff0d6;
+      color: #cc6f00;
+      border-color: #cc6f00;
+      box-shadow: 0 2px 0 #cc6f00;
     }
 
     .vpauto-ct-badge[data-vpauto-state="missing"] {
@@ -1255,9 +1452,9 @@ if (!document.getElementById('vpauto-ct-popup-style')) {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      font-size: 10px;
+      font-size: 15px;
       font-weight: 900;
-      letter-spacing: 0.06em;
+      letter-spacing: 0;
       flex: 0 0 auto;
     }
 
@@ -1503,6 +1700,12 @@ if (!document.getElementById('vpauto-ct-popup-style')) {
       color: #1e8a37;
     }
 
+    .vpauto-doc-result--warn {
+      background: #fff0d6;
+      border-color: #cc6f00;
+      color: #cc6f00;
+    }
+
     .vpauto-doc-result--info {
       background: #eef8fc;
       border-color: #1fa4c9;
@@ -1624,7 +1827,207 @@ if (!document.getElementById('vpauto-ct-popup-style')) {
       font-weight: 700;
     }
 
+    html[data-vpauto-doc-design="b"] .vpauto-doc-dock,
+    html[data-vpauto-doc-design="c"] .vpauto-doc-dock {
+      left: 10px;
+      right: 10px;
+      bottom: 10px;
+      width: auto;
+      display: flex;
+      align-items: stretch;
+      gap: 7px;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-doc-dock[data-vpauto-has-status="true"],
+    html[data-vpauto-doc-design="c"] .vpauto-doc-dock[data-vpauto-has-status="true"] {
+      bottom: 36px;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-doc-trigger,
+    html[data-vpauto-doc-design="c"] .vpauto-doc-trigger {
+      display: none;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-doc-trigger-wrap,
+    html[data-vpauto-doc-design="c"] .vpauto-doc-trigger-wrap {
+      position: static;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-doc-panel,
+    html[data-vpauto-doc-design="c"] .vpauto-doc-panel {
+      display: block;
+      position: static;
+      min-width: 0;
+      max-width: none;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      box-shadow: none;
+      background: transparent;
+      animation: none;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-doc-panel__list,
+    html[data-vpauto-doc-design="c"] .vpauto-doc-panel__list {
+      flex-direction: row;
+      min-width: 0;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-doc-menu-separator,
+    html[data-vpauto-doc-design="b"] .vpauto-doc-panel > .vpauto-doc-panel__list:last-child,
+    html[data-vpauto-doc-design="c"] .vpauto-doc-menu-separator,
+    html[data-vpauto-doc-design="c"] .vpauto-doc-panel > .vpauto-doc-panel__list:last-child {
+      display: none;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-ct-badge {
+      flex: 0 0 54px;
+      max-width: 54px;
+      min-height: 44px;
+      border-radius: 12px;
+      flex-direction: column;
+      justify-content: center;
+      gap: 3px;
+      padding: 5px 4px;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-ct-badge__dot {
+      width: 9px;
+      height: 9px;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-ct-badge__label {
+      font-size: 0;
+      line-height: 1;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-ct-badge__label::after {
+      content: attr(data-vpauto-compact-label);
+      font-size: 10px;
+      font-weight: 900;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-doc-menu-item {
+      flex: 1 1 0;
+      min-width: 0;
+      min-height: 44px;
+      flex-direction: column;
+      justify-content: center;
+      gap: 3px;
+      padding: 5px 4px;
+      border: 2px solid #e2e5ea;
+      border-radius: 12px;
+      background: #ffffff;
+      box-shadow: 0 2px 0 #e2e5ea;
+      text-align: center;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-doc-menu-item__icon {
+      width: 18px;
+      height: 18px;
+      border-radius: 0;
+      background: transparent !important;
+      font-size: 15px;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-doc-menu-item__body {
+      align-items: center;
+      gap: 0;
+      width: 100%;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-doc-menu-item__label {
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 10px;
+      line-height: 1.05;
+    }
+
+    html[data-vpauto-doc-design="b"] .vpauto-doc-menu-item__meta,
+    html[data-vpauto-doc-design="b"] .vpauto-doc-menu-item__arrow {
+      display: none;
+    }
+
+    html[data-vpauto-doc-design="c"] .vpauto-doc-dock {
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    html[data-vpauto-doc-design="c"] .vpauto-ct-badge {
+      min-height: 28px;
+      padding: 5px 9px;
+      flex: 0 0 auto;
+      background: #9aa1ab;
+      color: #ffffff;
+      border-color: #9aa1ab;
+      box-shadow: none;
+    }
+
+    html[data-vpauto-doc-design="c"] .vpauto-ct-badge[data-vpauto-state="confirmed"] {
+      background: #1fa4c9;
+      color: #ffffff;
+      border-color: #1fa4c9;
+    }
+
+    html[data-vpauto-doc-design="c"] .vpauto-doc-panel__list {
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    html[data-vpauto-doc-design="c"] .vpauto-doc-menu-item {
+      width: auto;
+      min-height: 28px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      border: 0;
+      background: #1fa4c9;
+      color: #ffffff;
+      box-shadow: none;
+      gap: 0;
+    }
+
+    html[data-vpauto-doc-design="c"] .vpauto-doc-menu-item__icon,
+    html[data-vpauto-doc-design="c"] .vpauto-doc-menu-item__meta,
+    html[data-vpauto-doc-design="c"] .vpauto-doc-menu-item__arrow {
+      display: none;
+    }
+
+    html[data-vpauto-doc-design="c"] .vpauto-doc-menu-item__label {
+      color: #ffffff;
+      font-size: 11px;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    html[data-vpauto-doc-design="c"] .vpauto-doc-menu-item[data-vpauto-doc-kind="obs"] {
+      background: #f45ba5;
+    }
+
+    html[data-vpauto-doc-design="c"] .vpauto-doc-menu-item[data-vpauto-doc-kind="eq"] {
+      background: #15b8c8;
+    }
+
+    html[data-vpauto-doc-design="c"] .vpauto-doc-menu-item[data-vpauto-doc-kind="tech"] {
+      background: #9a47ee;
+    }
+
+    html[data-vpauto-doc-design="c"] .vpauto-doc-menu-item[data-vpauto-doc-kind="se"] {
+      background: #55b85b;
+    }
+
     @media (max-width: 960px) {
+      .vpauto-doc-design-switcher {
+        margin: 10px 8px;
+      }
+
+      .vpauto-doc-design-switcher__note {
+        margin-left: 0;
+      }
+
       .vpauto-doc-panel {
         min-width: 200px;
         max-width: min(250px, calc(100vw - 28px));
@@ -1652,6 +2055,17 @@ if (!document.documentElement.dataset.vpautoDocUiBound) {
 
   document.addEventListener('click', (event) => {
     const target = event.target;
+    const designButton = target instanceof Element
+      ? target.closest<HTMLButtonElement>('[data-vpauto-design-option]')
+      : null;
+    if (designButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      const mode = designButton.dataset.vpautoDesignOption;
+      if (mode === 'a' || mode === 'b' || mode === 'c') setDocDesignMode(mode);
+      return;
+    }
+
     if (target instanceof Element && target.closest('.vpauto-doc-dock')) return;
     closeAllDocMenus();
   });

@@ -1116,6 +1116,27 @@ a:hover { text-decoration: underline; }
   margin-top: 2px;
   letter-spacing: 0.02em;
 }
+.vehicle-card__ct {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 4px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+}
+.vehicle-card__ct--ok {
+  color: #1b6e3a;
+  background: rgba(35, 168, 90, 0.12);
+  border-color: rgba(35, 168, 90, 0.4);
+}
+.vehicle-card__ct--missing {
+  color: #b1261d;
+  background: rgba(220, 48, 38, 0.10);
+  border-color: rgba(220, 48, 38, 0.4);
+}
 .vehicle-card__pricing { text-align: right; white-space: nowrap; }
 .vehicle-card__price,
 .vehicle-card__sold-price,
@@ -5029,6 +5050,10 @@ body {
   font-size: 11px;
   color: var(--text-muted);
 }
+.capture-timeline__sale-date {
+  font-size: 11px;
+  color: var(--text-muted);
+}
 .capture-timeline__price {
   font-size: 11px;
   font-family: var(--font-mono);
@@ -5038,6 +5063,11 @@ body {
   font-size: 10px;
   color: var(--text-muted);
   font-style: italic;
+}
+.timeline-event__sale-date {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
 }
 
 /* ── Cross-passage no-capture fallback ─────────────────────────────── */
