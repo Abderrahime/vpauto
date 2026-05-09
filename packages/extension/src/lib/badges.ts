@@ -1,4 +1,10 @@
 import type { VehicleSnapshot, VehicleBadge } from '@vpauto/shared';
+import {
+  getDocument,
+  GlobalWorkerOptions,
+  VerbosityLevel,
+} from 'pdfjs-dist/legacy/build/pdf.mjs';
+import type { TextItem } from 'pdfjs-dist/types/src/display/api';
 import { api } from './api';
 import { probeVehicleDocuments, type VehicleDocProbeResult } from './scraper';
 
@@ -298,6 +304,21 @@ type DocButtonConfig = {
 };
 
 const DOC_DESIGN_STORAGE_KEY = 'vpautoDocDesignMode';
+const CT_PDF_SUMMARY_STORAGE_KEY = 'vpautoCtPdfSummary.v1';
+const MAX_CT_PDF_PAGES = 2;
+const ctPdfSummaryCache = new Map<string, Promise<CtSummary | null>>();
+
+type CtSummary = {
+  label: string;
+  tone: DocTone;
+};
+
+try {
+  GlobalWorkerOptions.workerSrc = new URL(
+    'pdfjs-dist/legacy/build/pdf.worker.mjs',
+    import.meta.url,
+  ).toString();
+} catch {}
 
 function getDocDesignMode(): DocDesignMode {
   const stored = localStorage.getItem(DOC_DESIGN_STORAGE_KEY);
@@ -431,7 +452,7 @@ function renderDocButtonState(button: HTMLButtonElement, config: DocButtonConfig
 function deriveCtSummary(
   result: VehicleDocProbeResult,
   v: Partial<VehicleSnapshot>,
-): { label: string; tone: DocTone } | null {
+): CtSummary | null {
   const candidates = [
     v.observations || '',
     result.observationsText || '',
@@ -455,6 +476,158 @@ function deriveCtSummary(
   }
 
   return null;
+}
+
+function normalizeCtText(text: string): string {
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .trim();
+}
+
+function countCtDefectCodes(section: string): number {
+  const codes = section.match(/\b\d+(?:\.\d+){1,}\.[a-z](?:\.\d+)?\b/g) || [];
+  return new Set(codes).size;
+}
+
+function sliceCtSection(text: string, start: string, stops: string[]): string {
+  const startIndex = text.indexOf(start);
+  if (startIndex < 0) return '';
+
+  const sectionStart = startIndex + start.length;
+  let sectionEnd = text.length;
+  for (const stop of stops) {
+    const index = text.indexOf(stop, sectionStart);
+    if (index >= 0 && index < sectionEnd) sectionEnd = index;
+  }
+  return text.slice(sectionStart, sectionEnd);
+}
+
+function parseCtPdfSummary(text: string): CtSummary | null {
+  const normalized = normalizeCtText(text);
+  if (!normalized) return null;
+
+  const majorSection = sliceCtSection(normalized, 'defaillances majeures', [
+    'defaillances mineures',
+    'document(s) presente',
+    'documents presentes',
+    'mesures realisees',
+    'identite du controleur',
+  ]);
+  const minorSection = sliceCtSection(normalized, 'defaillances mineures', [
+    'defaillances majeures',
+    'document(s) presente',
+    'documents presentes',
+    'mesures realisees',
+    'identite du controleur',
+  ]);
+
+  const majorCount = countCtDefectCodes(majorSection);
+  const minorCount = countCtDefectCodes(minorSection);
+
+  if (majorCount > 0) {
+    return {
+      label: `CT · ${majorCount} défaut${majorCount > 1 ? 's' : ''} majeur${majorCount > 1 ? 's' : ''}`,
+      tone: 'bad',
+    };
+  }
+
+  if (minorCount > 0) {
+    return {
+      label: `CT · ${minorCount} défaut${minorCount > 1 ? 's' : ''} mineur${minorCount > 1 ? 's' : ''}`,
+      tone: 'warn',
+    };
+  }
+
+  if (majorSection.trim()) {
+    return { label: 'CT · défauts majeurs', tone: 'bad' };
+  }
+
+  if (minorSection.trim()) {
+    return { label: 'CT · défauts mineurs', tone: 'warn' };
+  }
+
+  if (/defaillances?\s+mineures?/.test(normalized)) {
+    return { label: 'CT · défauts mineurs', tone: 'warn' };
+  }
+
+  if (/defaillances?\s+majeures?|contre-visite/.test(normalized)) {
+    return { label: 'CT · défauts majeurs', tone: 'bad' };
+  }
+
+  if (/resultat favorable|controle technique favorable|aucune defaillance/.test(normalized)) {
+    return { label: 'CT OK', tone: 'ok' };
+  }
+
+  return null;
+}
+
+async function readCachedCtSummary(url: string): Promise<CtSummary | null> {
+  try {
+    const stored = await chrome.storage.local.get(CT_PDF_SUMMARY_STORAGE_KEY);
+    const raw = (stored[CT_PDF_SUMMARY_STORAGE_KEY] || {}) as Record<string, CtSummary>;
+    return raw[url] || null;
+  } catch {
+    return null;
+  }
+}
+
+async function persistCtSummary(url: string, summary: CtSummary): Promise<void> {
+  try {
+    const stored = await chrome.storage.local.get(CT_PDF_SUMMARY_STORAGE_KEY);
+    const raw = (stored[CT_PDF_SUMMARY_STORAGE_KEY] || {}) as Record<string, CtSummary>;
+    raw[url] = summary;
+    await chrome.storage.local.set({ [CT_PDF_SUMMARY_STORAGE_KEY]: raw });
+  } catch {}
+}
+
+async function extractCtSummaryFromPdf(url: string): Promise<CtSummary | null> {
+  const cached = ctPdfSummaryCache.get(url);
+  if (cached) return cached;
+
+  const promise = (async () => {
+    const stored = await readCachedCtSummary(url);
+    if (stored) return stored;
+
+    const response = await fetch(url, {
+      credentials: 'omit',
+      cache: 'force-cache',
+    });
+    if (!response.ok) return null;
+
+    const buffer = await response.arrayBuffer();
+    const loadingTask = getDocument({
+      data: new Uint8Array(buffer),
+      verbosity: VerbosityLevel.ERRORS,
+    });
+
+    const pdf = await loadingTask.promise;
+    try {
+      const pageCount = Math.min(pdf.numPages, MAX_CT_PDF_PAGES);
+      const chunks: string[] = [];
+      for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
+        const page = await pdf.getPage(pageNumber);
+        const textContent = await page.getTextContent();
+        for (const item of textContent.items) {
+          if ('str' in item) chunks.push((item as TextItem).str);
+        }
+      }
+
+      const summary = parseCtPdfSummary(chunks.join('\n'));
+      if (summary) void persistCtSummary(url, summary);
+      return summary;
+    } finally {
+      await pdf.destroy();
+    }
+  })().catch((error) => {
+    console.warn('[VPauto] CT PDF summary extraction failed:', error);
+    return null;
+  });
+
+  ctPdfSummaryCache.set(url, promise);
+  return promise;
 }
 
 function updateDocDesignSwitcher(mode: DocDesignMode = getDocDesignMode()): void {
@@ -770,6 +943,15 @@ function addDocumentButtons(
       ctConfig.summary = summary?.label || null;
       ctConfig.tone = summary?.tone || 'ok';
       applyConfirmedState(ctButton, ctConfig);
+
+      if (!summary) {
+        void extractCtSummaryFromPdf(result.ctUrl).then((pdfSummary) => {
+          if (!pdfSummary) return;
+          ctConfig.summary = pdfSummary.label;
+          ctConfig.tone = pdfSummary.tone;
+          applyConfirmedState(ctButton, ctConfig);
+        });
+      }
     } else {
       applyMissingState(ctButton, ctConfig);
     }
@@ -1023,8 +1205,14 @@ function openDocPopup(
   popup.className = 'vpauto-doc-popup';
   popup.dataset.vpautoDocKind = config.kind;
   const resultTone = config.kind === 'ct'
-    ? `vpauto-doc-result--${config.tone === 'warn' ? 'warn' : 'ok'}`
+    ? `vpauto-doc-result--${config.tone === 'bad' ? 'bad' : config.tone === 'warn' ? 'warn' : 'ok'}`
     : 'vpauto-doc-result--info';
+  const resultTitle = config.kind === 'ct' && config.summary
+    ? config.summary
+    : popupTitle(config.kind);
+  const resultSubtitle = config.kind === 'ct' && config.summary
+    ? 'Résumé extrait du procès-verbal CT'
+    : popupSubtitle(config.kind);
   popup.innerHTML = `
     <div class="vpauto-doc-popup__surface">
       ${buildPopupHeader(v, config.kind)}
@@ -1032,8 +1220,8 @@ function openDocPopup(
         <div class="vpauto-doc-result ${resultTone}">
           <div class="vpauto-doc-result__icon" aria-hidden="true">${docIcon(config.kind)}</div>
           <div class="vpauto-doc-result__copy">
-            <strong>${esc(popupTitle(config.kind))}</strong>
-            <span>${esc(popupSubtitle(config.kind))}</span>
+            <strong>${esc(resultTitle)}</strong>
+            <span>${esc(resultSubtitle)}</span>
           </div>
         </div>
         <div class="vpauto-doc-preview-frame-shell">
@@ -1324,6 +1512,13 @@ if (!document.getElementById('vpauto-ct-popup-style')) {
       color: #cc6f00;
       border-color: #cc6f00;
       box-shadow: 0 2px 0 #cc6f00;
+    }
+
+    .vpauto-ct-badge[data-vpauto-state="confirmed"][data-vpauto-tone="bad"] {
+      background: #fde8e5;
+      color: #b5200a;
+      border-color: #b5200a;
+      box-shadow: 0 2px 0 #b5200a;
     }
 
     .vpauto-ct-badge[data-vpauto-state="missing"] {
@@ -1704,6 +1899,12 @@ if (!document.getElementById('vpauto-ct-popup-style')) {
       background: #fff0d6;
       border-color: #cc6f00;
       color: #cc6f00;
+    }
+
+    .vpauto-doc-result--bad {
+      background: #fde8e5;
+      border-color: #b5200a;
+      color: #b5200a;
     }
 
     .vpauto-doc-result--info {
