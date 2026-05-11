@@ -4,6 +4,7 @@ import { getApiBaseUrl } from '../lib/config';
 
 const API = getApiBaseUrl();
 const BACKGROUND_FETCH_TIMEOUT_MS = 15000;
+const MAX_CT_PDF_BYTES = 8 * 1024 * 1024;
 
 type BatchTrackingResult = {
   saved: number;
@@ -80,6 +81,64 @@ function requiredProxyPermission(path: string, method: string): VpautoPermission
   if (path.startsWith('/api/vehicles/capture/plan')) return 'captures:plan';
   if (path.startsWith('/api/vehicles/screenshot/')) return 'captures:run';
   return null;
+}
+
+function isAllowedCtPdfUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:'
+      && parsed.hostname === 'cdn.vpauto.fr'
+      && /_CT\.pdf$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+async function fetchCtPdf(url: string): Promise<{
+  base64: string;
+  bytes: number;
+  contentType: string;
+}> {
+  if (!isAllowedCtPdfUrl(url)) {
+    throw new Error('invalid_ct_pdf_url');
+  }
+
+  const response = await fetchWithTimeout(url, {
+    method: 'GET',
+    credentials: 'omit',
+    cache: 'force-cache',
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const contentLength = Number(response.headers.get('content-length') || '0');
+  if (contentLength > MAX_CT_PDF_BYTES) {
+    throw new Error(`ct_pdf_too_large:${contentLength}`);
+  }
+
+  const buffer = await response.arrayBuffer();
+  if (buffer.byteLength > MAX_CT_PDF_BYTES) {
+    throw new Error(`ct_pdf_too_large:${buffer.byteLength}`);
+  }
+
+  return {
+    base64: arrayBufferToBase64(buffer),
+    bytes: buffer.byteLength,
+    contentType: response.headers.get('content-type') || 'application/pdf',
+  };
 }
 
 async function runBatchSave(vehicles: Partial<VehicleSnapshot>[]): Promise<BatchTrackingResult> {
@@ -399,6 +458,43 @@ async function handleRpcMessage(message: any, sender?: chrome.runtime.MessageSen
     }
   }
 
+  if (message.type === 'FETCH_CT_PDF') {
+    const url = String(message.url || '');
+
+    setBackgroundDebug({
+      status: 'ct_pdf_fetch_started',
+      lastStage: 'ct_pdf_fetch_started',
+      lastMethod: 'GET',
+      lastPath: url,
+      lastError: null,
+      lastRequestId: message.requestId,
+    });
+
+    try {
+      const pdf = await fetchCtPdf(url);
+      setBackgroundDebug({
+        status: 'ct_pdf_fetch_success',
+        lastStage: 'ct_pdf_fetch_success',
+        lastMethod: 'GET',
+        lastPath: url,
+        lastError: null,
+        lastRequestId: message.requestId,
+      });
+      return { data: pdf };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      setBackgroundDebug({
+        status: 'ct_pdf_fetch_error',
+        lastStage: 'ct_pdf_fetch_error',
+        lastMethod: 'GET',
+        lastPath: url,
+        lastError: reason,
+        lastRequestId: message.requestId,
+      });
+      return { error: reason };
+    }
+  }
+
   if (message.type === 'RUN_BATCH_SAVE') {
     const access = await getExtensionAccess();
     if (!canAccess(access, 'vehicles:import')) {
@@ -467,7 +563,8 @@ export default defineBackground(() => {
       message.type === 'RUN_BATCH_SAVE' ||
       message.type === 'PING_BG' ||
       message.type === 'CAPTURE_SCREENSHOT' ||
-      message.type === 'PROBE_VPAUTO_URL'
+      message.type === 'PROBE_VPAUTO_URL' ||
+      message.type === 'FETCH_CT_PDF'
     ) {
       void handleRpcMessage(message, sender)
         .then((result) => sendResponse(result))

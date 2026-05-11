@@ -304,13 +304,19 @@ type DocButtonConfig = {
 };
 
 const DOC_DESIGN_STORAGE_KEY = 'vpautoDocDesignMode';
-const CT_PDF_SUMMARY_STORAGE_KEY = 'vpautoCtPdfSummary.v1';
+const CT_PDF_SUMMARY_STORAGE_KEY = 'vpautoCtPdfSummary.v2';
 const MAX_CT_PDF_PAGES = 2;
 const ctPdfSummaryCache = new Map<string, Promise<CtSummary | null>>();
 
 type CtSummary = {
   label: string;
   tone: DocTone;
+};
+
+type CtPdfFetchResponse = {
+  base64: string;
+  bytes: number;
+  contentType: string;
 };
 
 try {
@@ -488,8 +494,12 @@ function normalizeCtText(text: string): string {
 }
 
 function countCtDefectCodes(section: string): number {
-  const codes = section.match(/\b\d+(?:\.\d+){1,}\.[a-z](?:\.\d+)?\b/g) || [];
-  return new Set(codes).size;
+  const codes = new Set<string>();
+  const pattern = /\b\d+\s*(?:\.\s*\d+){1,}\s*\.\s*[a-z]\s*(?:\.\s*\d+)?\b/g;
+  for (const match of section.matchAll(pattern)) {
+    codes.add(match[0].replace(/\s+/g, ''));
+  }
+  return codes.size;
 }
 
 function sliceCtSection(text: string, start: string, stops: string[]): string {
@@ -583,6 +593,59 @@ async function persistCtSummary(url: string, summary: CtSummary): Promise<void> 
   } catch {}
 }
 
+function sendRuntimeMessage<T>(message: Record<string, unknown>): Promise<{ data?: T; error?: string }> {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage(message, (response: { data?: T; error?: string } | undefined) => {
+        const runtimeError = chrome.runtime.lastError?.message;
+        if (runtimeError) {
+          resolve({ error: runtimeError });
+          return;
+        }
+        resolve(response || { error: 'empty_response' });
+      });
+    } catch (error) {
+      resolve({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+}
+
+function base64ToUint8Array(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+async function fetchCtPdfBytes(url: string): Promise<Uint8Array | null> {
+  try {
+    const response = await fetch(url, {
+      credentials: 'omit',
+      cache: 'force-cache',
+    });
+    if (response.ok) {
+      return new Uint8Array(await response.arrayBuffer());
+    }
+    console.warn(`[VPauto] CT PDF direct fetch failed: HTTP ${response.status}`);
+  } catch (error) {
+    console.warn('[VPauto] CT PDF direct fetch failed:', error);
+  }
+
+  const proxied = await sendRuntimeMessage<CtPdfFetchResponse>({
+    type: 'FETCH_CT_PDF',
+    url,
+  });
+
+  if (proxied.error || !proxied.data?.base64) {
+    console.warn('[VPauto] CT PDF background fetch failed:', proxied.error || 'missing_pdf_payload');
+    return null;
+  }
+
+  return base64ToUint8Array(proxied.data.base64);
+}
+
 async function extractCtSummaryFromPdf(url: string): Promise<CtSummary | null> {
   const cached = ctPdfSummaryCache.get(url);
   if (cached) return cached;
@@ -591,15 +654,11 @@ async function extractCtSummaryFromPdf(url: string): Promise<CtSummary | null> {
     const stored = await readCachedCtSummary(url);
     if (stored) return stored;
 
-    const response = await fetch(url, {
-      credentials: 'omit',
-      cache: 'force-cache',
-    });
-    if (!response.ok) return null;
+    const bytes = await fetchCtPdfBytes(url);
+    if (!bytes) return null;
 
-    const buffer = await response.arrayBuffer();
     const loadingTask = getDocument({
-      data: new Uint8Array(buffer),
+      data: bytes,
       verbosity: VerbosityLevel.ERRORS,
     });
 
@@ -616,6 +675,9 @@ async function extractCtSummaryFromPdf(url: string): Promise<CtSummary | null> {
       }
 
       const summary = parseCtPdfSummary(chunks.join('\n'));
+      if (!summary) {
+        console.warn('[VPauto] CT PDF summary extraction found no readable defect text');
+      }
       if (summary) void persistCtSummary(url, summary);
       return summary;
     } finally {
