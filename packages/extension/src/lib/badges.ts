@@ -7,6 +7,10 @@ import {
 import type { TextItem } from 'pdfjs-dist/types/src/display/api';
 import { api } from './api';
 import { probeVehicleDocuments, type VehicleDocProbeResult } from './scraper';
+import {
+  parseCtPdfSummary,
+  type CtParseDiagnostics,
+} from './ctParser';
 
 // ── Document probe cache + concurrency limiter ─────────────────────────────
 //
@@ -304,8 +308,42 @@ type DocButtonConfig = {
 };
 
 const DOC_DESIGN_STORAGE_KEY = 'vpautoDocDesignMode';
-const CT_PDF_SUMMARY_STORAGE_KEY = 'vpautoCtPdfSummary.v2';
-const MAX_CT_PDF_PAGES = 2;
+// v3 invalidates cached summaries written by the previous parser, which
+// systematically failed to detect defect counts on French CT PDFs (the
+// "Défaillance(s) majeure(s)" header escaped the indexOf-based section
+// matcher because of the literal "(s)" parentheses). Bumping the version
+// forces a fresh parse on next render.
+const CT_PDF_SUMMARY_STORAGE_KEY = 'vpautoCtPdfSummary.v3';
+// Cap on concurrent PDF parses. The list-page injector calls
+// `extractCtSummaryFromPdf` once per card with a CT (often 50-100 cards),
+// and each parse fans out into a sendMessage('FETCH_CT_PDF') to the
+// background SW + a pdfjs-dist work item. Without a cap, the MV3 service
+// worker gets saturated, the port-based RPC layer starts timing out
+// ("background_port_timeout") for every other API call on the page, and
+// the CT pipeline itself stalls because sendMessage never resolves. A
+// small cap (3 concurrent) keeps the SW responsive while still parsing
+// the whole list in a few seconds.
+// Concurrency=1 → strictly serialise CT parses. We previously allowed 3,
+// but each parse sends a ~500 KB-2 MB base64-encoded PDF across the SW
+// messaging boundary. Three in flight saturate the SW (synchronous
+// `btoa` + JSON-serialise of huge strings), the SW takes >15 s to
+// respond, and the content-side timer fires before the bytes arrive —
+// observed as every fetch returning "no bytes after 15 s". Serialising
+// the queue keeps each parse fast (~1-2 s end-to-end) and finishes the
+// whole list in roughly the same wall-clock time, but with reliable
+// results instead of all timeouts.
+const CT_PDF_PARSE_CONCURRENCY = 1;
+// French CT reports are usually 2 pages but vehicles with several defects
+// push the "Défaillance(s) mineure(s)" list onto page 3 or 4. Raising
+// the budget is essentially free — `getTextContent()` is cheap and
+// `getDocument` only fetches the byte range it needs.
+const MAX_CT_PDF_PAGES = 4;
+// Set true to surface raw extraction stats in the console for every CT
+// PDF the side panel parses. Useful while iterating on the parser
+// because Chrome's view-source on a PDF doesn't show what the JS layer
+// actually sees. Leave on for now; flip to `false` once the new parser
+// has soaked on real auctions.
+const CT_PARSER_DEBUG = true;
 const ctPdfSummaryCache = new Map<string, Promise<CtSummary | null>>();
 
 type CtSummary = {
@@ -319,11 +357,30 @@ type CtPdfFetchResponse = {
   contentType: string;
 };
 
+// pdfjs needs a worker script URL to spin up its parsing worker. The
+// previous setup used `new URL('pdfjs-dist/legacy/build/pdf.worker.mjs',
+// import.meta.url)` which resolves to a chrome-extension:// path that
+// doesn't exist in the bundle — WXT/Vite never copies the worker file.
+// pdfjs then either silently hangs on `getDocument().promise` (observed
+// in the wild as 70+ "starting parse" logs with zero matching "parse"
+// finish logs) or, in some Chrome builds, falls back to a broken fake
+// worker that times out the page.
+//
+// Fix: ship the worker file in `public/pdf.worker.mjs` so WXT copies it
+// to the extension root, then point pdfjs at the chrome-extension:// URL
+// produced by `chrome.runtime.getURL`. That URL resolves correctly from
+// any content-script context without `web_accessible_resources`
+// gymnastics (content scripts implicitly trust their own origin).
 try {
-  GlobalWorkerOptions.workerSrc = new URL(
-    'pdfjs-dist/legacy/build/pdf.worker.mjs',
-    import.meta.url,
-  ).toString();
+  if (typeof chrome !== 'undefined' && chrome.runtime?.getURL) {
+    // File extension is `.js` (not `.mjs`) on purpose: Vite/WXT skip
+    // `.mjs` files in `public/` (treats them as modules to bundle, not
+    // static assets to copy verbatim). Renaming to `.js` is enough for
+    // it to land in the output untouched — pdfjs's worker bootstrap
+    // doesn't care about the extension, only the MIME type / module
+    // syntax inside the file.
+    GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('pdf.worker.js');
+  }
 } catch {}
 
 function getDocDesignMode(): DocDesignMode {
@@ -484,95 +541,9 @@ function deriveCtSummary(
   return null;
 }
 
-function normalizeCtText(text: string): string {
-  return text
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\s+/g, ' ')
-    .toLowerCase()
-    .trim();
-}
-
-function countCtDefectCodes(section: string): number {
-  const codes = new Set<string>();
-  const pattern = /\b\d+\s*(?:\.\s*\d+){1,}\s*\.\s*[a-z]\s*(?:\.\s*\d+)?\b/g;
-  for (const match of section.matchAll(pattern)) {
-    codes.add(match[0].replace(/\s+/g, ''));
-  }
-  return codes.size;
-}
-
-function sliceCtSection(text: string, start: string, stops: string[]): string {
-  const startIndex = text.indexOf(start);
-  if (startIndex < 0) return '';
-
-  const sectionStart = startIndex + start.length;
-  let sectionEnd = text.length;
-  for (const stop of stops) {
-    const index = text.indexOf(stop, sectionStart);
-    if (index >= 0 && index < sectionEnd) sectionEnd = index;
-  }
-  return text.slice(sectionStart, sectionEnd);
-}
-
-function parseCtPdfSummary(text: string): CtSummary | null {
-  const normalized = normalizeCtText(text);
-  if (!normalized) return null;
-
-  const majorSection = sliceCtSection(normalized, 'defaillances majeures', [
-    'defaillances mineures',
-    'document(s) presente',
-    'documents presentes',
-    'mesures realisees',
-    'identite du controleur',
-  ]);
-  const minorSection = sliceCtSection(normalized, 'defaillances mineures', [
-    'defaillances majeures',
-    'document(s) presente',
-    'documents presentes',
-    'mesures realisees',
-    'identite du controleur',
-  ]);
-
-  const majorCount = countCtDefectCodes(majorSection);
-  const minorCount = countCtDefectCodes(minorSection);
-
-  if (majorCount > 0) {
-    return {
-      label: `CT · ${majorCount} défaut${majorCount > 1 ? 's' : ''} majeur${majorCount > 1 ? 's' : ''}`,
-      tone: 'bad',
-    };
-  }
-
-  if (minorCount > 0) {
-    return {
-      label: `CT · ${minorCount} défaut${minorCount > 1 ? 's' : ''} mineur${minorCount > 1 ? 's' : ''}`,
-      tone: 'warn',
-    };
-  }
-
-  if (majorSection.trim()) {
-    return { label: 'CT · défauts majeurs', tone: 'bad' };
-  }
-
-  if (minorSection.trim()) {
-    return { label: 'CT · défauts mineurs', tone: 'warn' };
-  }
-
-  if (/defaillances?\s+mineures?/.test(normalized)) {
-    return { label: 'CT · défauts mineurs', tone: 'warn' };
-  }
-
-  if (/defaillances?\s+majeures?|contre-visite/.test(normalized)) {
-    return { label: 'CT · défauts majeurs', tone: 'bad' };
-  }
-
-  if (/resultat favorable|controle technique favorable|aucune defaillance/.test(normalized)) {
-    return { label: 'CT OK', tone: 'ok' };
-  }
-
-  return null;
-}
+// Pure parser helpers (`normalizeCtText`, `extractCtDefectCodes`,
+// `parseCtPdfSummary`) live in `./ctParser` so vitest can test them
+// without pulling pdfjs / webextension-polyfill into the test harness.
 
 async function readCachedCtSummary(url: string): Promise<CtSummary | null> {
   try {
@@ -593,19 +564,48 @@ async function persistCtSummary(url: string, summary: CtSummary): Promise<void> 
   } catch {}
 }
 
-function sendRuntimeMessage<T>(message: Record<string, unknown>): Promise<{ data?: T; error?: string }> {
+// The SW's `BACKGROUND_FETCH_TIMEOUT_MS` is 15 s. If we matched it here,
+// the content-side timer would race the SW's response and discard valid
+// PDF bytes that arrived a millisecond late — observed in the wild as a
+// flood of `background_message_timeout` warnings. Pad the content-side
+// timeout so SW gets time to finish, base64-encode (~500 KB-2 MB), and
+// marshal the response across the messaging boundary.
+function sendRuntimeMessage<T>(
+  message: Record<string, unknown>,
+  timeoutMs = 30000,
+): Promise<{ data?: T; error?: string }> {
   return new Promise((resolve) => {
+    // Under Manifest V3 the background service worker can be killed at any
+    // moment (idle, memory pressure, restart cycle). When the SW dies mid-
+    // message, the sendMessage callback is never invoked and the caller
+    // hangs indefinitely. We saw this on the list-page CT pipeline: 100+
+    // simultaneous FETCH_CT_PDF calls overload the SW, the port-based RPC
+    // for other APIs already reports `background_port_timeout`, and these
+    // CT messages then sit in limbo with no resolution — neither the
+    // success path nor the "background fetch failed" warning ever fires.
+    // A hard timeout forces the caller to bail cleanly so the parser can
+    // either retry later or just leave the badge at "CT disponible".
+    let settled = false;
+    const finish = (result: { data?: T; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      finish({ error: 'background_message_timeout' });
+    }, timeoutMs);
     try {
       chrome.runtime.sendMessage(message, (response: { data?: T; error?: string } | undefined) => {
         const runtimeError = chrome.runtime.lastError?.message;
         if (runtimeError) {
-          resolve({ error: runtimeError });
+          finish({ error: runtimeError });
           return;
         }
-        resolve(response || { error: 'empty_response' });
+        finish(response || { error: 'empty_response' });
       });
     } catch (error) {
-      resolve({ error: error instanceof Error ? error.message : String(error) });
+      finish({ error: error instanceof Error ? error.message : String(error) });
     }
   });
 }
@@ -620,30 +620,49 @@ function base64ToUint8Array(base64: string): Uint8Array {
 }
 
 async function fetchCtPdfBytes(url: string): Promise<Uint8Array | null> {
-  try {
-    const response = await fetch(url, {
-      credentials: 'omit',
-      cache: 'force-cache',
-    });
-    if (response.ok) {
-      return new Uint8Array(await response.arrayBuffer());
-    }
-    console.warn(`[VPauto] CT PDF direct fetch failed: HTTP ${response.status}`);
-  } catch (error) {
-    console.warn('[VPauto] CT PDF direct fetch failed:', error);
-  }
-
+  // We used to try a direct `fetch(url)` from the content script before
+  // falling back to the SW proxy. cdn.vpauto.fr lives on a different
+  // origin than www.vpauto.fr, so the browser CORS-blocks every direct
+  // attempt — 100% failure rate, only useful to pollute the console with
+  // `TypeError: Failed to fetch` warnings. Skip straight to the SW path,
+  // which has the `https://cdn.vpauto.fr/*` host permission needed to
+  // bypass CORS for credentialless fetches.
   const proxied = await sendRuntimeMessage<CtPdfFetchResponse>({
     type: 'FETCH_CT_PDF',
     url,
   });
 
   if (proxied.error || !proxied.data?.base64) {
-    console.warn('[VPauto] CT PDF background fetch failed:', proxied.error || 'missing_pdf_payload');
+    console.warn('[VPauto CT] background fetch failed:', proxied.error || 'missing_pdf_payload', 'url:', url);
     return null;
   }
 
   return base64ToUint8Array(proxied.data.base64);
+}
+
+// Simple promise-pool gate. `runWithCtParseSlot` resolves only when one
+// of the `CT_PDF_PARSE_CONCURRENCY` slots is free, then releases the slot
+// on completion. New callers wait their turn in `ctParseWaitQueue`.
+let ctParseActiveSlots = 0;
+const ctParseWaitQueue: Array<() => void> = [];
+
+function acquireCtParseSlot(): Promise<void> {
+  if (ctParseActiveSlots < CT_PDF_PARSE_CONCURRENCY) {
+    ctParseActiveSlots++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    ctParseWaitQueue.push(() => {
+      ctParseActiveSlots++;
+      resolve();
+    });
+  });
+}
+
+function releaseCtParseSlot(): void {
+  ctParseActiveSlots = Math.max(0, ctParseActiveSlots - 1);
+  const next = ctParseWaitQueue.shift();
+  if (next) next();
 }
 
 async function extractCtSummaryFromPdf(url: string): Promise<CtSummary | null> {
@@ -654,42 +673,188 @@ async function extractCtSummaryFromPdf(url: string): Promise<CtSummary | null> {
     const stored = await readCachedCtSummary(url);
     if (stored) return stored;
 
-    const bytes = await fetchCtPdfBytes(url);
-    if (!bytes) return null;
-
-    const loadingTask = getDocument({
-      data: bytes,
-      verbosity: VerbosityLevel.ERRORS,
-    });
-
-    const pdf = await loadingTask.promise;
+    // Cache the storage hit BEFORE entering the queue — only pdfjs work
+    // needs throttling, the localStorage read is cheap.
+    await acquireCtParseSlot();
     try {
-      const pageCount = Math.min(pdf.numPages, MAX_CT_PDF_PAGES);
-      const chunks: string[] = [];
-      for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
-        const page = await pdf.getPage(pageNumber);
-        const textContent = await page.getTextContent();
-        for (const item of textContent.items) {
-          if ('str' in item) chunks.push((item as TextItem).str);
-        }
-      }
-
-      const summary = parseCtPdfSummary(chunks.join('\n'));
-      if (!summary) {
-        console.warn('[VPauto] CT PDF summary extraction found no readable defect text');
-      }
-      if (summary) void persistCtSummary(url, summary);
-      return summary;
+      return await parseCtPdfNow(url);
     } finally {
-      await pdf.destroy();
+      releaseCtParseSlot();
     }
   })().catch((error) => {
-    console.warn('[VPauto] CT PDF summary extraction failed:', error);
+    console.warn('[VPauto CT] summary extraction failed:', error);
     return null;
   });
 
   ctPdfSummaryCache.set(url, promise);
   return promise;
+}
+
+async function parseCtPdfNow(url: string): Promise<CtSummary | null> {
+  if (CT_PARSER_DEBUG) {
+    console.log(`[VPauto CT] starting parse — active=${ctParseActiveSlots}/${CT_PDF_PARSE_CONCURRENCY}, queued=${ctParseWaitQueue.length}, url=${url}`);
+  }
+  const fetchStart = performance.now();
+  const bytes = await fetchCtPdfBytes(url);
+  const fetchMs = Math.round(performance.now() - fetchStart);
+  if (!bytes) {
+    if (CT_PARSER_DEBUG) console.warn(`[VPauto CT] fetch returned no bytes after ${fetchMs}ms for`, url);
+    return null;
+  }
+  if (CT_PARSER_DEBUG) {
+    console.log(`[VPauto CT] fetched ${bytes.byteLength} bytes in ${fetchMs}ms, decoding…`);
+  }
+
+  const loadingTask = getDocument({
+    data: bytes,
+    verbosity: VerbosityLevel.ERRORS,
+  });
+
+  // Race `getDocument` against an explicit timeout so a broken worker
+  // setup is loud instead of silently hanging the parser queue. Before
+  // we shipped the worker in `public/`, this promise would never resolve
+  // for any PDF — 70+ "starting parse" logs without a single "parse {}"
+  // finish was the symptom.
+  let pdf;
+  try {
+    pdf = await Promise.race([
+      loadingTask.promise,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('pdfjs_getDocument_timeout_20s')), 20_000),
+      ),
+    ]);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`[VPauto CT] pdfjs.getDocument failed for ${url}: ${reason}`);
+    return null;
+  }
+  try {
+    const pageCount = Math.min(pdf.numPages, MAX_CT_PDF_PAGES);
+    const chunks: string[] = [];
+    const perPageLengths: number[] = [];
+    const firstItemsPerPage: string[][] = [];
+    let pagesWithText = 0;
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
+      const page = await pdf.getPage(pageNumber);
+      const textContent = await page.getTextContent();
+      let pageHadText = false;
+      let pageCharCount = 0;
+      const pageFirstItems: string[] = [];
+      for (const item of textContent.items) {
+        if ('str' in item) {
+          const str = (item as TextItem).str;
+          if (str) {
+            chunks.push(str);
+            pageCharCount += str.length;
+            if (str.trim()) pageHadText = true;
+            if (pageFirstItems.length < 6) pageFirstItems.push(str);
+          }
+        }
+      }
+      if (pageHadText) pagesWithText++;
+      perPageLengths.push(pageCharCount);
+      firstItemsPerPage.push(pageFirstItems);
+    }
+
+    // pdfjs sometimes returns items at character granularity when the
+    // PDF's text operators are fragmented (each glyph in its own item).
+    // Joining with a space then turns "Défaillance" into "D é f a i l l a n c e",
+    // which the header regex (`defaillances?\s+majeures?`) can never match.
+    // Run the parser against three join strategies and keep the one with
+    // the most evidence (matched header → defect codes → header substring).
+    // The compact strategy is the lifeline for the character-split case.
+    const joinStrategies: Array<{ name: string; join: (c: string[]) => string }> = [
+      { name: 'space', join: (c) => c.join(' ') },
+      { name: 'compact', join: (c) => c.join('') },
+      { name: 'newline', join: (c) => c.join('\n') },
+    ];
+
+    type Attempt = {
+      name: string;
+      rawText: string;
+      summary: CtSummary | null;
+      diagnostics: CtParseDiagnostics;
+    };
+    const attempts: Attempt[] = joinStrategies.map(({ name, join }) => {
+      const rawText = join(chunks);
+      const { summary, diagnostics } = parseCtPdfSummary(rawText);
+      return { name, rawText, summary, diagnostics };
+    });
+
+    const scoreAttempt = (a: Attempt): number => {
+      const codes = a.diagnostics.majorCodeCount + a.diagnostics.minorCodeCount;
+      const headerScore = (a.diagnostics.matchedMajorHeader ? 1 : 0)
+        + (a.diagnostics.matchedMinorHeader ? 1 : 0);
+      const vocabScore = (a.diagnostics.containsDefaillance ? 1 : 0)
+        + (a.diagnostics.containsMajeure ? 1 : 0)
+        + (a.diagnostics.containsMineure ? 1 : 0);
+      const summaryBonus = a.summary ? 10 : 0;
+      return summaryBonus + codes * 5 + headerScore * 3 + vocabScore;
+    };
+
+    const best = attempts.reduce((acc, a) => (scoreAttempt(a) > scoreAttempt(acc) ? a : acc), attempts[0]);
+    const { summary, diagnostics, rawText } = best;
+
+    if (CT_PARSER_DEBUG) {
+      // One compact, greppable log per parsed PDF so we can see what the
+      // extractor saw without flooding the console. The sample is
+      // truncated; the full normalised text never leaves the function.
+      console.log('[VPauto CT] parse', {
+        url,
+        numPages: pdf.numPages,
+        pagesRead: pageCount,
+        pagesWithText,
+        perPageLengths,
+        firstItemsPerPage,
+        chosenJoin: best.name,
+        attemptScores: attempts.map((a) => ({
+          name: a.name,
+          score: scoreAttempt(a),
+          matchedMajor: a.diagnostics.matchedMajorHeader,
+          matchedMinor: a.diagnostics.matchedMinorHeader,
+          major: a.diagnostics.majorCodeCount,
+          minor: a.diagnostics.minorCodeCount,
+        })),
+        rawTextLength: rawText.length,
+        normalizedLength: diagnostics.normalizedLength,
+        containsDefaillance: diagnostics.containsDefaillance,
+        containsMajeure: diagnostics.containsMajeure,
+        containsMineure: diagnostics.containsMineure,
+        containsConstatee: diagnostics.containsConstatee,
+        defaillanceFirstIndex: diagnostics.defaillanceFirstIndex,
+        defaillanceSnippet: diagnostics.defaillanceSnippet,
+        matchedMajor: diagnostics.matchedMajorHeader,
+        matchedMinor: diagnostics.matchedMinorHeader,
+        major: diagnostics.majorCodeCount,
+        minor: diagnostics.minorCodeCount,
+        majorCodes: diagnostics.majorCodes,
+        minorCodes: diagnostics.minorCodes,
+        summary: summary?.label || null,
+        sample: diagnostics.sample,
+      });
+    }
+
+    // If the PDF rendered zero text on every page it's a scanned-image
+    // report (no embedded text layer). pdfjs-dist alone can't read it —
+    // OCR would be needed (e.g. tesseract.js or a backend service).
+    // Surface this explicitly instead of returning null + falling back
+    // to the default "CT disponible" green badge, which wrongly implies
+    // "we read the PDF and it's clean".
+    if (pagesWithText === 0) {
+      console.warn(`[VPauto CT] PDF has no text layer (likely scanned image) — OCR not supported. url=${url}`);
+      const scannedSummary: CtSummary = { label: 'CT · PDF scanné (illisible)', tone: 'warn' };
+      void persistCtSummary(url, scannedSummary);
+      return scannedSummary;
+    }
+
+    if (!summary) {
+      console.warn('[VPauto CT] summary extraction found no readable defect text — sample:', diagnostics.sample);
+    }
+    if (summary) void persistCtSummary(url, summary);
+    return summary;
+  } finally {
+    await pdf.destroy();
+  }
 }
 
 function updateDocDesignSwitcher(mode: DocDesignMode = getDocDesignMode()): void {

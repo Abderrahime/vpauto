@@ -6,6 +6,32 @@ const API = getApiBaseUrl();
 const BACKGROUND_FETCH_TIMEOUT_MS = 15000;
 const MAX_CT_PDF_BYTES = 8 * 1024 * 1024;
 
+// ── SW log relay ──────────────────────────────────────────────────────────
+// Opening the SW DevTools by clicking "service worker" in chrome://extensions
+// is unreliable when the SW is in the "Inactive" state — the link is greyed
+// out in recent Chrome builds. So we mirror every BG log into
+// `chrome.storage.local.vpautoSwLog` (a 300-entry ring buffer). Read it from
+// any page console with:
+//     chrome.storage.local.get('vpautoSwLog', d => console.table(d.vpautoSwLog))
+const SW_LOG_KEY = 'vpautoSwLog';
+const SW_LOG_MAX = 300;
+
+function swLog(level: 'log' | 'warn' | 'error', message: string): void {
+  if (level === 'warn') console.warn(message);
+  else if (level === 'error') console.error(message);
+  else console.log(message);
+  // Fire-and-forget ring-buffer append. We deliberately don't await — the
+  // SW handler must not block on storage I/O for every log line.
+  chrome.storage.local.get(SW_LOG_KEY, (items) => {
+    const existing = Array.isArray(items[SW_LOG_KEY])
+      ? (items[SW_LOG_KEY] as Array<{ t: number; level: string; message: string }>)
+      : [];
+    existing.push({ t: Date.now(), level, message });
+    while (existing.length > SW_LOG_MAX) existing.shift();
+    chrome.storage.local.set({ [SW_LOG_KEY]: existing }).catch(() => {});
+  });
+}
+
 type BatchTrackingResult = {
   saved: number;
   newVehicles: number;
@@ -114,11 +140,25 @@ async function fetchCtPdf(url: string): Promise<{
     throw new Error('invalid_ct_pdf_url');
   }
 
+  // Per-phase timing — the content side reports `background_message_timeout`
+  // at 30 s and we want to know whether the 30 s budget was eaten by the
+  // network fetch, the arrayBuffer read, or the base64 encode. The SW
+  // console (chrome://extensions → Inspect views: service worker) shows
+  // these logs; they cost almost nothing and disambiguate the failure
+  // modes that used to look identical from the content side.
+  const t0 = performance.now();
+  // `cache: 'force-cache'` previously forced the browser HTTP cache to
+  // serve stale entries without revalidation. Inside an MV3 service
+  // worker that cache layer is unreliable — observed as fetches that
+  // hang forever when the SW's process is reused after suspension and
+  // the cached entry has been GC'd. Default cache behaviour is fine
+  // here: CT PDFs are content-addressed (URL contains a hash) and we
+  // already short-circuit at the badge level via `ctPdfSummaryCache`.
   const response = await fetchWithTimeout(url, {
     method: 'GET',
     credentials: 'omit',
-    cache: 'force-cache',
   });
+  const tFetched = performance.now();
 
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
@@ -133,9 +173,23 @@ async function fetchCtPdf(url: string): Promise<{
   if (buffer.byteLength > MAX_CT_PDF_BYTES) {
     throw new Error(`ct_pdf_too_large:${buffer.byteLength}`);
   }
+  const tBuffered = performance.now();
+
+  const base64 = arrayBufferToBase64(buffer);
+  const tEncoded = performance.now();
+
+  swLog(
+    'log',
+    `[VPauto BG] FETCH_CT_PDF ${url} — `
+    + `fetch=${Math.round(tFetched - t0)}ms `
+    + `read=${Math.round(tBuffered - tFetched)}ms `
+    + `base64=${Math.round(tEncoded - tBuffered)}ms `
+    + `bytes=${buffer.byteLength} `
+    + `base64len=${base64.length}`,
+  );
 
   return {
-    base64: arrayBufferToBase64(buffer),
+    base64,
     bytes: buffer.byteLength,
     contentType: response.headers.get('content-type') || 'application/pdf',
   };
@@ -460,37 +514,42 @@ async function handleRpcMessage(message: any, sender?: chrome.runtime.MessageSen
 
   if (message.type === 'FETCH_CT_PDF') {
     const url = String(message.url || '');
-
-    setBackgroundDebug({
-      status: 'ct_pdf_fetch_started',
-      lastStage: 'ct_pdf_fetch_started',
-      lastMethod: 'GET',
-      lastPath: url,
-      lastError: null,
-      lastRequestId: message.requestId,
-    });
+    // Cheap synchronous receipt log — confirms the SW saw the message and
+    // entered the handler even if the fetch path later hangs. If you see
+    // `received` but never `done`/`error`, the SW was killed mid-fetch.
+    swLog('log', `[VPauto BG] FETCH_CT_PDF received url=${url}`);
+    const handlerStart = performance.now();
 
     try {
-      const pdf = await fetchCtPdf(url);
-      setBackgroundDebug({
-        status: 'ct_pdf_fetch_success',
-        lastStage: 'ct_pdf_fetch_success',
-        lastMethod: 'GET',
-        lastPath: url,
-        lastError: null,
-        lastRequestId: message.requestId,
-      });
+      // Race the actual fetch against a hard wall-clock timeout. The
+      // AbortController inside `fetchWithTimeout` *should* fire at 15 s,
+      // but in MV3 service workers `setTimeout` is occasionally swallowed
+      // when Chrome briefly suspends/resumes the SW between fetches. The
+      // hard race guarantees we never burn the content-side 30 s budget.
+      const pdf = await Promise.race([
+        fetchCtPdf(url),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error('sw_hard_timeout_25s')),
+            25_000,
+          ),
+        ),
+      ]);
+      swLog(
+        'log',
+        `[VPauto BG] FETCH_CT_PDF done url=${url} `
+        + `total=${Math.round(performance.now() - handlerStart)}ms `
+        + `bytes=${pdf.bytes}`,
+      );
       return { data: pdf };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      setBackgroundDebug({
-        status: 'ct_pdf_fetch_error',
-        lastStage: 'ct_pdf_fetch_error',
-        lastMethod: 'GET',
-        lastPath: url,
-        lastError: reason,
-        lastRequestId: message.requestId,
-      });
+      swLog(
+        'warn',
+        `[VPauto BG] FETCH_CT_PDF error url=${url} `
+        + `after=${Math.round(performance.now() - handlerStart)}ms `
+        + `reason=${reason}`,
+      );
       return { error: reason };
     }
   }
@@ -537,7 +596,7 @@ async function handleRpcMessage(message: any, sender?: chrome.runtime.MessageSen
 }
 
 export default defineBackground(() => {
-  console.log('[VPauto] Background service worker started');
+  swLog('log', `[VPauto BG] service worker started at ${new Date().toISOString()}`);
   setBackgroundDebug({
     startedAt: new Date().toISOString(),
     status: 'started',
@@ -545,16 +604,52 @@ export default defineBackground(() => {
     lastError: null,
   });
 
-  // Open side panel when clicking the extension icon
-  chrome.action.onClicked.addListener(async (tab) => {
-    if (tab.id) {
-      try {
-        await chrome.sidePanel.open({ tabId: tab.id });
-      } catch {
-        console.log('[VPauto] Side panel not available');
+  // ── Keep-alive ─────────────────────────────────────────────────────────
+  // MV3 evicts idle service workers after ~30 s, which breaks our CT
+  // pipeline (50 vehicles × ~2 s = ~100 s of work). The `chrome.alarms`
+  // API survives SW eviction and respawns the SW when it fires, so
+  // scheduling a 25 s alarm functionally pins the SW alive while the
+  // extension is enabled. The listener is a no-op — the alarm event
+  // itself counts as "activity" and resets Chrome's idle timer.
+  try {
+    chrome.alarms.create('vpauto-keep-alive', {
+      periodInMinutes: 25 / 60, // ~25 s
+    });
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (alarm.name === 'vpauto-keep-alive') {
+        // Intentional no-op. Just touching `performance.now()` here
+        // ensures the V8 engine doesn't optimise the listener away.
+        void performance.now();
       }
-    }
-  });
+    });
+  } catch (error) {
+    swLog('warn', `[VPauto BG] keep-alive setup failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  // Open side panel when clicking the extension icon.
+  //
+  // Guard: `chrome.action` is only defined when the manifest declares an
+  // `"action"` key. The user role used to ship without that key, which
+  // turned this line into a synchronous TypeError ("Cannot read
+  // properties of undefined (reading 'onClicked')"). MV3 treats any
+  // synchronous throw during SW startup as registration failure (status
+  // code 15) — the SW never registers, every `chrome.runtime.sendMessage`
+  // from the content script then sits unanswered until the 30 s timeout
+  // fires. The manifest now declares `action` unconditionally, but we
+  // keep the guard so future builds without it degrade gracefully.
+  if (chrome.action?.onClicked) {
+    chrome.action.onClicked.addListener(async (tab) => {
+      if (tab.id) {
+        try {
+          await chrome.sidePanel.open({ tabId: tab.id });
+        } catch {
+          swLog('log', '[VPauto BG] Side panel not available');
+        }
+      }
+    });
+  } else {
+    swLog('warn', '[VPauto BG] chrome.action is undefined — manifest is missing the "action" key');
+  }
 
   // ── Message handler — Chrome native API for proper async sendResponse ──
   chrome.runtime.onMessage.addListener((message: any, sender: any, sendResponse: (r?: any) => void) => {
