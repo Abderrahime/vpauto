@@ -172,13 +172,23 @@ describe('parseCtPdfSummary — Autovision-style (plain "Défaillances mineures"
     expect(diagnostics.minorCodes).toContain('8.2.12.e.1');
   });
 
-  it('returns "CT · à vérifier" when vocabulary present but no header/code matches', () => {
+  it('returns "CT · à vérifier" when vocabulary present but no header regex matches', () => {
     // Garbled text: defect vocabulary survives substring checks but
-    // neither the major nor the minor header regex matches. Without the
-    // fallback, this returned `null` and the badge fell back to the
-    // misleading green "CT disponible". With the fallback we now warn.
-    const text = 'rapport défaillance majeure constatée éléments non lisibles ici';
-    const { summary } = parseCtPdfSummary(text);
+    // neither the major nor the minor header regex matches (the words
+    // are present but not in the contiguous "défaillance(s) majeure(s)"
+    // / "défaillance(s) mineure(s)" pattern). Without the fallback,
+    // this returned `null` and the badge fell back to the misleading
+    // green "CT disponible". With the fallback we now warn.
+    //
+    // The trick to break the header regex while keeping the substrings
+    // is to interpose other words between "défaillance" and
+    // "majeure"/"mineure" — pdfjs sometimes does this when text items
+    // are reordered.
+    const text = 'défaillance constatée niveau de gravité majeure code illisible';
+    const { summary, diagnostics } = parseCtPdfSummary(text);
+    expect(diagnostics.containsDefaillance).toBe(true);
+    expect(diagnostics.containsMajeure).toBe(true);
+    expect(diagnostics.matchedMajorHeader).toBe(false); // header regex didn't fire
     expect(summary?.label).toBe('CT · à vérifier');
     expect(summary?.tone).toBe('warn');
   });

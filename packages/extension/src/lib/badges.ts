@@ -313,7 +313,13 @@ const DOC_DESIGN_STORAGE_KEY = 'vpautoDocDesignMode';
 // "Défaillance(s) majeure(s)" header escaped the indexOf-based section
 // matcher because of the literal "(s)" parentheses). Bumping the version
 // forces a fresh parse on next render.
-const CT_PDF_SUMMARY_STORAGE_KEY = 'vpautoCtPdfSummary.v3';
+// v4 — added "CT · PDF scanné (illisible)" and "CT · à vérifier" labels.
+// Old cached entries (v3) were null in the most common failure modes
+// (parser returned null → nothing persisted), so the practical impact
+// of the bump is only forcing a re-parse on the URLs that previously
+// returned a summary. Re-parsing is ~80 ms per CT so the page picks up
+// the new labels within a couple of seconds.
+const CT_PDF_SUMMARY_STORAGE_KEY = 'vpautoCtPdfSummary.v4';
 // Cap on concurrent PDF parses. The list-page injector calls
 // `extractCtSummaryFromPdf` once per card with a CT (often 50-100 cards),
 // and each parse fans out into a sendMessage('FETCH_CT_PDF') to the
