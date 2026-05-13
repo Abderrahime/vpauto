@@ -207,6 +207,41 @@ describe('parseCtPdfSummary — DEKRA-style (voluntary control)', () => {
   });
 });
 
+describe('parseCtPdfSummary — Securitest-style clean report (favorable verdict, empty section)', () => {
+  it('returns "CT OK (vide)" when Favorable + defaillance heading but no subsections or codes', () => {
+    // Real Securitest OCR layout — the (6) DEFAILLANCES heading is
+    // present but there are no "Défaillances majeures"/"mineures"
+    // subsections (those only appear when there are defects). Tesseract
+    // sometimes inlines the "Favorable" verdict at the end of the
+    // heading line, so the strict "résultat favorable" pattern misses
+    // it. We still want to label it OK and mark the section as empty.
+    const text = `
+      PROCÈS-VERBAL DE CONTRÔLE TECHNIQUE
+      Contrôle technique périodique 03/04/2026 26007128
+      (7) RÉSULTAT DU CONTRÔLE (6) DÉFAILLANCES ET NIVEAUX DE GRAVITÉ
+      Favorable
+      (8) LIMITE DE VALIDITÉ DU CONTRÔLE RÉALISÉ
+      02/04/2028
+    `;
+    const { summary, diagnostics } = parseCtPdfSummary(text);
+    expect(diagnostics.containsDefaillance).toBe(true);
+    expect(diagnostics.matchedMajorHeader).toBe(false);
+    expect(diagnostics.matchedMinorHeader).toBe(false);
+    expect(summary?.label).toBe('CT OK (vide)');
+    expect(summary?.tone).toBe('ok');
+  });
+
+  it('returns "CT OK" (without vide) when Favorable but no defaillance vocabulary at all', () => {
+    // Extreme verdict-only case — a one-liner certificate where the
+    // OCR didn't pick up any section headers, only the result.
+    const text = 'PROCES-VERBAL CONTROLE TECHNIQUE - Resultat: Favorable';
+    const { summary, diagnostics } = parseCtPdfSummary(text);
+    expect(diagnostics.containsDefaillance).toBe(false);
+    expect(summary?.label).toBe('CT OK');
+    expect(summary?.tone).toBe('ok');
+  });
+});
+
 describe('parseCtPdfSummary — Autovision-style (plain "Défaillances mineures")', () => {
   it('detects a minor defect code in plural-form header', () => {
     // Real Autovision layout: section heading is "Défaillances mineures"
