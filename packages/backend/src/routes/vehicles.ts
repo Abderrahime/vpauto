@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { prisma } from '../db.js';
+import { ocrCtPdf, ocrCacheStats } from '../ocr.js';
 import {
   applyPassageNavigation,
   buildPassagesForVehicle,
@@ -1708,6 +1709,52 @@ app.get('/stats', requirePermission('auction:summary'), async (c) => {
       cities: cities.map((c) => ({ city: c.city, count: c._count })),
     },
   });
+});
+
+// ── CT OCR ──────────────────────────────────────────────────────────────
+// Some French CT (Contrôle Technique) PV PDFs uploaded to cdn.vpauto.fr
+// are scans (printed-then-scanned). They contain a single embedded
+// JPEG, no text layer — pdfjs cannot extract a single character. This
+// endpoint runs OCR (pdftoppm + tesseract) server-side and returns the
+// recognised text. The extension calls it as a fallback when its
+// in-browser parser detects `pagesWithText === 0`.
+//
+// Auth: deliberately permissive — `requirePermission` is NOT applied.
+// CT PVs are public-by-URL (cdn.vpauto.fr serves them without auth) and
+// limiting this would just force every dev/test to authenticate. The
+// `isAllowedCtPdfUrl` guard inside `ocrCtPdf` prevents SSRF: only
+// `https://cdn.vpauto.fr/d/*_CT.pdf` URLs are accepted.
+app.post('/ct-ocr', async (c) => {
+  const body = await c.req.json().catch(() => null) as { url?: unknown } | null;
+  const url = typeof body?.url === 'string' ? body.url : '';
+  if (!url) {
+    return c.json({ success: false, error: 'missing_url' }, 400);
+  }
+
+  try {
+    const result = await ocrCtPdf(url);
+    return c.json({
+      success: true,
+      data: {
+        text: result.text,
+        pages: result.pages,
+        bytes: result.bytes,
+        ocrMs: result.ocrMs,
+        fromCache: result.fromCache,
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const status = message === 'invalid_ct_pdf_url' ? 400 : 500;
+    console.warn(`[VPauto API] CT OCR failed for ${url}:`, message);
+    return c.json({ success: false, error: message }, status);
+  }
+});
+
+// Diagnostic: peek at the OCR cache without forcing a fresh run.
+// Useful during development to confirm the cache is hitting.
+app.get('/ct-ocr/stats', (c) => {
+  return c.json({ success: true, data: ocrCacheStats() });
 });
 
 export default app;

@@ -313,13 +313,15 @@ const DOC_DESIGN_STORAGE_KEY = 'vpautoDocDesignMode';
 // "Défaillance(s) majeure(s)" header escaped the indexOf-based section
 // matcher because of the literal "(s)" parentheses). Bumping the version
 // forces a fresh parse on next render.
-// v4 — added "CT · PDF scanné (illisible)" and "CT · à vérifier" labels.
-// Old cached entries (v3) were null in the most common failure modes
-// (parser returned null → nothing persisted), so the practical impact
-// of the bump is only forcing a re-parse on the URLs that previously
-// returned a summary. Re-parsing is ~80 ms per CT so the page picks up
-// the new labels within a couple of seconds.
-const CT_PDF_SUMMARY_STORAGE_KEY = 'vpautoCtPdfSummary.v4';
+// v5 — invalidates v4 entries that wrongly persisted the
+// "CT · PDF scanné (illisible)" fallback. With v5 we never persist a
+// "give-up" label, so once the backend OCR is reachable, every URL that
+// used to land on the scan-papier branch gets a real OCR pass on its
+// next render. Also adds the voluntary-CT vocabulary ("défauts ou
+// anomalies constatées") so badges show actual defect counts for
+// DEKRA-volontaire reports instead of falling back to the generic
+// warning state.
+const CT_PDF_SUMMARY_STORAGE_KEY = 'vpautoCtPdfSummary.v5';
 // Cap on concurrent PDF parses. The list-page injector calls
 // `extractCtSummaryFromPdf` once per card with a CT (often 50-100 cards),
 // and each parse fans out into a sendMessage('FETCH_CT_PDF') to the
@@ -842,14 +844,66 @@ async function parseCtPdfNow(url: string): Promise<CtSummary | null> {
 
     // If the PDF rendered zero text on every page it's a scanned-image
     // report (no embedded text layer). pdfjs-dist alone can't read it —
-    // OCR would be needed (e.g. tesseract.js or a backend service).
-    // Surface this explicitly instead of returning null + falling back
-    // to the default "CT disponible" green badge, which wrongly implies
-    // "we read the PDF and it's clean".
+    // so we fall back to the backend `/api/vehicles/ct-ocr` endpoint,
+    // which runs `pdftoppm` + Tesseract server-side and returns the OCR
+    // text. We then feed that text to the same `parseCtPdfSummary`
+    // parser so the defect counts come out in the same format
+    // (`CT · N défauts majeurs/mineurs`).
+    //
+    // If OCR fails (backend offline, network glitch, or the PDF really
+    // is unreadable), we surface the ambiguity with a `scan papier`
+    // label rather than silently lying with the default "CT disponible"
+    // green badge.
     if (pagesWithText === 0) {
-      console.warn(`[VPauto CT] PDF has no text layer (likely scanned image) — OCR not supported. url=${url}`);
-      const scannedSummary: CtSummary = { label: 'CT · PDF scanné (illisible)', tone: 'warn' };
-      void persistCtSummary(url, scannedSummary);
+      console.warn(`[VPauto CT] PDF has no text layer (scan) — calling backend OCR for ${url}`);
+      const ocrStart = performance.now();
+      const ocrResponse = await api.ctOcr(url);
+      const ocrMs = Math.round(performance.now() - ocrStart);
+      // `api.ctOcr` uses `request<T>` which unwraps `{success, data}` to
+      // just the inner data (or returns `null` on error). So the
+      // response IS the OCR payload directly — not `{data: payload}`.
+      // The earlier code (and diagnostics) assumed the {data, error}
+      // shape and dropped every successful OCR for that reason.
+      const textLen = ocrResponse?.text?.length || 0;
+      if (textLen > 0) {
+        if (CT_PARSER_DEBUG) {
+          console.log(
+            `[VPauto CT] OCR succeeded in ${ocrMs}ms `
+            + `(backend=${ocrResponse!.ocrMs}ms, cached=${ocrResponse!.fromCache}) — `
+            + `text length=${textLen}, url=${url}`,
+          );
+        }
+        const { summary: ocrSummary, diagnostics: ocrDiag } = parseCtPdfSummary(ocrResponse!.text);
+        if (CT_PARSER_DEBUG) {
+          console.log('[VPauto CT] OCR parse', {
+            url,
+            summary: ocrSummary?.label || null,
+            matchedMajor: ocrDiag.matchedMajorHeader,
+            matchedMinor: ocrDiag.matchedMinorHeader,
+            majorCodes: ocrDiag.majorCodes,
+            minorCodes: ocrDiag.minorCodes,
+            sample: ocrDiag.sample,
+          });
+        }
+        if (ocrSummary) {
+          void persistCtSummary(url, ocrSummary);
+          return ocrSummary;
+        }
+      } else {
+        // `request<T>` returns `null` on any API/network failure, so
+        // there is no separate `error` field to read — the only signal
+        // is "no payload". Distinguish a true null (backend offline /
+        // 500 / timeout) from an empty-text payload (tesseract ran but
+        // produced nothing useful) so the failure mode is greppable.
+        const reason = ocrResponse === null
+          ? 'api_null_response'
+          : 'empty_text';
+        console.warn(`[VPauto CT] OCR fallback failed in ${ocrMs}ms: ${reason} url=${url}`);
+      }
+      const scannedSummary: CtSummary = { label: 'CT · scan papier (ouvrir)', tone: 'warn' };
+      // Don't persist the scan-papier fallback: a future call once the
+      // backend is online should retry the OCR instead of permanently
+      // remembering "we gave up".
       return scannedSummary;
     }
 

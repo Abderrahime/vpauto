@@ -22,6 +22,13 @@ export type CtParseDiagnostics = {
   containsMajeure: boolean;
   containsMineure: boolean;
   containsConstatee: boolean;
+  // Voluntary-CT vocabulary — present in DEKRA-volontaire and similar
+  // reports that prefer "défauts ou anomalies" over the regulatory
+  // "défaillances" wording. Tracked so the fallback can recognise these
+  // PDFs as CT documents even when the header regex misses them.
+  containsDefauts: boolean;
+  containsAnomalies: boolean;
+  containsVolontaire: boolean;
   // Index of the first "defaillance" hit in `normalized`, -1 if absent.
   // Useful to confirm we sliced at the right offset.
   defaillanceFirstIndex: number;
@@ -90,6 +97,9 @@ export function parseCtPdfSummary(text: string): { summary: CtSummary | null; di
     containsMajeure: normalized.includes('majeure'),
     containsMineure: normalized.includes('mineure'),
     containsConstatee: normalized.includes('constatee'),
+    containsDefauts: /\bdefauts?\b/.test(normalized),
+    containsAnomalies: /\banomalies?\b/.test(normalized),
+    containsVolontaire: normalized.includes('volontaire'),
     defaillanceFirstIndex,
     defaillanceSnippet: defaillanceFirstIndex === -1
       ? ''
@@ -116,10 +126,19 @@ export function parseCtPdfSummary(text: string): { summary: CtSummary | null; di
   const majorHeaderPatterns = [
     /defaillances?\s+majeures?\s*:?/g,
     /defaillances?\s+constatees?\s+\(?\s*ne\s+permettant\s+pas/g,
+    // Voluntary-CT variants: some control centres (notably DEKRA on
+    // voluntary inspections) prefer the wording "défauts ou anomalies"
+    // over "défaillances". The major equivalent gates re-validation
+    // exactly like a regulatory "constatées ne permettant pas".
+    /defauts?\s+ou\s+anomalies?\s+constatees?\s+\(?\s*ne\s+permettant\s+pas/g,
+    /defauts?\s+ou\s+anomalies?\s+majeures?/g,
   ];
   const minorHeaderPatterns = [
     /defaillances?\s+mineures?\s*:?/g,
     /autres?\s+defaillances?\s+constatees?/g,
+    // Voluntary-CT minor variants — mirror the patterns above.
+    /autres?\s+defauts?\s+ou\s+anomalies?\s+constatees?/g,
+    /defauts?\s+ou\s+anomalies?\s+mineures?/g,
   ];
 
   function findFirstHeader(patterns: RegExp[]): { match: RegExpExecArray; pattern: RegExp } | null {
@@ -180,6 +199,12 @@ export function parseCtPdfSummary(text: string): { summary: CtSummary | null; di
 
   const isExplicitlyEmpty = (slice: string): boolean =>
     /aucune\s+defaillances?\s+constatees?/.test(slice)
+    // Voluntary-CT "no defect" phrasing — observed verbatim in DEKRA
+    // volontaire PVs: "AUCUNE DEFAILLANCE CONSTATEE DANS LE CADRE DU
+    // CONTROLE TECHNIQUE VOLONTAIRE" or "aucun défaut ou anomalie
+    // constaté(e)".
+    || /aucun(?:e)?\s+defauts?\s+ou\s+anomalies?/.test(slice)
+    || /aucun(?:e)?\s+defauts?\s+constates?/.test(slice)
     || /n[ée]ant/.test(slice.slice(0, 80));
 
   const majorEmpty = majorHeader && isExplicitlyEmpty(majorContent);
@@ -195,10 +220,17 @@ export function parseCtPdfSummary(text: string): { summary: CtSummary | null; di
   diagnostics.majorCodes = majorCodes;
   diagnostics.minorCodes = minorCodes;
 
+  // Prefix labels with "volontaire" when the PDF is a voluntary CT. A
+  // voluntary CT (DEKRA / Norisko / etc. unrequested by the regulator)
+  // doesn't replace a regulatory CT — vehicles auctioned with one need
+  // a real CT before resale. Tagging the badge keeps that distinction
+  // visible without making the user open the PDF.
+  const prefix = diagnostics.containsVolontaire ? 'CT volontaire' : 'CT';
+
   if (majorCount > 0) {
     return {
       summary: {
-        label: `CT · ${majorCount} défaut${majorCount > 1 ? 's' : ''} majeur${majorCount > 1 ? 's' : ''}`,
+        label: `${prefix} · ${majorCount} défaut${majorCount > 1 ? 's' : ''} majeur${majorCount > 1 ? 's' : ''}`,
         tone: 'bad',
       },
       diagnostics,
@@ -208,7 +240,7 @@ export function parseCtPdfSummary(text: string): { summary: CtSummary | null; di
   if (minorCount > 0) {
     return {
       summary: {
-        label: `CT · ${minorCount} défaut${minorCount > 1 ? 's' : ''} mineur${minorCount > 1 ? 's' : ''}`,
+        label: `${prefix} · ${minorCount} défaut${minorCount > 1 ? 's' : ''} mineur${minorCount > 1 ? 's' : ''}`,
         tone: 'warn',
       },
       diagnostics,
@@ -216,32 +248,62 @@ export function parseCtPdfSummary(text: string): { summary: CtSummary | null; di
   }
 
   if ((majorEmpty || !majorHeader) && (minorEmpty || !minorHeader) && (majorHeader || minorHeader)) {
-    return { summary: { label: 'CT OK', tone: 'ok' }, diagnostics };
+    return { summary: { label: `${prefix} OK`, tone: 'ok' }, diagnostics };
   }
 
   if (majorHeader && !majorEmpty && majorContent.trim()) {
-    return { summary: { label: 'CT · défauts majeurs', tone: 'bad' }, diagnostics };
+    return { summary: { label: `${prefix} · défauts majeurs`, tone: 'bad' }, diagnostics };
   }
   if (minorHeader && !minorEmpty && minorContent.trim()) {
-    return { summary: { label: 'CT · défauts mineurs', tone: 'warn' }, diagnostics };
+    return { summary: { label: `${prefix} · défauts mineurs`, tone: 'warn' }, diagnostics };
   }
 
   if (/contre[-\s]?visite/.test(normalized)) {
     return { summary: { label: 'CT · contre-visite', tone: 'bad' }, diagnostics };
   }
-  if (/resultat\s+favorable|controle\s+technique\s+favorable|aucune\s+defaillance/.test(normalized)) {
-    return { summary: { label: 'CT OK', tone: 'ok' }, diagnostics };
+  // Verdict-only detection — we couldn't find a defects header or any
+  // codes, but the report carries a "Favorable" result line. Securitest
+  // and other AFNOR-style PVs only print "Défaillances majeures" /
+  // "mineures" subsection titles when there ARE defects; for clean
+  // reports the (6) DÉFAILLANCES section is empty and our header regex
+  // never fires. Match `favorable` anywhere (the strict
+  // "résultat favorable" form fails on OCR'd scans where tesseract
+  // inlines the next section title between "Résultat" and "Favorable").
+  //
+  // When we ALSO see the "défaillance" / "défauts" vocabulary, we know
+  // the PV did have a defects section that came back empty → suffix
+  // the label with "(vide)" so the user can distinguish "favorable
+  // verdict + empty defects section" from "favorable verdict + no
+  // section recognised at all".
+  if (/\bfavorable\b/.test(normalized) || /aucune\s+defaillance/.test(normalized)) {
+    const sectionExplicitlyEmpty = diagnostics.containsDefaillance
+      || diagnostics.containsDefauts;
+    const label = sectionExplicitlyEmpty
+      ? `${prefix} OK (vide)`
+      : `${prefix} OK`;
+    return { summary: { label, tone: 'ok' }, diagnostics };
   }
 
   // Last resort — we couldn't pin down a count, but the PDF clearly
-  // belongs to the CT vocabulary (contains "défaillance" / "majeure" /
-  // "mineure"). Surface that ambiguity to the user instead of letting
-  // the badge fall back to the default green "CT disponible", which
-  // wrongly suggests "all good" for Autovision and other formats where
-  // pdfjs garbles the layout and our slice-based extraction returns 0
-  // codes. The "à vérifier" wording invites the user to open the PDF.
-  if (diagnostics.containsDefaillance && (diagnostics.containsMajeure || diagnostics.containsMineure)) {
-    return { summary: { label: 'CT · à vérifier', tone: 'warn' }, diagnostics };
+  // belongs to the CT vocabulary. Surface that ambiguity to the user
+  // instead of letting the badge fall back to the default green
+  // "CT disponible", which wrongly suggests "all good" for Autovision
+  // and other formats where pdfjs garbles the layout and our
+  // slice-based extraction returns 0 codes. The "à vérifier" wording
+  // invites the user to open the PDF.
+  //
+  // We accept either the regulatory vocabulary (défaillance + majeure /
+  // mineure) or the voluntary-CT vocabulary (défauts/anomalies +
+  // volontaire) — both signal "this is a CT, but our parser is unsure".
+  const hasRegulatoryVocab = diagnostics.containsDefaillance
+    && (diagnostics.containsMajeure || diagnostics.containsMineure);
+  const hasVoluntaryVocab = (diagnostics.containsDefauts || diagnostics.containsAnomalies)
+    && diagnostics.containsVolontaire;
+  if (hasRegulatoryVocab || hasVoluntaryVocab) {
+    const label = diagnostics.containsVolontaire
+      ? 'CT volontaire · à vérifier'
+      : 'CT · à vérifier';
+    return { summary: { label, tone: 'warn' }, diagnostics };
   }
 
   return { summary: null, diagnostics };

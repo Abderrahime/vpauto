@@ -558,4 +558,29 @@ export const api = {
       }, 10000);
     });
   },
+
+  /**
+   * Backend-side OCR for scanned CT PDFs. The extension calls this when
+   * pdfjs reports `pagesWithText === 0` for a CT URL — meaning the PDF
+   * contains only a JPEG scan and our in-browser parser cannot read it.
+   * The backend runs `pdftoppm` + `tesseract -l fra` and returns the
+   * recognised text, which we then feed to the existing parser to extract
+   * defect counts.
+   *
+   * OCR averages 2-3 s/page on the dev machine, so the timeout budget is
+   * generous (90 s). Results are cached by URL on the backend, so the
+   * second call for the same PDF returns instantly.
+   */
+  ctOcr(url: string) {
+    return request<{
+      text: string;
+      pages: number;
+      bytes: number;
+      ocrMs: number;
+      fromCache: boolean;
+    }>('/api/vehicles/ct-ocr', {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    });
+  },
 };

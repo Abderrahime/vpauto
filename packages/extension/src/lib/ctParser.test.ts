@@ -108,6 +108,59 @@ describe('parseCtPdfSummary — UTAC-style (Défaillance majeure/mineure)', () =
   });
 });
 
+describe('parseCtPdfSummary — voluntary CT (DEKRA volontaire "défauts ou anomalies")', () => {
+  it('prefixes the label with "CT volontaire" when the PDF mentions it', () => {
+    const text = `
+      Procès-verbal du contrôle technique VOLONTAIRE
+      Défauts ou anomalies constatées (ne permettant pas la validation d'un contrôle technique réglementaire) :
+      3.1.2.a Direction — jeu excessif
+      Autres défauts ou anomalies constatées :
+      6.1.2.a Essuie-glace avant
+    `;
+    const { summary, diagnostics } = parseCtPdfSummary(text);
+    expect(diagnostics.containsVolontaire).toBe(true);
+    expect(diagnostics.containsDefauts).toBe(true);
+    expect(diagnostics.matchedMajorHeader).toBe(true);
+    expect(diagnostics.matchedMinorHeader).toBe(true);
+    expect(summary?.label).toBe('CT volontaire · 1 défaut majeur');
+    expect(summary?.tone).toBe('bad');
+  });
+
+  it('returns "CT volontaire OK" when both sections explicitly empty', () => {
+    const text = `
+      Procès-verbal du contrôle technique VOLONTAIRE
+      Défauts ou anomalies constatées (ne permettant pas la validation d'un contrôle technique réglementaire) :
+      AUCUNE DEFAILLANCE CONSTATEE DANS LE CADRE DU CONTROLE TECHNIQUE VOLONTAIRE
+      Autres défauts ou anomalies constatées :
+      AUCUNE DEFAILLANCE CONSTATEE
+    `;
+    const { summary } = parseCtPdfSummary(text);
+    expect(summary?.label).toBe('CT volontaire OK');
+    expect(summary?.tone).toBe('ok');
+  });
+
+  it('returns "CT volontaire · à vérifier" when only boilerplate text is extracted', () => {
+    // Sample text from the user's console — pdfjs only pulled the
+    // legal boilerplate, the actual defect list was further down in the
+    // PDF and got cut off by the page-budget. We don't want a green
+    // "CT disponible" badge on a voluntary CT we couldn't fully parse.
+    const text = `
+      procès-verbal de contrôle technique du contrôle volontaire
+      date d'imprimé : 001460954
+      nature du contrôle du contrôle volontaire
+      défauts ou anomalies constatées installation de contrôle
+      identité du contrôleur
+      le présent procès-verbal résulte d'un contrôle technique dit volontaire
+      qui ne peut être assimilé au contrôle technique obligatoire prévu par le code de la route.
+    `;
+    const { summary, diagnostics } = parseCtPdfSummary(text);
+    expect(diagnostics.containsVolontaire).toBe(true);
+    expect(diagnostics.containsDefauts).toBe(true);
+    expect(summary?.label).toBe('CT volontaire · à vérifier');
+    expect(summary?.tone).toBe('warn');
+  });
+});
+
 describe('parseCtPdfSummary — DEKRA-style (voluntary control)', () => {
   it('detects major defects via "constatées (ne permettant pas..." header', () => {
     const text = `
@@ -119,7 +172,10 @@ describe('parseCtPdfSummary — DEKRA-style (voluntary control)', () => {
       Néant
     `;
     const { summary, diagnostics } = parseCtPdfSummary(text);
-    expect(summary?.label).toBe('CT · 2 défauts majeurs');
+    // "Rapport de contrôle technique volontaire" in the text → label
+    // is prefixed with "CT volontaire" so the user sees this isn't a
+    // regulatory CT (i.e. doesn't replace one for resale purposes).
+    expect(summary?.label).toBe('CT volontaire · 2 défauts majeurs');
     expect(diagnostics.matchedMajorHeader).toBe(true);
     expect(diagnostics.majorCodes).toEqual(['3.1.2.a', '8.2.1.b']);
   });
@@ -133,7 +189,9 @@ describe('parseCtPdfSummary — DEKRA-style (voluntary control)', () => {
       Z.0.0.0.2 OBSERVATIONS Joint d'étanchéité usé
     `;
     const { summary, diagnostics } = parseCtPdfSummary(text);
-    expect(summary?.label).toBe('CT · 1 défaut mineur');
+    // "CONTROLE TECHNIQUE VOLONTAIRE" in the "no defaults" boilerplate
+    // also flips the prefix.
+    expect(summary?.label).toBe('CT volontaire · 1 défaut mineur');
     expect(diagnostics.minorCodes).toEqual(['6.1.2.a']);
   });
 
