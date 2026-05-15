@@ -354,6 +354,17 @@ let pendingRefresh = false;
 const inflightVpautoProbes = new Set<string>();
 
 /**
+ * HashIds already probed during the current sidepanel lifetime.
+ *
+ * Failed HEAD probes used to be eligible again immediately on the next render.
+ * Because `probeCrossAuctionPassages` itself schedules a render when a probe
+ * batch finishes, a transient VPauto/network failure could create an endless
+ * render/probe/render loop. The visible symptom was the panel blinking and
+ * popups/lightboxes closing before the user could click them.
+ */
+const attemptedVpautoProbes = new Set<string>();
+
+/**
  * True while at least one cross-auction passage is being probed. Drives the
  * "Vérification VPauto…" indicator next to the section title and is checked
  * by `renderCrossAuction` to render the badge — completely passive, no DOM
@@ -3272,10 +3283,12 @@ async function probeCrossAuctionPassages(
     if (seenInBatch.has(hashId)) continue;
     if (knownVpauto404Hashes[hashId]) continue;
     if (inflightVpautoProbes.has(hashId)) continue;
+    if (attemptedVpautoProbes.has(hashId)) continue;
     if (currentHashId && hashId === currentHashId) continue;
     if (!/^https:\/\/(?:www\.)?vpauto\.fr\/vehicule\//.test(passage.sourceUrl)) continue;
 
     seenInBatch.add(hashId);
+    attemptedVpautoProbes.add(hashId);
     inflightVpautoProbes.add(hashId);
     toProbe.push({ hashId, url: passage.sourceUrl });
   }
