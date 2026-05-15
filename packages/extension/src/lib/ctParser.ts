@@ -57,9 +57,19 @@ export function normalizeCtText(text: string): string {
     // plural form expected downstream. Without `\s*`, the previous
     // version left an isolated "s" token and the major-header regex
     // (which requires `defaillances?\s+majeures?`) failed silently.
-    .replace(/\s*\(s\)/g, 's')
-    .replace(/\s+/g, ' ')
     .toLowerCase()
+    // French CT reports literally print "Défaillance(s) majeure(s)" with
+    // the `(s)` parenthetical pluralisation. Three OCR variants observed
+    // in the wild break a strict `\(s\)` replacer:
+    //   - "Defaillance (s)"  ← pdfjs splits items, inserting a space
+    //   - "Defaillance!s)"   ← Tesseract reads "(" as "!" on rough scans
+    //   - "DEFAILLANCE(S)"   ← handled by the `.toLowerCase()` above
+    // The pattern below absorbs any optional whitespace before the
+    // bracket, accepts `(`, `!`, or `[` as opener, and `)`, `!`, or `]`
+    // as closer. We only fire after a letter so we don't accidentally
+    // eat lone "(s)" tokens elsewhere in the text (e.g. lists).
+    .replace(/(?<=[a-z])\s*[(!\[]\s*s\s*[)!\]]/g, 's')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
@@ -70,19 +80,26 @@ export function extractCtDefectCodes(section: string): string[] {
   //   - 5-segment with letter: "1.2.3.a.1" (sub-detail)
   //   - 3- or 4-segment numeric only: "8.1.1" / "8.1.1.5"
   //
-  // The leading `(?<![\w.])` lookbehind is critical: without it, DEKRA's
-  // observation marker "Z.0.0.0.2" would falsely match starting at the
-  // "0.0.0.2" tail (3 dotted digits → looks like a defect code). With
-  // the lookbehind we require the leading digit to come right after a
-  // non-word-non-dot character (start of string, space, comma, colon…).
+  // OCR variant: Tesseract sometimes reads dots in the code as commas
+  // ("4,5,2.a.1" observed on Autosur PVs). We accept `[.,]` between
+  // segments and normalise back to dots in the captured string.
   //
-  // The trailing `(?![\w])` lookahead prevents matching the leading
-  // "12.05.20" of a date like "12.05.2024" because the next "2" is a
-  // word character.
+  // Phone-number rejection: French phone numbers also look like dotted
+  // 2-digit groups ("02.35.75.01.01", "05.56.38.43.23"). They always
+  // start with `0`, while defect codes never do (section numbers run
+  // 1-9). We therefore require the first segment to start with `[1-9]`,
+  // which excludes every phone we've seen in cdn.vpauto.fr PVs without
+  // losing any real defect code.
+  //
+  // The leading `(?<![\w.,])` lookbehind prevents the regex from
+  // matching the tail of a longer code (e.g. DEKRA's "Z.0.0.0.2"
+  // observation marker would otherwise yield a false "0.0.0.2").
+  // The trailing `(?![\w])` lookahead avoids matching "12.05.20" inside
+  // dates like "12.05.2024".
   const codes = new Set<string>();
-  const pattern = /(?<![\w.])\d{1,2}\s*\.\s*\d{1,2}\s*\.\s*\d{1,2}(?:\s*\.\s*[a-z])?(?:\s*\.\s*\d{1,2})?(?![\w])/g;
+  const pattern = /(?<![\w.,])[1-9]\d?\s*[.,]\s*\d{1,2}\s*[.,]\s*\d{1,2}(?:\s*[.,]\s*[a-z])?(?:\s*[.,]\s*\d{1,2})?(?![\w])/g;
   for (const match of section.matchAll(pattern)) {
-    codes.add(match[0].replace(/\s+/g, ''));
+    codes.add(match[0].replace(/\s+/g, '').replace(/,/g, '.'));
   }
   return Array.from(codes);
 }
@@ -210,8 +227,47 @@ export function parseCtPdfSummary(text: string): { summary: CtSummary | null; di
   const majorEmpty = majorHeader && isExplicitlyEmpty(majorContent);
   const minorEmpty = minorHeader && isExplicitlyEmpty(minorContent);
 
-  const majorCodes = majorHeader && !majorEmpty ? extractCtDefectCodes(majorContent) : [];
-  const minorCodes = minorHeader && !minorEmpty ? extractCtDefectCodes(minorContent) : [];
+  let majorCodes = majorHeader && !majorEmpty ? extractCtDefectCodes(majorContent) : [];
+  let minorCodes = minorHeader && !minorEmpty ? extractCtDefectCodes(minorContent) : [];
+
+  // Verdict positions — used both for negative-verdict labelling and
+  // to break the tie between "Favorable" and "Défavorable" when both
+  // appear (regulatory PVs print "Défavorable" as a column label even
+  // on Favorable reports — `Informations sur le contrôle technique
+  // défavorable`). The verdict is whichever word appears first; the
+  // later occurrence is almost always part of a section header.
+  const favorableIdx = normalized.search(/\bfavorable\b/);
+  const defavorableIdx = normalized.search(/\bdefavorable\b/);
+  const contreVisiteIdx = normalized.search(/contre[-\s]?visite/);
+  const isFavorable = favorableIdx !== -1
+    && (defavorableIdx === -1 || favorableIdx < defavorableIdx);
+  const isDefavorable = defavorableIdx !== -1
+    && (favorableIdx === -1 || defavorableIdx < favorableIdx);
+  const isContreVisite = contreVisiteIdx !== -1;
+
+  // When neither header matched but codes appear elsewhere in the PV
+  // (regulatory periodic CTs with no per-severity sub-headings; Autosur
+  // ones where Tesseract reads dots as commas), we still want to count
+  // them. Classify by verdict:
+  //   - Favorable + codes → minor (Favorable means the CT passed; any
+  //     codes therefore can only be minor — major would force a contre-
+  //     visite or "Défavorable" verdict)
+  //   - Défavorable + codes → major
+  //   - neither verdict → leave them unclassified
+  let unclassifiedCount = 0;
+  if (!majorHeader && !minorHeader) {
+    const globalCodes = extractCtDefectCodes(normalized);
+    if (globalCodes.length > 0) {
+      if (isFavorable && !isDefavorable) {
+        minorCodes = globalCodes;
+      } else if (isDefavorable) {
+        majorCodes = globalCodes;
+      } else {
+        unclassifiedCount = globalCodes.length;
+      }
+    }
+  }
+
   const majorCount = majorCodes.length;
   const minorCount = minorCodes.length;
 
@@ -247,64 +303,47 @@ export function parseCtPdfSummary(text: string): { summary: CtSummary | null; di
     };
   }
 
-  if ((majorEmpty || !majorHeader) && (minorEmpty || !minorHeader) && (majorHeader || minorHeader)) {
-    return { summary: { label: `${prefix} OK`, tone: 'ok' }, diagnostics };
+  if (unclassifiedCount > 0) {
+    return {
+      summary: {
+        label: `${prefix} · ${unclassifiedCount} défaut${unclassifiedCount > 1 ? 's' : ''}`,
+        tone: 'warn',
+      },
+      diagnostics,
+    };
   }
 
-  if (majorHeader && !majorEmpty && majorContent.trim()) {
-    return { summary: { label: `${prefix} · défauts majeurs`, tone: 'bad' }, diagnostics };
+  if (isContreVisite) {
+    return { summary: { label: `${prefix} · contre-visite`, tone: 'bad' }, diagnostics };
   }
-  if (minorHeader && !minorEmpty && minorContent.trim()) {
-    return { summary: { label: `${prefix} · défauts mineurs`, tone: 'warn' }, diagnostics };
+  if (isDefavorable) {
+    return { summary: { label: `${prefix} · défavorable`, tone: 'bad' }, diagnostics };
   }
 
-  if (/contre[-\s]?visite/.test(normalized)) {
-    return { summary: { label: 'CT · contre-visite', tone: 'bad' }, diagnostics };
-  }
-  // Verdict-only detection — we couldn't find a defects header or any
-  // codes, but the report carries a "Favorable" result line. Securitest
-  // and other AFNOR-style PVs only print "Défaillances majeures" /
-  // "mineures" subsection titles when there ARE defects; for clean
-  // reports the (6) DÉFAILLANCES section is empty and our header regex
-  // never fires. Match `favorable` anywhere (the strict
-  // "résultat favorable" form fails on OCR'd scans where tesseract
-  // inlines the next section title between "Résultat" and "Favorable").
-  //
-  // When we ALSO see the "défaillance" / "défauts" vocabulary, we know
-  // the PV did have a defects section that came back empty → suffix
-  // the label with "(vide)" so the user can distinguish "favorable
-  // verdict + empty defects section" from "favorable verdict + no
-  // section recognised at all".
-  if (/\bfavorable\b/.test(normalized) || /aucune\s+defaillance/.test(normalized)) {
-    const sectionExplicitlyEmpty = diagnostics.containsDefaillance
-      || diagnostics.containsDefauts;
-    const label = sectionExplicitlyEmpty
-      ? `${prefix} OK (vide)`
-      : `${prefix} OK`;
+  // No defects, no negative verdict — assume the CT passed. We mark
+  // it "(vide)" when the PV explicitly mentions a defects section
+  // (défaillance / défauts / anomalies vocabulary): that confirms
+  // tesseract did see a defects section and it came back empty,
+  // rather than the parser missing it entirely. For voluntary CTs
+  // without any defects vocabulary (AutoSecurite voluntary PVs that
+  // only show measurement tables), drop "(vide)" — the absence of
+  // any defect listing is itself the signal.
+  const hasDefectsSectionVocab = diagnostics.containsDefaillance
+    || diagnostics.containsDefauts
+    || diagnostics.containsAnomalies;
+  const hasAnyCtVocab = hasDefectsSectionVocab
+    || diagnostics.containsVolontaire
+    || /controle\s+technique/.test(normalized);
+
+  if (isFavorable || hasAnyCtVocab) {
+    const explicitlyEmpty = hasDefectsSectionVocab
+      || !!(majorEmpty)
+      || !!(minorEmpty);
+    const label = explicitlyEmpty ? `${prefix} OK (vide)` : `${prefix} OK`;
     return { summary: { label, tone: 'ok' }, diagnostics };
   }
 
-  // Last resort — we couldn't pin down a count, but the PDF clearly
-  // belongs to the CT vocabulary. Surface that ambiguity to the user
-  // instead of letting the badge fall back to the default green
-  // "CT disponible", which wrongly suggests "all good" for Autovision
-  // and other formats where pdfjs garbles the layout and our
-  // slice-based extraction returns 0 codes. The "à vérifier" wording
-  // invites the user to open the PDF.
-  //
-  // We accept either the regulatory vocabulary (défaillance + majeure /
-  // mineure) or the voluntary-CT vocabulary (défauts/anomalies +
-  // volontaire) — both signal "this is a CT, but our parser is unsure".
-  const hasRegulatoryVocab = diagnostics.containsDefaillance
-    && (diagnostics.containsMajeure || diagnostics.containsMineure);
-  const hasVoluntaryVocab = (diagnostics.containsDefauts || diagnostics.containsAnomalies)
-    && diagnostics.containsVolontaire;
-  if (hasRegulatoryVocab || hasVoluntaryVocab) {
-    const label = diagnostics.containsVolontaire
-      ? 'CT volontaire · à vérifier'
-      : 'CT · à vérifier';
-    return { summary: { label, tone: 'warn' }, diagnostics };
-  }
-
+  // Not even a CT — return null so the badge falls back to its
+  // confirmed-state default ("CT disponible").
   return { summary: null, diagnostics };
 }

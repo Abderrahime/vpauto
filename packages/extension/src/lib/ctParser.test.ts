@@ -81,7 +81,7 @@ describe('parseCtPdfSummary — UTAC-style (Défaillance majeure/mineure)', () =
     expect(diagnostics.minorCodes).toEqual(['6.1.2.a', '8.1.1']);
   });
 
-  it('returns "CT OK" when both sections are explicitly empty', () => {
+  it('returns "CT OK (vide)" when both sections are explicitly empty', () => {
     const text = `
       Défaillance(s) majeure(s) :
       Néant
@@ -90,7 +90,11 @@ describe('parseCtPdfSummary — UTAC-style (Défaillance majeure/mineure)', () =
       Résultat du contrôle technique favorable
     `;
     const { summary } = parseCtPdfSummary(text);
-    expect(summary?.label).toBe('CT OK');
+    // "(vide)" suffix flags that the parser DID see a defects section
+    // (the "Défaillance(s) majeure(s)" / "mineure(s)" headers) and it
+    // came back empty — distinguishes "favorable + empty section" from
+    // "favorable + no section recognised".
+    expect(summary?.label).toBe('CT OK (vide)');
     expect(summary?.tone).toBe('ok');
   });
 
@@ -126,7 +130,7 @@ describe('parseCtPdfSummary — voluntary CT (DEKRA volontaire "défauts ou anom
     expect(summary?.tone).toBe('bad');
   });
 
-  it('returns "CT volontaire OK" when both sections explicitly empty', () => {
+  it('returns "CT volontaire OK (vide)" when both sections explicitly empty', () => {
     const text = `
       Procès-verbal du contrôle technique VOLONTAIRE
       Défauts ou anomalies constatées (ne permettant pas la validation d'un contrôle technique réglementaire) :
@@ -135,15 +139,18 @@ describe('parseCtPdfSummary — voluntary CT (DEKRA volontaire "défauts ou anom
       AUCUNE DEFAILLANCE CONSTATEE
     `;
     const { summary } = parseCtPdfSummary(text);
-    expect(summary?.label).toBe('CT volontaire OK');
+    expect(summary?.label).toBe('CT volontaire OK (vide)');
     expect(summary?.tone).toBe('ok');
   });
 
-  it('returns "CT volontaire · à vérifier" when only boilerplate text is extracted', () => {
+  it('returns "CT volontaire OK (vide)" when only boilerplate text is extracted', () => {
     // Sample text from the user's console — pdfjs only pulled the
     // legal boilerplate, the actual defect list was further down in the
-    // PDF and got cut off by the page-budget. We don't want a green
-    // "CT disponible" badge on a voluntary CT we couldn't fully parse.
+    // PDF and got cut off by the page-budget. We've decided that a
+    // voluntary CT with défauts/défaillance vocabulary + no parsed
+    // codes is more usefully labelled "OK (vide)" than the previous
+    // pessimistic "à vérifier" — for any of the user's seven sample
+    // PDFs the OK reading turned out to be correct.
     const text = `
       procès-verbal de contrôle technique du contrôle volontaire
       date d'imprimé : 001460954
@@ -156,8 +163,8 @@ describe('parseCtPdfSummary — voluntary CT (DEKRA volontaire "défauts ou anom
     const { summary, diagnostics } = parseCtPdfSummary(text);
     expect(diagnostics.containsVolontaire).toBe(true);
     expect(diagnostics.containsDefauts).toBe(true);
-    expect(summary?.label).toBe('CT volontaire · à vérifier');
-    expect(summary?.tone).toBe('warn');
+    expect(summary?.label).toBe('CT volontaire OK (vide)');
+    expect(summary?.tone).toBe('ok');
   });
 });
 
@@ -195,7 +202,7 @@ describe('parseCtPdfSummary — DEKRA-style (voluntary control)', () => {
     expect(diagnostics.minorCodes).toEqual(['6.1.2.a']);
   });
 
-  it('returns "CT OK" when DEKRA report has no defects', () => {
+  it('returns "CT OK (vide)" when DEKRA report has no defects', () => {
     const text = `
       Défaillance(s) constatée(s) (ne permettant pas la validation d'un contrôle technique réglementaire) :
       AUCUNE DEFAILLANCE CONSTATEE
@@ -203,7 +210,10 @@ describe('parseCtPdfSummary — DEKRA-style (voluntary control)', () => {
       AUCUNE DEFAILLANCE CONSTATEE
     `;
     const { summary } = parseCtPdfSummary(text);
-    expect(summary?.label).toBe('CT OK');
+    // The "défaillance" vocabulary is present (in the section headers
+    // and the "AUCUNE DEFAILLANCE" lines) so the parser tags the empty
+    // section with "(vide)".
+    expect(summary?.label).toBe('CT OK (vide)');
   });
 });
 
@@ -265,25 +275,21 @@ describe('parseCtPdfSummary — Autovision-style (plain "Défaillances mineures"
     expect(diagnostics.minorCodes).toContain('8.2.12.e.1');
   });
 
-  it('returns "CT · à vérifier" when vocabulary present but no header regex matches', () => {
+  it('returns "CT OK (vide)" when vocabulary present but no header regex and no codes', () => {
     // Garbled text: defect vocabulary survives substring checks but
-    // neither the major nor the minor header regex matches (the words
-    // are present but not in the contiguous "défaillance(s) majeure(s)"
-    // / "défaillance(s) mineure(s)" pattern). Without the fallback,
-    // this returned `null` and the badge fell back to the misleading
-    // green "CT disponible". With the fallback we now warn.
-    //
-    // The trick to break the header regex while keeping the substrings
-    // is to interpose other words between "défaillance" and
-    // "majeure"/"mineure" — pdfjs sometimes does this when text items
-    // are reordered.
+    // neither the major nor the minor header regex matches AND no
+    // defect codes were extractable. We used to flag this "à vérifier"
+    // (warn tone) defensively. Real-world testing on the user's PVs
+    // showed every such case was actually a clean CT — the heading
+    // appears in column titles or boilerplate even when the section
+    // is empty. We now optimistically label it OK (vide).
     const text = 'défaillance constatée niveau de gravité majeure code illisible';
     const { summary, diagnostics } = parseCtPdfSummary(text);
     expect(diagnostics.containsDefaillance).toBe(true);
     expect(diagnostics.containsMajeure).toBe(true);
     expect(diagnostics.matchedMajorHeader).toBe(false); // header regex didn't fire
-    expect(summary?.label).toBe('CT · à vérifier');
-    expect(summary?.tone).toBe('warn');
+    expect(summary?.label).toBe('CT OK (vide)');
+    expect(summary?.tone).toBe('ok');
   });
 });
 

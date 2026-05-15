@@ -1,0 +1,66 @@
+PROCÈS-VERBAL Securitest
+DE CONTRÔLE VOLONTAIRE
+D'UN VÉHICULE AUTOMOBILE
+
+N° D'IMPRIMÉ T 01185206 Exemplaire conservé par le centre
+TYPE DE CONTRÔLE VOLONTAIRE DATE DU CONTRÔLE | N° DU PROCÈS-VERBAL
+Contrôle volontaire total 30/04/2026 26000335
+
+FONCTIONS CONTRÔLÉES DÉFAILLANCES CONSTATÉES
+
+Ensemble des points visés par l'annexe 1 de l'arrêté
+du 18 juin 1991 modifié.
+
+2
+IDENTIFICATION DU CENTRE DE CONTRÔLE
+N° D'AGRÉMENT : S013T405
+(RAISON SOCIALE : SARL CONTROLE TECHNIQUE MIRAMAS
+(8) COORDONNÉES : 64 BOULEVARD ARISTIDE BRIAND
+13140 MIRAMAS
+Tél : 04 42 55 07 92
+(9) IDENTITÉ DU CONTRÔLEUR
+N° D'AGRÉMENT:  013F1175
+NOM ET PRÉNOM: Non renseignés
+SIGNATURE :
+IDENTIFICATION DU VÉHICULE à
+
+| Date de 1ère mise
+(2) Immatriculation et pays Date d'immatriculation en circulation
+
+GQ-623-XG (F) Î 28/08/2023 ] 28/08/2023 )
+
+Marque Désignation commerciale
+RENAULT ARKANA E-TECH )
+(1) N° dans la série du type (VIN) (5) Catégori
+
+VF1RJLOO8UC427158
+Type / CNIT Energie
+MI0RENVPE65J677 | EH ]
+
+Document(s) présenté(s)
+
+Photocopie du certificat d'immatriculation visée par un commissaire-priseur
+où un huissier de justice
+
+J
+
+KILOMÉTRAGE RELEVÉ MESURES RÉALISÉES ET VALEURS LIMITES CORRESPONDANTES
+108392 AVANT ARRIERE
+G D G D
+Ripage (-8 à +8 m/km) : +4.0 m/km
+Dissymétrie suspension (< 30%) : 2% 4%
+Forces verticales : 865 daN 626 daN
+Frein de service
+Forces de freinage : 350 daN 308 daN 231 daN 199 daN
+Déséquiibre (<20%) : 12% 14%
+Forces de freinage (efficacité) : 350 daN 308 daN 231 daN 199 daN
+
+Taux d'efficacité global (258 %) : 72 %
+Frein de stationnement Taux d'efficacité (218 %) : 28 %
+
+Émissions à l'échappement
+CO ralenti (<0.3 %) : 0 % CO ralenti accéléré (£0.2 %): 0 %  Lambda (0.97 à 1.03) :0.999
+
+Feux de croisement (-2.5 % à -0.5 %) : -2.2 % -19%
+
+

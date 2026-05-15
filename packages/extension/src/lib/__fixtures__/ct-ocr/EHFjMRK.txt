@@ -1,0 +1,68 @@
+PROCÈS-VERBAL Securitest
+DE CONTRÔLE VOLONTAIRE
+
+D'UN VÉHICULE AUTOMOBILE
+
+N° D'IMPRIMÉ T 01185185 Exemplaire conservé par le centre
+TYPE DE CONTRÔLE VOLONTAIRE DATE DU CONTRÔLE | N° DU PROCÈS-VERBAL
+Contrôle volontaire total 08/04/2026 26000314
+
+FONCTIONS CONTRÔLÉES DÉFAILLANCES CONSTATÉES
+
+Ensemble des points visés par l'annexe 1 de l'arrêté
+du 18 juin 1991 modifié.
+
+2
+IDENTIFICATION DU CENTRE DE CONTRÔLE
+N° D'AGRÉMENT : S013T405
+(RAISON SOCIALE : SARL CONTROLE TECHNIQUE MIRAMAS
+(8) COORDONNÉES : 64 BOULEVARD ARISTIDE BRIAND
+13140 MIRAMAS
+Tél : 04 42 55 07 92
+(9) IDENTITÉ DU CONTRÔLEUR
+N° D'AGRÉMENT:  013F1175
+NOM ET PRÉNOM: Non renseignés
+SIGNATURE :
+IDENTIFICATION DU VÉHICULE à
+
+| Date de 1ère mise
+(2) Immatriculation et pays Date d'immatriculation en circulation
+
+GT-807-HM (F) Î 28/12/2023 ] 28/12/2023 )
+
+Marque Désignation commerciale
+FORD PUMA )
+(1) N° dans la série du type (VIN) (5) Catégori
+
+WF02XXERK2PM39260
+Type / CNIT Energie
+M10FRDVP556K566 | FH ]
+
+Document(s) présenté(s)
+
+Photocopie du certificat d'immatriculation visée par un commissaire-priseur
+où un huissier de justice
+
+J
+
+KILOMÉTRAGE RELEVÉ MESURES RÉALISÉES ET VALEURS LIMITES CORRESPONDANTES
+30303 AVANT ARRIERE
+G D G D
+Ripage (-8 à +8 m/km) : +0.0 m/km
+Dissymétrie suspension (< 30%) : 2% 2%
+Forces verticales : 793 daN 497 daN
+Frein de service
+Forces de freinage : 287 daN 276 daN 228 daN 205 daN
+Déséquiibre (<20%) : 4% 11%
+Forces de freinage (efficacité) : 287 daN 276 daN 228 daN 205 daN
+
+Taux d'efficacité global (258 %) : 77 %
+Frein de stationnement Taux d'efficacité (218 %) : 23 %
+
+Émissions à l'échappement
+CO ralenti (<0.3 %) : 0 % CO ralenti accéléré (<0.2 %): 0 %  Lambda (0.97 à 1.03) :1.001
+
+Feux de croisement (-3 % à -0.5 %) : -2.4 % 18%
+Feux de brouillard avant (-3.5 % à -1.0 %) : -3.1 % 19%
+
+
